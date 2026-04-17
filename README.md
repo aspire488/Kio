@@ -1,7 +1,7 @@
 <p align="center">
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:1a1b27,100:70a5fd&height=220&section=header&text=KIO&fontSize=42&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Modular%20Local%20AI%20Assistant&descAlignY=56&descSize=16"/>
 </p><p align="center">
-<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=20&pause=1000&color=70A5FD&center=true&vCenter=true&width=700&lines=Local-first+AI+Assistant;Built+for+Real+Automation;Designed+for+Everyday+Machines"/>
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=20&pause=900&color=70A5FD&center=true&vCenter=true&width=720&lines=Run+real+commands%2C+not+just+conversations.;Automation+that+works+on+your+machine.;Lightweight.+Modular.+Local-first."/>
 </p><p align="center">
 <a href="https://github.com/aspire488/Kio">
 <img src="https://img.shields.io/badge/Status-WIP-orange?style=for-the-badge"/>
@@ -77,18 +77,21 @@ python src/core/main.py
 
 Supported Commands
 
-Command| Description
-"time"| Returns current system time
-"open <app>"| Simulates execution
-"echo <text>"| Returns input
+Command | Description
+"time" | Returns current system time
+"open <app>" | Opens real system applications (Windows)
+"echo <text>" | Returns input
 
 Example
 
 KIO> time
 2026-04-17 12:31:55
 
+KIO> open notepad
+Opened: notepad
+
 KIO> open chrome
-Executing: open chrome
+Opened: Chrome
 
 KIO> echo hello
 hello
@@ -104,11 +107,11 @@ Input → Parse → Route → Execute → Output
 📊 System Overview
 
 User Input
-   ↓
+↓
 Command Router
-   ↓
+↓
 System Operator
-   ↓
+↓
 Execution Output
 
 ---
@@ -121,8 +124,11 @@ kio/
 │   ├── plugins/
 │   └── requirements.txt
 ├── config/
+│   └── config.toml
 ├── tools/
+│   └── debug/
 ├── data/
+│   └── memory/
 ├── docs/
 └── README.md
 
@@ -149,15 +155,16 @@ python -m core.main
 ⚠️ Current Status
 
 - ⚡ Basic command routing implemented
-- ⚠️ Execution layer simplified
+- ⚡ Basic OS-level application execution implemented (Windows)
 - ⚠️ Plugin system not integrated
-- ⚠️ No real OS-level automation yet
+- ⚠️ Limited command coverage
 
 ---
 
 🚧 Limitations
 
-- Execution is simulated
+- Only basic application execution supported
+- No file/system control yet
 - No AI layer yet
 - No UI or voice system
 - Parsing is minimal
@@ -200,10 +207,10 @@ Phase 5 — Extensions
 
 ⚡ Performance Targets
 
-Metric| Target
-RAM usage| ≤170 MB
-Startup time| <2 seconds
-CPU usage| Minimal
+Metric | Target
+RAM usage | ≤170 MB
+Startup time | <2 seconds
+CPU usage | Minimal
 
 ---
 
@@ -284,9 +291,7 @@ Built for:
 ---
 
 <p align="center">
-<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=18&pause=1000&color=70A5FD&center=true&vCenter=true&width=650&lines=If+Jarvis+feels+impossible+on+your+machine...;KIO+is+how+you+start+anyway."/>
-</p>
-
-<p align="center">
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=18&pause=900&color=70A5FD&center=true&vCenter=true&width=700&lines=From+commands+to+capability.;From+ideas+to+execution.;KIO+turns+your+system+into+something+that+actually+acts."/>
+</p><p align="center">
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:70a5fd,100:0d1117&height=120&section=footer"/>
 </p>
