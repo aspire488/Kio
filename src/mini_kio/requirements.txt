@@ -1,0 +1,28 @@
+# Mini-KIO Dependencies
+# Install with: pip install -r requirements.txt
+# Python 3.10+
+
+# Telegram bot (21.7.2 does not exist on PyPI; 22.x is current stable)
+python-telegram-bot==22.7
+
+# HTTP client (must satisfy PTB: httpx>=0.27,<0.29)
+httpx>=0.27,<0.29
+
+# Environment variables
+python-dotenv>=1.0.1,<2
+
+# Fuzzy string matching for natural language
+rapidfuzz>=3.0.0,<4
+psutil>=5.9.0,<6
+
+# Voice / clap (optional — set ENABLE_VOICE_CLAP=1; on Windows you may need a PyAudio wheel)
+SpeechRecognition>=3.10.0,<4
+# PyAudio>=0.2.14
+
+# Screenshot fallback (optional — only if gnome-screenshot/scrot unavailable)
+# pyautogui==0.9.54
+
+# ── NOT included (intentionally) ─────────────────────────────────────────────
+# No: langchain, transformers, torch, electron, tensorflow
+# No: local LLM runtimes (ollama, llama.cpp, etc.)
+# No: heavy frameworks

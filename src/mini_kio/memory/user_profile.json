@@ -1,0 +1,12 @@
+{
+    "name": "Joel",
+    "location": "Kochi",
+    "projects": ["KIO"],
+    "tools": ["Cursor", "ChatGPT", "Claude", "Antigravity"],
+    "interests": ["AI", "automation", "software engineering"],
+    "habits": {
+        "workflow": ["open chrome", "open cursor"],
+        "coding_time": "night"
+    },
+    "preferred_voice": "calm male"
+}

@@ -1,0 +1,16 @@
+KIO DIAGNOSTIC RESULTS
+==================================================
+Timestamp: 2026-04-14 10:20:02
+
+PASS: imports
+PASS: url-encoding
+PASS: cmd-parsing
+PASS: chrome_open
+PASS: calculator
+PASS: notepad
+PASS: chrome_search
+PASS: downloads_folder
+PASS: multi_step
+
+==================================================
+Total: 9  Passed: 9  Failed: 0
