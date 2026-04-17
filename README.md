@@ -20,8 +20,9 @@ kio/
 ├── src/
 │   ├── core/           # Core logic (command routing, operators, AI)
 │   ├── plugins/        # Plugin system
-│   ├── config.toml     # Configuration
 │   └── requirements.txt # Dependencies
+├── config/
+│   └── config.toml     # Configuration
 ├── tools/
 │   └── debug/          # Diagnostic and debug utilities
 ├── data/

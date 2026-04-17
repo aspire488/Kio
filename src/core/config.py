@@ -15,10 +15,11 @@ from dotenv import load_dotenv
 import tomllib
 
 _ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _ROOT.parent
 load_dotenv(_ROOT / ".env")
 
 try:
-    with open(_ROOT / "config.toml", "rb") as f:
+    with open(_REPO_ROOT / "config" / "config.toml", "rb") as f:
         _toml_data = tomllib.load(f)
         SAFE_MODE = _toml_data.get("dev", {}).get("safe_mode", False)
 except (FileNotFoundError, tomllib.TOMLDecodeError):
