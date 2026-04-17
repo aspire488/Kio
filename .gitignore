@@ -39,10 +39,15 @@ env/
 *.swo
 *~
 
-# Logs
+# Logs and temporary files
 *.log
 logs/
-debug/*.txt
+debug/
+temp/
+
+# Backup directories
+core_backup/
+duplicates/
 
 # Database
 *.db
@@ -61,5 +66,5 @@ Thumbs.db
 
 # Project specific
 .cache/
-temp/
 tmp/
+
