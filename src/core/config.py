@@ -16,7 +16,7 @@ import tomllib
 
 _ROOT = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _ROOT.parent
-load_dotenv(_ROOT / ".env")
+load_dotenv(_REPO_ROOT / ".env")
 
 try:
     with open(_REPO_ROOT / "config" / "config.toml", "rb") as f:
