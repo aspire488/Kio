@@ -34,11 +34,11 @@ def _lazy_import(module_name: str, item_names: list[str]) -> dict:
     """Lazy import with error handling."""
     try:
         if module_name == "task_engine":
-            from mini_kio.core.task_engine import run_task
+            from core.task_engine import run_task
 
             return {"run_task": run_task}
         elif module_name == "app_operator":
-            from mini_kio.core.app_operator import launch_app, close_app, search_web
+            from core.app_operator import launch_app, close_app, search_web
 
             return {
                 "launch_app": launch_app,
@@ -46,11 +46,11 @@ def _lazy_import(module_name: str, item_names: list[str]) -> dict:
                 "search_web": search_web,
             }
         elif module_name == "file_operator":
-            from mini_kio.core.file_operator import open_folder
+            from core.file_operator import open_folder
 
             return {"open_folder": open_folder}
         elif module_name == "system_operator":
-            from mini_kio.core.system_operator import (
+            from core.system_operator import (
                 shutdown_system,
                 restart_system,
                 lock_system,
@@ -62,7 +62,7 @@ def _lazy_import(module_name: str, item_names: list[str]) -> dict:
                 "lock_system": lock_system,
             }
         elif module_name == "browser_operator":
-            from mini_kio.core.browser_operator import (
+            from core.browser_operator import (
                 open_url,
                 search_google,
                 search_youtube,
@@ -76,7 +76,7 @@ def _lazy_import(module_name: str, item_names: list[str]) -> dict:
                 "play_youtube": play_youtube,
             }
         elif module_name == "ai":
-            from mini_kio.core.ai import ask_ai
+            from core.ai import ask_ai
 
             return {"ask_ai": ask_ai}
     except ImportError as e:
@@ -335,7 +335,7 @@ def _ai_fallback(query: str) -> dict:
     # Try LLM providers
     try:
         import asyncio
-        from mini_kio.core.llm_router import ask_llm
+        from core.llm_router import ask_llm
 
         # Since we're in a sync context, we can't await, so skip LLM for now
         # response = asyncio.run(ask_llm(query, timeout=8, max_tokens=200))

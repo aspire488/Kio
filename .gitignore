@@ -48,6 +48,10 @@ debug/*.txt
 *.db
 *.sqlite
 *.sqlite3
+data/memory/*.db
+
+# Data layer
+data/memory/
 
 # OS
 .DS_Store

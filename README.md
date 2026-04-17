@@ -1,138 +1,66 @@
-# KIO — Kernel Intelligence Operator
+# 🚧 KIO
 
-Lightweight modular AI assistant designed to run locally with minimal system resources.
+**Work in Progress**
 
-KIO aims to provide **Jarvis-style personal automation** while remaining efficient enough to run on standard laptops without requiring powerful hardware.
+KIO is a modular local AI assistant built using an event-driven architecture.
 
----
+## Current Status
 
-## ⚠️ Project Status
+- ⚠️ Core modules partially implemented
+- ⚠️ Command routing in progress
+- ⚠️ Experimental system operators present
+- ⚠️ Not stable / not fully functional
 
-**KIO is currently under active development.**
-
-The architecture and system design have been finalized, but core modules are still being implemented.  
-This repository currently focuses on **architecture, planning, and system structure** before full feature implementation.
-
-The goal is to build the system **incrementally with strong engineering foundations**.
-
----
-
-## Why KIO Exists
-
-Most AI assistants today fall into two categories:
-
-1. **Cloud-dependent assistants**
-   - Require constant internet access
-   - Send user data to external servers
-   - Often slow for local automation tasks
-
-2. **Heavy local AI systems**
-   - Require GPUs
-   - Consume large amounts of RAM
-   - Not practical for everyday laptops
-
-KIO is designed to solve this gap.
-
-The goal is to build a **practical local AI assistant** that:
-
-- runs efficiently on normal laptops
-- prioritizes local automation
-- uses cloud AI only when necessary
-- remains modular and extensible
-
-Instead of focusing purely on conversational AI, KIO focuses on **practical system automation and productivity**.
-
----
-
-## Design Goals
-
-- Lightweight system footprint (**≤170 MB RAM target**)
-- Modular event-driven architecture
-- Local-first assistant design
-- Extensible plugin ecosystem
-- Multi-interface interaction (voice, UI, messaging)
-- Privacy-friendly architecture
-- Efficient performance on everyday hardware
-
----
-
-## Planned Capabilities
-
-### Core Automation
-- File system control
-- Application launching
-- Task automation
-- System commands
-
-### Interfaces
-- Telegram remote control
-- Desktop overlay UI
-- Voice activation
-- Camera gesture activation
-
-### Intelligence
-- Context-aware command routing
-- Cloud AI fallback for reasoning tasks
-- Research and information retrieval
-
-### Vision
-- OCR context understanding
-- Camera input processing
-
-### Extensions
-- Plugin ecosystem
-- Automation workflows
-- Third-party integrations
-
----
-
-## System Architecture
-
-User Input │ ▼ Input Interfaces (Voice / Telegram / UI / Camera) │ ▼ Command Router │ ├── System Operator ├── File Operator ├── App Operator │ ▼ Core Engine (Event Bus + Mode Manager) │ ├── Local Skills ├── Cloud AI Router └── Plugin System │ ▼ Output Interfaces (UI / Voice / Telegram)
-
-The architecture is designed to ensure **loose coupling between components**, enabling modular upgrades and plugin extensions.
-
----
+**This is early-stage WIP code. Expect breaking changes and incomplete features.**
 
 ## Project Structure
 
-kio/ │ ├── core/ │   ├── event_bus.py │   ├── command_router.py │   └── mode_manager.py │ ├── operators/ │   ├── system_operator.py │   ├── file_operator.py │   └── app_operator.py │ ├── interfaces/ │   ├── telegram_bot.py │   ├── voice_listener.py │   └── ui_overlay.py │ ├── vision/ │   └── vision_context.py │ ├── plugins/ │ ├── config/ │   └── config.toml │ └── main.py
+```
+kio/
+├── src/
+│   ├── core/           # Core logic (command routing, operators, AI)
+│   ├── plugins/        # Plugin system
+│   ├── config.toml     # Configuration
+│   └── requirements.txt # Dependencies
+├── tools/
+│   └── debug/          # Diagnostic and debug utilities
+├── data/
+│   └── memory/         # Persistent memory and logs
+├── docs/               # Documentation
+└── README.md           # This file
+```
 
-This modular structure allows KIO to evolve without tightly coupling subsystems.
+## Getting Started
+
+### Prerequisites
+- Python 3.10+
+- Windows 10/11
+
+### Installation
+
+```bash
+cd src
+pip install -r requirements.txt
+```
+
+### Running
+
+```bash
+python -m core.main
+```
+
+## Known Limitations
+
+- Still in active development
+- Feature set is experimental
+- Performance characteristics unoptimized
+- API stability not guaranteed
+- No production guarantees
 
 ---
 
-## Example Configuration
-
-KIO uses a centralized configuration file.
-
-[kio] name = "KIO" mode = "normal" max_ram_mb = 170
-
-[telegram] enabled = true
-
-[voice] clap_activation = true
-
-[vision] camera_enabled = false ocr_enabled = true
-
----
-
-## Demo (Planned)
-
-Demo content will be added once core modules are implemented.
-
-Planned demonstrations include:
-
-- launching applications through KIO commands
-- file system automation
-- Telegram remote control
-- voice activation
-- context-aware automation workflows
-
-Screenshots and videos will be added as development progresses.
-
----
-
-## Development Roadmap
+**Status:** WIP (2026)  
+**Updated:** April 2026
 
 ### Phase 1 — Core System
 - Event bus architecture

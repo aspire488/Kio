@@ -62,7 +62,7 @@ def _test_imports() -> SelfTestResult:
 
 
 def _test_command_parsing() -> SelfTestResult:
-    from mini_kio.core.command_parser import parse_command
+    from core.command_parser import parse_command
 
     test_cases = [
         ("open chrome", 1),
@@ -82,7 +82,7 @@ def _test_command_parsing() -> SelfTestResult:
 
 
 def _test_multi_step_parsing() -> SelfTestResult:
-    from mini_kio.core.command_parser import parse_command
+    from core.command_parser import parse_command
 
     steps = parse_command("open chrome and search AI news")
     if len(steps) != 2:
@@ -96,7 +96,7 @@ def _test_multi_step_parsing() -> SelfTestResult:
 
 
 def _test_router_dispatch() -> SelfTestResult:
-    from mini_kio.core.command_router import handle_command
+    from core.command_router import handle_command
 
     result = handle_command("ping")
     if not isinstance(result, dict):
@@ -111,7 +111,7 @@ def _test_router_dispatch() -> SelfTestResult:
 
 
 def _test_structured_responses() -> SelfTestResult:
-    from mini_kio.core.command_router import handle_command
+    from core.command_router import handle_command
 
     result = handle_command("help")
     if not isinstance(result, dict):
@@ -122,7 +122,7 @@ def _test_structured_responses() -> SelfTestResult:
 
 
 def _test_folder_alias_detection() -> SelfTestResult:
-    from mini_kio.core.file_operator import open_folder
+    from core.file_operator import open_folder
 
     result = open_folder("downloads folder")
     if not isinstance(result, dict):
@@ -149,7 +149,7 @@ def _test_url_encoding() -> SelfTestResult:
 
 
 def _test_telegram_handler_simulation() -> SelfTestResult:
-    from mini_kio.core.command_router import route
+    from core.command_router import route
 
     response = route("search python tutorial", user_id=123)
     if not isinstance(response, str):
@@ -164,7 +164,7 @@ def _test_telegram_handler_simulation() -> SelfTestResult:
 def _test_subprocess_safety() -> SelfTestResult:
     import inspect
     import re
-    from mini_kio.core import app_operator
+    from core import app_operator
 
     source = inspect.getsource(app_operator)
     cleaned_source = "\n".join(
@@ -194,7 +194,7 @@ def _get_memory_usage_mb() -> float | None:
 
 
 def _test_conversation_fallback() -> SelfTestResult:
-    from mini_kio.core.command_router import handle_command
+    from core.command_router import handle_command
 
     # Test knowledge base
     result = handle_command("who created you")
@@ -219,7 +219,7 @@ def _test_conversation_fallback() -> SelfTestResult:
 
 
 def _test_generic_app_launcher() -> SelfTestResult:
-    from mini_kio.core.app_operator import launch_app
+    from core.app_operator import launch_app
 
     # Test known apps
     test_apps = ["chrome", "notepad", "calculator"]
@@ -238,7 +238,7 @@ def _test_generic_app_launcher() -> SelfTestResult:
 
 
 def _test_close_commands() -> SelfTestResult:
-    from mini_kio.core.app_operator import close_app
+    from core.app_operator import close_app
 
     # Test close commands (these should return structured responses even if app not running)
     test_apps = ["chrome", "notepad", "calculator"]
@@ -257,8 +257,8 @@ def _test_close_commands() -> SelfTestResult:
 
 
 def _test_youtube_play() -> SelfTestResult:
-    from mini_kio.core.browser_operator import play_youtube
-    from mini_kio.core.command_router import handle_command
+    from core.browser_operator import play_youtube
+    from core.command_router import handle_command
 
     # Test direct function call
     result = play_youtube("test query")
@@ -278,7 +278,7 @@ def _test_youtube_play() -> SelfTestResult:
 
 
 def _test_browser_operations() -> SelfTestResult:
-    from mini_kio.core.browser_operator import search_google, search_youtube
+    from core.browser_operator import search_google, search_youtube
 
     # Test Google search
     result = search_google("test")
@@ -298,7 +298,7 @@ def _test_browser_operations() -> SelfTestResult:
 
 
 def _test_expanded_knowledge() -> SelfTestResult:
-    from mini_kio.core.command_router import handle_command
+    from core.command_router import handle_command
 
     test_queries = [
         "who is monkey d luffy",

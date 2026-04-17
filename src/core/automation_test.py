@@ -27,7 +27,7 @@ def _write_log(msg: str) -> None:
 
 def _run_simple_command(cmd: str) -> dict:
     """Test simple open command."""
-    from mini_kio.core.system_skills import launch_application
+    from core.system_skills import launch_application
 
     try:
         result = launch_application(cmd)
@@ -38,7 +38,7 @@ def _run_simple_command(cmd: str) -> dict:
 
 def _run_search_command(cmd: str) -> dict:
     """Test web search using action_executor."""
-    from mini_kio.core.task_engine import run
+    from core.task_engine import run
 
     try:
         result = run(cmd)
@@ -49,7 +49,7 @@ def _run_search_command(cmd: str) -> dict:
 
 def _run_system_status() -> dict:
     """Test system status command."""
-    from mini_kio.core.system_skills import get_system_info
+    from core.system_skills import get_system_info
 
     try:
         result = get_system_info()
@@ -60,7 +60,7 @@ def _run_system_status() -> dict:
 
 def _run_gui_automation(cmd: str) -> dict:
     """Test GUI automation (type in notepad)."""
-    from mini_kio.core.task_engine import run
+    from core.task_engine import run
 
     try:
         result = run(cmd)

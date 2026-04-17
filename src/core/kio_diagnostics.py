@@ -105,7 +105,7 @@ class DiagnosticTest:
         t0 = time.monotonic()
         
         try:
-            from mini_kio.core.command_router import handle_command
+            from core.command_router import handle_command
         except ImportError:
             try:
                 from command_router import handle_command
@@ -235,7 +235,7 @@ def _test_command_parsing() -> dict:
     print(f"  ['cmd-parsing'              ] Testing command parsing")
     
     try:
-        from mini_kio.core.command_parser import parse_command
+        from core.command_parser import parse_command
     except ImportError:
         from command_parser import parse_command
     
