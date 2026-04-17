@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# Logs and temporary files
+logs/
+debug/
+temp/
+*.log
+
+# Backup directories
+core_backup/
+duplicates/
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
