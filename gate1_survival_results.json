@@ -1,0 +1,107 @@
+{
+  "passed": 10,
+  "total": 10,
+  "results": [
+    {
+      "name": "Runtime Boot & Lifecycle",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "elapsed_s": 0.0085,
+        "rss_mb": 27.35
+      }
+    },
+    {
+      "name": "Telegram Command Flows",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "commands_run": 5,
+        "elapsed_s": 0.5683,
+        "rss_mb": 43.61
+      }
+    },
+    {
+      "name": "Malformed Chain Rejection",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "bad_chains_rejected": 5,
+        "elapsed_s": 0.0187,
+        "rss_mb": 38.62
+      }
+    },
+    {
+      "name": "Execution Boundary Enforcement",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "boundary_verified": true,
+        "elapsed_s": 0.3986,
+        "rss_mb": 38.62
+      }
+    },
+    {
+      "name": "Multi-step Correctness",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "multi_step_verified": true,
+        "elapsed_s": 0.4266,
+        "rss_mb": 43.67
+      }
+    },
+    {
+      "name": "Activation Lifecycle Stress",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "cycles": 25,
+        "elapsed_s": 0.4269,
+        "rss_mb": 38.69
+      }
+    },
+    {
+      "name": "Camera Lifecycle Stress",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "camera_cycles": 10,
+        "elapsed_s": 1.3418,
+        "rss_mb": 53.41
+      }
+    },
+    {
+      "name": "Runtime Degradation Recovery",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "degradation_recovery": true,
+        "elapsed_s": 0.0898,
+        "rss_mb": 53.41
+      }
+    },
+    {
+      "name": "Bounded Memory Behavior",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "buffer_size": 8,
+        "elapsed_s": 0.0909,
+        "rss_mb": 53.41
+      }
+    },
+    {
+      "name": "Long Idle Behavior (Timeout)",
+      "passed": true,
+      "details": "",
+      "metrics": {
+        "idle_expiry_verified": true,
+        "elapsed_s": 0.0314,
+        "rss_mb": 53.43
+      }
+    }
+  ],
+  "final_rss_mb": 53.43,
+  "rss_delta_mb": 26.13
+}
