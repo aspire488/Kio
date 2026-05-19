@@ -114,6 +114,8 @@ def handle_command(command: str) -> dict:
     Always returns {"success": bool, "message": str}.
     """
     command = command.strip()
+    from mini_kio.core.command_parser import _apply_aliases
+    command = _apply_aliases(command)
     logger.info(f"[KIO] handle_command: {command!r}")
     if not command:
         return {"success": False, "message": "Empty command"}

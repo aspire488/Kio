@@ -231,4 +231,4 @@ def is_multi_step(command: str) -> bool:
     return False
 
 
-__all__ = ["parse_command", "is_multi_step"]
+__all__ = ["parse_command", "is_multi_step", "_apply_aliases"]

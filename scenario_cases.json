@@ -1,0 +1,143 @@
+[
+  {
+    "id": "APP-01",
+    "category": "app_control",
+    "input": "open chrome",
+    "expected": {
+      "success": true,
+      "action": "open_app",
+      "target": "chrome"
+    }
+  },
+  {
+    "id": "APP-03",
+    "category": "app_control",
+    "input": "close chrome",
+    "expected": {
+      "success": true,
+      "action": "close_app",
+      "target": "chrome"
+    }
+  },
+  {
+    "id": "APP-05",
+    "category": "app_control",
+    "input": "open ms edge",
+    "expected": {
+      "success": true,
+      "action": "open_app",
+      "target": "edge"
+    }
+  },
+  {
+    "id": "SRC-01",
+    "category": "search_play",
+    "input": "search python",
+    "expected": {
+      "success": true,
+      "action": "search_web",
+      "target": "python"
+    }
+  },
+  {
+    "id": "SRC-02",
+    "category": "search_play",
+    "input": "play messi",
+    "expected": {
+      "success": true,
+      "action": "play_youtube",
+      "target": "messi"
+    }
+  },
+  {
+    "id": "MST-01",
+    "category": "multi_step",
+    "input": "open chrome and search python",
+    "expected": {
+      "success": true,
+      "results_count": 2
+    }
+  },
+  {
+    "id": "MAL-01",
+    "category": "malformed",
+    "input": "open chrome and",
+    "expected": {
+      "success": false,
+      "message_contains": "Malformed command chain"
+    }
+  },
+  {
+    "id": "SYS-01",
+    "category": "system_control",
+    "input": "lock",
+    "expected": {
+      "success": true,
+      "action": "lock_system"
+    }
+  },
+  {
+    "id": "SYS-02",
+    "category": "system_control",
+    "input": "shutdown",
+    "expected": {
+      "success": false,
+      "blocked": true
+    }
+  },
+  {
+    "id": "FLD-01",
+    "category": "folder_access",
+    "input": "open downloads folder",
+    "expected": {
+      "success": true,
+      "action": "open_folder",
+      "target": "downloads"
+    }
+  },
+  {
+    "id": "INT-01-F1",
+    "category": "integrity",
+    "input": "open fail_me",
+    "expected": {
+      "success": false,
+      "runtime": { "integrity_status": "healthy" }
+    }
+  },
+  {
+    "id": "INT-01-F2",
+    "category": "integrity",
+    "input": "open fail_me",
+    "expected": {
+      "success": false,
+      "runtime": { "integrity_status": "healthy" }
+    }
+  },
+  {
+    "id": "INT-01-F3",
+    "category": "integrity",
+    "input": "open fail_me",
+    "expected": {
+      "success": false,
+      "runtime": { "integrity_status": "degraded" }
+    }
+  },
+  {
+    "id": "LIF-01",
+    "category": "lifecycle",
+    "input": "shutdown",
+    "expected": {
+      "success": false,
+      "blocked": true
+    }
+  },
+  {
+    "id": "LIF-02",
+    "category": "lifecycle",
+    "input": "  ",
+    "expected": {
+      "success": false,
+      "message_contains": "Empty command"
+    }
+  }
+]
