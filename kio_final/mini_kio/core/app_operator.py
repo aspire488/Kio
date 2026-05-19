@@ -94,6 +94,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
     "chrome": {
         "exe": "chrome.exe",
         "process": "chrome.exe",
+        "aliases": ["google chrome", "chrome browser", "browser"],
         "paths": [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -102,6 +103,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
     "edge": {
         "exe": "msedge.exe",
         "process": "msedge.exe",
+        "aliases": ["microsoft edge", "ms edge"],
         "paths": [
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -118,12 +120,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
     "vscode": {
         "exe": "Code.exe",
         "process": "Code.exe",
-        "cli": "code",
-        "dynamic_resolver": "_resolve_vscode_path",   # resolved at call time
-    },
-    "code": {
-        "exe": "Code.exe",
-        "process": "Code.exe",
+        "aliases": ["vs code", "visual studio code", "editor", "code"],
         "cli": "code",
         "dynamic_resolver": "_resolve_vscode_path",
     },
@@ -138,11 +135,6 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
         "aliases": ["calc"],
         "system": True,
     },
-    "calc": {
-        "exe": "calc.exe",
-        "process": "calc.exe",
-        "system": True,
-    },
     "explorer": {
         "exe": "explorer.exe",
         "process": "explorer.exe",
@@ -151,6 +143,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
     "cmd": {
         "exe": "cmd.exe",
         "process": "cmd.exe",
+        "aliases": ["command prompt", "terminal"],
         "system": True,
     },
     "powershell": {
@@ -169,6 +162,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
         "paths": [
             r"C:\Program Files\CapCut\CapCut.exe",
             r"C:\Program Files (x86)\CapCut\CapCut.exe",
+            r"%LOCALAPPDATA%\CapCut\Apps\CapCut.exe",
         ],
     },
     "vlc": {
@@ -179,17 +173,22 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
             r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
         ],
     },
-    # BUG-05 FIX: Spotify — resolved dynamically, no %USERNAME% literal
     "spotify": {
         "exe": "Spotify.exe",
         "process": "Spotify.exe",
         "dynamic_resolver": "_resolve_spotify_path",
     },
-    # BUG-06 FIX: Discord — resolved via glob, no app-* literal path
     "discord": {
         "exe": "Discord.exe",
         "process": "Discord.exe",
         "dynamic_resolver": "_resolve_discord_path",
+    },
+    "telegram": {
+        "exe": "Telegram.exe",
+        "process": "Telegram.exe",
+        "paths": [
+            r"%APPDATA%\Telegram Desktop\Telegram.exe",
+        ],
     },
 }
 
@@ -401,40 +400,74 @@ def _launch_from_info(info: Dict, name: str) -> dict:
         return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
 
 
+def _fuzzy_app_discovery(name: str) -> Optional[str]:
+    """
+    Search for executables in standard locations with a high similarity threshold.
+    Limited to 2 levels of subdirectories to prevent disk thrashing.
+    """
+    if not _IS_WINDOWS:
+        return None
+
+    search_dirs = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", ""),
+    ]
+
+    target = name.lower().strip()
+    for base in search_dirs:
+        if not base or not os.path.exists(base):
+            continue
+        try:
+            # Level 1: C:\Program Files\AppName
+            for entry in os.scandir(base):
+                if entry.is_dir():
+                    try:
+                        # Level 2: C:\Program Files\AppName\app.exe
+                        for sub_entry in os.scandir(entry.path):
+                            if sub_entry.is_file() and sub_entry.name.lower().endswith(".exe"):
+                                # Simple prefix/containment check for high confidence
+                                stem = Path(sub_entry.name).stem.lower()
+                                if stem == target or stem.startswith(target) or target in stem:
+                                    # Basic confidence: if length delta is small
+                                    if abs(len(stem) - len(target)) <= 2:
+                                        return sub_entry.path
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError):
+            continue
+    return None
+
+
 def _discover_and_launch(name: str) -> dict:
-    """Try 'where', shutil.which, then shell-free Popen as last resort."""
+    """Try 'where', shutil.which, fuzzy discovery, then shell-free Popen."""
     exe = name if name.endswith(".exe") else f"{name}.exe"
 
+    # 1. System PATH via 'where'
     if _IS_WINDOWS:
         try:
             r = subprocess.run([
                 "where",
                 exe,
-            ], capture_output=True, text=True, timeout=3)
+            ], capture_output=True, text=True, timeout=2)
             if r.returncode == 0:
                 path = r.stdout.strip().splitlines()[0]
-                subprocess.Popen(["cmd", "/c", "start", "", path], shell=False, creationflags=_creation_flags())
-                proc_name = f"{exe}"
-                if _verify_process_started_windows(proc_name, timeout_s=3):
-                    return {"success": True, "message": f"Opened {name}"}
-                return {"success": False, "message": f"Failed to launch {name}."}
+                return _launch_path(path, name)
         except Exception:
             pass
 
+    # 2. System PATH via shutil.which
     found = shutil.which(exe)
     if found:
-        try:
-            subprocess.Popen(["cmd", "/c", "start", "", found], shell=False, creationflags=_creation_flags())
-            proc_name = Path(found).name
-            if _IS_WINDOWS and _verify_process_started_windows(proc_name, timeout_s=3):
-                return {"success": True, "message": f"Opened {name}"}
-            if not _IS_WINDOWS:
-                return {"success": True, "message": f"Opened {name}"}
-            return {"success": False, "message": f"Failed to launch {name}."}
-        except Exception:
-            pass
+        return _launch_path(found, name)
 
-    # Absolute last resort — launch by name via cmd start
+    # 3. Fuzzy Discovery (Bounded fallback)
+    fuzzy_path = _fuzzy_app_discovery(name)
+    if fuzzy_path:
+        logger.info(f"[APP] fuzzy discovery found: {fuzzy_path}")
+        return _launch_path(fuzzy_path, name)
+
+    # Absolute last resort — launch by name via cmd start (no verified path)
     try:
         subprocess.Popen(["cmd", "/c", "start", "", name], shell=False, creationflags=_creation_flags())
         # Best-effort verification
@@ -445,6 +478,30 @@ def _discover_and_launch(name: str) -> dict:
         return {"success": False, "message": f"Failed to launch {name}."}
     except Exception as exc:
         return {"success": False, "message": f"Cannot find or open: {name}"}
+
+
+def _launch_path(path: str, name: str) -> dict:
+    """Helper to launch a verified path and verify process start."""
+    try:
+        subprocess.Popen([
+            "cmd",
+            "/c",
+            "start",
+            "",
+            path,
+        ], shell=False, creationflags=_creation_flags())
+        logger.info(f"[APP] launched: {path}")
+
+        proc_name = Path(path).name
+        if _IS_WINDOWS:
+            if _verify_process_started_windows(proc_name, timeout_s=3):
+                return {"success": True, "message": f"Opened {name}"}
+            else:
+                logger.warning(f"[APP] launch verification failed for: {proc_name}")
+                return {"success": False, "message": f"Failed to launch {name}."}
+        return {"success": True, "message": f"Opened {name}"}
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
 
 
 def _pkill(name: str) -> dict:
