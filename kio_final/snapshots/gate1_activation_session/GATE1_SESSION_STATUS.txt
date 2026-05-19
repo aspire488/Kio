@@ -1,0 +1,13 @@
+Gate 1 — Activation Session Stabilization
+Status: COMPLETE
+
+Validation: 6/6 PASS
+Harness: snapshots/gate1_activation_session/gate1_activation_session_validation.py
+Audit: GATE1_ACTIVATION_SESSION_AUDIT.md
+
+Added:
+- activation_releasing state + releasing→idle path
+- lazy touch_activation_session() timeout (no threads)
+- ACTIVATION_SESSION_TIMEOUT_S config
+- force_release_activation on shutdown
+- snapshot elapsed_ms / remaining_ms

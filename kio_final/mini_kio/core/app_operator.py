@@ -340,6 +340,31 @@ def _resolve_path(info: Dict) -> Optional[str]:
     return found
 
 
+def _verify_process_started_windows(proc_name: str, timeout_s: int = 3) -> bool:
+    """Lightweight verification: poll Windows tasklist for a process image name.
+
+    proc_name can be 'chrome.exe' or 'chrome'. Function normalizes and polls
+    tasklist for up to timeout_s seconds.
+    """
+    if not proc_name:
+        return False
+    proc_name = proc_name.strip().lower()
+    if not proc_name.endswith('.exe'):
+        proc_name = proc_name + '.exe'
+
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline:
+        try:
+            r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {proc_name}"], capture_output=True, text=True, timeout=2)
+            out = (r.stdout or "").lower()
+            if proc_name in out:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return False
+
+
 def _launch_from_info(info: Dict, name: str) -> dict:
     path = _resolve_path(info)
     if not path:
@@ -350,13 +375,26 @@ def _launch_from_info(info: Dict, name: str) -> dict:
 
     try:
         # Safe launch via cmd start — no shell=True
-        subprocess.Popen(
-            ["cmd", "/c", "start", "", path],
-            shell=False,
-            creationflags=_creation_flags(),
-        )
+        subprocess.Popen([
+            "cmd",
+            "/c",
+            "start",
+            "",
+            path,
+        ], shell=False, creationflags=_creation_flags())
         logger.info(f"[APP] launched: {path}")
-        return {"success": True, "message": f"Opened {name}"}
+
+        # Lightweight verification: poll for process presence by image name
+        proc_name = info.get("process") or Path(path).name
+        if _IS_WINDOWS:
+            if _verify_process_started_windows(proc_name, timeout_s=3):
+                return {"success": True, "message": f"Opened {name}"}
+            else:
+                logger.warning(f"[APP] launch verification failed for: {proc_name}")
+                return {"success": False, "message": f"Failed to launch {name}."}
+        else:
+            # Non-windows: best-effort via shutil.which
+            return {"success": True, "message": f"Opened {name}"}
     except FileNotFoundError:
         return {"success": False, "message": f"Cannot find {name}"}
     except Exception as exc:
@@ -369,13 +407,17 @@ def _discover_and_launch(name: str) -> dict:
 
     if _IS_WINDOWS:
         try:
-            r = subprocess.run(
-                ["where", exe], capture_output=True, text=True, timeout=3,
-            )
+            r = subprocess.run([
+                "where",
+                exe,
+            ], capture_output=True, text=True, timeout=3)
             if r.returncode == 0:
                 path = r.stdout.strip().splitlines()[0]
                 subprocess.Popen(["cmd", "/c", "start", "", path], shell=False, creationflags=_creation_flags())
-                return {"success": True, "message": f"Opened {name}"}
+                proc_name = f"{exe}"
+                if _verify_process_started_windows(proc_name, timeout_s=3):
+                    return {"success": True, "message": f"Opened {name}"}
+                return {"success": False, "message": f"Failed to launch {name}."}
         except Exception:
             pass
 
@@ -383,14 +425,24 @@ def _discover_and_launch(name: str) -> dict:
     if found:
         try:
             subprocess.Popen(["cmd", "/c", "start", "", found], shell=False, creationflags=_creation_flags())
-            return {"success": True, "message": f"Opened {name}"}
+            proc_name = Path(found).name
+            if _IS_WINDOWS and _verify_process_started_windows(proc_name, timeout_s=3):
+                return {"success": True, "message": f"Opened {name}"}
+            if not _IS_WINDOWS:
+                return {"success": True, "message": f"Opened {name}"}
+            return {"success": False, "message": f"Failed to launch {name}."}
         except Exception:
             pass
 
     # Absolute last resort — launch by name via cmd start
     try:
         subprocess.Popen(["cmd", "/c", "start", "", name], shell=False, creationflags=_creation_flags())
-        return {"success": True, "message": f"Opened {name}"}
+        # Best-effort verification
+        if _IS_WINDOWS and _verify_process_started_windows(f"{name}.exe", timeout_s=3):
+            return {"success": True, "message": f"Opened {name}"}
+        if not _IS_WINDOWS:
+            return {"success": True, "message": f"Opened {name}"}
+        return {"success": False, "message": f"Failed to launch {name}."}
     except Exception as exc:
         return {"success": False, "message": f"Cannot find or open: {name}"}
 

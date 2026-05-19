@@ -118,7 +118,7 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
 # Entry point
 # ---------------------------------------------------------------------------
 
-def run_bot() -> None:
+def run_bot(runtime=None) -> None:
     """Build and run the Telegram bot (blocks until Ctrl-C)."""
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN not set — bot cannot start")

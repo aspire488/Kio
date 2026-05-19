@@ -22,6 +22,8 @@ import logging
 import re
 from typing import Any
 
+from mini_kio.core.execution_boundary import execute_action
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -77,8 +79,19 @@ def _is_multi_step(lower: str) -> bool:
     "open chrome and play messi" now correctly returns True.
     "search for cats and dogs" still returns False (no verb after 'and').
     """
-    # FIX: "play" added to verb set
-    verbs = {"open", "close", "search", "type", "launch", "folder", "play"}
+    # FIX: multi-step system commands and lock/restart verbs are also valid RHS verbs
+    verbs = {
+        "open",
+        "close",
+        "search",
+        "type",
+        "launch",
+        "folder",
+        "play",
+        "lock",
+        "shutdown",
+        "restart",
+    }
 
     for sep in (r"\s+and\s+", r"\s+then\s+"):
         parts = re.split(sep, lower, maxsplit=1)
@@ -111,17 +124,27 @@ def handle_command(command: str) -> dict:
         # ── MULTI-STEP ────────────────────────────────────────────────────────
         if _is_multi_step(lower):
             _log_route("route", intent="multi_step", text_len=len(command))
-            fns = _lazy_import("task_engine", ["run_task"])
-            if "run_task" in fns:
-                return fns["run_task"](command)
-            return {"success": False, "message": "Task engine unavailable"}
+            from mini_kio.core.command_parser import parse_command
+
+            steps = parse_command(command)
+            # If connectors were present but parsing returned no steps,
+            # treat this as a malformed chain rather than attempting
+            # to collapse into a single-step command.
+            if not steps:
+                if " and " in lower or lower.strip().endswith(" and") or " then " in lower or lower.strip().endswith(" then"):
+                    return {"success": False, "message": "Malformed command chain."}
+                return {"success": False, "message": f"Could not parse multi-step command: {command!r}"}
+            return _execute_multi_step(steps)
+
+        # If connectors present but not identified as multi-step, treat as malformed
+        if re.search(r"\b(?:and|then)\b", lower) and not _is_multi_step(lower):
+            return {"success": False, "message": "Malformed command chain."}
 
         # ── SEARCH ────────────────────────────────────────────────────────────
         if lower.startswith("search "):
             query = command[7:].strip()
             _log_route("route", intent="search")
-            fns = _lazy_import("app_operator", ["search_web"])
-            return fns["search_web"](query) if "search_web" in fns else {"success": False, "message": "Search unavailable"}
+            return execute_action("search_web", query)
 
         # ── OPEN ──────────────────────────────────────────────────────────────
         if lower.startswith("open "):
@@ -134,50 +157,41 @@ def handle_command(command: str) -> dict:
                 folder = target_lower.replace("folder", "").strip()
                 folder = " ".join(folder.split()) or target_lower
                 _log_route("route", intent="open_folder", target=folder)
-                fns = _lazy_import("file_operator", ["open_folder"])
-                return fns["open_folder"](folder) if "open_folder" in fns else {"success": False, "message": "File operator unavailable"}
+                return execute_action("open_folder", folder)
 
             _log_route("route", intent="open_app", target=target)
-            fns = _lazy_import("app_operator", ["launch_app"])
-            return fns["launch_app"](target) if "launch_app" in fns else {"success": False, "message": "App operator unavailable"}
+            return execute_action("open_app", target)
 
         # ── CLOSE ─────────────────────────────────────────────────────────────
         if lower.startswith("close "):
             target = command[6:].strip()
             _log_route("route", intent="close_app", target=target)
-            fns = _lazy_import("app_operator", ["close_app"])
-            return fns["close_app"](target) if "close_app" in fns else {"success": False, "message": "App operator unavailable"}
+            return execute_action("close_app", target)
 
         # ── PLAY (YouTube) ────────────────────────────────────────────────────
         if lower.startswith("play "):
             query = command[5:].strip()
             _log_route("route", intent="play_youtube")
-            fns = _lazy_import("browser_operator", ["play_youtube"])
-            return fns["play_youtube"](query) if "play_youtube" in fns else {"success": False, "message": "Browser operator unavailable"}
+            return execute_action("play_youtube", query)
 
         # ── SEARCH YOUTUBE ────────────────────────────────────────────────────
         if lower.startswith("search youtube "):
             query = command[15:].strip()
-            fns = _lazy_import("browser_operator", ["search_youtube"])
-            return fns["search_youtube"](query) if "search_youtube" in fns else {"success": False, "message": "Browser operator unavailable"}
+            return execute_action("search_youtube", query)
 
         if lower.startswith("youtube "):
             query = command[8:].strip()
-            fns = _lazy_import("browser_operator", ["play_youtube"])
-            return fns["play_youtube"](query) if "play_youtube" in fns else {"success": False, "message": "Browser operator unavailable"}
+            return execute_action("play_youtube", query)
 
         # ── SYSTEM ────────────────────────────────────────────────────────────
         if lower in ("shutdown", "shutdown computer", "shut down"):
-            fns = _lazy_import("system_operator", ["shutdown_system"])
-            return fns["shutdown_system"]() if "shutdown_system" in fns else {"success": False, "message": "System operator unavailable"}
+            return execute_action("shutdown_system")
 
         if lower in ("restart", "restart computer"):
-            fns = _lazy_import("system_operator", ["restart_system"])
-            return fns["restart_system"]() if "restart_system" in fns else {"success": False, "message": "System operator unavailable"}
+            return execute_action("restart_system")
 
         if lower in ("lock", "lock computer"):
-            fns = _lazy_import("system_operator", ["lock_system"])
-            return fns["lock_system"]() if "lock_system" in fns else {"success": False, "message": "System operator unavailable"}
+            return execute_action("lock_system")
 
         # ── UTILITY ───────────────────────────────────────────────────────────
         if lower == "ping":
@@ -195,22 +209,86 @@ def handle_command(command: str) -> dict:
         return {"success": False, "message": f"Internal error: {str(exc)[:120]}"}
 
 
+def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
+    """Execute parsed multi-step commands through runtime execution policy."""
+    results: list[dict[str, Any]] = []
+    blocked_count = 0
+    success_count = 0
+
+    for idx, step in enumerate(steps, start=1):
+        action = step.get("action", "")
+        target = step.get("target", "")
+        _log_route(
+            "execution_policy_apply",
+            action=action,
+            target=target,
+            step=idx,
+            total=len(steps),
+        )
+
+        result = execute_action(action, target)
+        results.append(result)
+
+        if result.get("blocked"):
+            blocked_count += 1
+            _log_route(
+                "execution_policy_blocked",
+                action=action,
+                target=target,
+                step=idx,
+            )
+            continue
+
+        if result.get("success"):
+            success_count += 1
+            _log_route(
+                "execution_policy_allowed",
+                action=action,
+                target=target,
+                step=idx,
+                success=True,
+            )
+        else:
+            _log_route(
+                "execution_policy_allowed",
+                action=action,
+                target=target,
+                step=idx,
+                success=False,
+            )
+            return {
+                "success": False,
+                "message": f"Step {idx} failed: {result.get('message', 'unknown error')}",
+                "results": results,
+            }
+
+    message = (
+        f"Completed {success_count} step(s); blocked {blocked_count} step(s)."
+        if blocked_count
+        else f"Completed {len(steps)} step(s)."
+    )
+    return {
+        "success": blocked_count == 0 and success_count > 0,
+        "message": message,
+        "results": results,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Telegram-facing entry point
 # ---------------------------------------------------------------------------
 
 def route(text: str, user_id: int = 0) -> str:
     """
-    Telegram-facing dispatcher.
+    Channel-facing dispatcher (compat wrapper).
     Returns a plain-text string.  Never raises.
     """
     try:
         _log_route("route_entry", user_id=user_id, text_len=len(text))
-        result = handle_command(text)
-        if result.get("success"):
-            return result.get("message") or "Done."
-        else:
-            return f"Error: {result.get('message', 'Command failed.')}"
+        from mini_kio.core.runtime import dispatch_channel_input, format_channel_reply
+
+        result = dispatch_channel_input(text, channel="telegram", user_id=user_id)
+        return format_channel_reply(result)
     except Exception as exc:
         logger.exception(f"route() crashed: {exc}")
         return "KIO encountered an internal error but is still running."

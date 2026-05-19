@@ -1,0 +1,1461 @@
+PAGES=32
+
+--- PAGE 1 ---
+KIO Architecture v1.1  ·  Page 1
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+ KIO
+ Final Locked Architecture
+ Lightweight Modular Autonomous Orchestration Layer
+VERSION
+1.1
+STATUS
+LOCKED — AUTHORITATIVE
+SUPERSEDES
+v1.0 + all prior architecture discussions
+REVISION BASIS
+Nanoscale audit pass — 10 issues resolved
+
+
+--- PAGE 2 ---
+KIO Architecture v1.1  ·  Page 2
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+Table of Contents
+§1
+Executive Summary & Philosophy
+3
+§2
+Architecture Issues Found (v1.0 → v1.1)
+4
+§3
+Corrections Applied
+5
+§4
+Runtime Model & Process Architecture
+6
+§5
+Core Brain Specification
+7
+§6
+Planner / Executor / Verifier Model
+9
+§7
+Tool Registry & Sandboxing
+11
+§8
+Memory System
+13
+§9
+Observer System
+15
+§10
+Event System
+16
+§11
+Security Architecture
+17
+§12
+Plugin Architecture
+18
+§13
+Runtime Lifecycle & State Machine
+19
+§14
+Failure Recovery Model
+20
+§15
+Resource Budget Model
+21
+§16
+Build Gates & Roadmap
+22
+§17
+Anti-Patterns & Rejected Systems
+25
+§18
+Final Engineering Rules (Permanent)
+26
+
+
+--- PAGE 3 ---
+KIO Architecture v1.1  ·  Page 3
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§1 · Executive Summary & Philosophy
+What KIO Is
+Python-native autonomous agent runtime
+Cloud-inference orchestration layer (brain cloud, body
+local)
+Resource-disciplined tool execution coordinator
+Personal productivity OS: single user, single machine
+What KIO Is NOT
+✗ Chatbot or conversational assistant
+✗ Local LLM runtime
+✗ Multi-agent swarm
+✗ LangChain wrapper
+✗ AGI system
+✗ Framework-heavy ecosystem
+Core Tenets (Immutable)
+T1 · Cloud Brain, Local Body
+All reasoning via cloud LLM API. KIO never loads a local language model. Local
+process = orchestration, execution, memory, I/O only.
+T2 · Everything Through Core
+Brain
+No module executes autonomously. Every execution path routes through Core
+Brain. No sidechannels, no bypass paths.
+T3 · Lazy is Law
+Any module >10 MB not needed at startup is lazy-loaded on first use, unloaded
+after. Idle baseline: <120 MB.
+T4 · Explicit Over Implicit
+Tool contracts are typed. Side effects declared. Destructive ops require explicit
+confirmation.
+T5 · Stability Over Features
+Stable Gate N > broken Gate N+2. Gates are locked until prior gates pass all tests.
+Runtime Targets (Non-Negotiable)
+State
+RAM Target
+Note
+Idle
+80–120 MB
+Baseline, no active tasks
+Normal Active
+< 150 MB
+1–2 active tools/observers
+Emergency Ceiling
+≤ 200 MB
+ResourceGuard hard limit — triggers unload
+Primary Execution Loop (Immutable): observe → reason → plan → execute → verify →
+adapt/replan
+
+
+--- PAGE 4 ---
+KIO Architecture v1.1  ·  Page 4
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§2 · Architecture Issues Found (v1.0 → v1.1)
+10 issues identified in nanoscale audit pass. All resolved in v1.1.
+I-01
+MEDIUM
+ThreadPoolExecutor thread timeout absent
+PROBLE
+M
+max=2 threads declared but no timeout on submitted tasks. Blocked thread holds slot indefinitely.
+Long-running CPU tool can starve all other threaded ops.
+FIX
+Add asyncio.wait_for wrapper + thread-level timeout via concurrent.futures.TimeoutError handling.
+I-02
+HIGH
+EventBus maxsize=100 → async deadlock under load
+PROBLE
+M
+If observer burst fires >100 events before dispatch loop drains, publish() coroutine blocks. Under high
+filesystem activity this can stall Core Brain's async loop.
+FIX
+Raise maxsize to 500. Add drop-oldest policy with logged warning instead of blocking publisher. Non-execution
+events must never block orchestration.
+I-03
+MEDIUM
+Plugin max=1 limit prose-only, not enforced
+PROBLE
+M
+Plugin simultaneous limit stated in text but no code contract shown. Runtime will silently allow second plugin
+load.
+FIX
+Add hard guard in PluginManager.load() — reject with PluginLimitError if count >= 1 in v1.
+I-04
+HIGH
+ResourceGuard polling interval 60s — too slow for spike prevention
+PROBLE
+M
+Heavy tool (OCR, browser) can load and consume 80+ MB in under 5 seconds. 60s poll catches it 55s too
+late.
+FIX
+Add pre-load RAM check in ObserverManager.load() and PluginManager.load() before every lazy-load. Check
+current RAM + module budget vs HARD_LIMIT before allowing load.
+I-05
+MEDIUM
+Verifier confidence threshold undefined
+PROBLE
+M
+VerificationReport.confidence is 0.0–1.0 but no floor value defined for 'triggers replan'. Verifier behavior is
+ambiguous.
+FIX
+Define REPLAN_CONFIDENCE_FLOOR = 0.6. Any report with confidence < 0.6 AND overall_success=False
+forces replan.
+I-06
+HIGH
+Context compression path breaks in DEGRADED mode
+PROBLE
+M
+Context compression (summarization) is an LLM call. When LLM API is unreachable (DEGRADED state),
+compression fails silently — context window can grow unbounded.
+FIX
+In DEGRADED mode: disable summarization. Use hard truncation (drop oldest turns) as fallback. Log warning.
+Resume summarization when LLM restored.
+I-07
+MEDIUM
+Startup LLM check → DEGRADED at boot not modeled
+PROBLE
+M
+Startup step 7 verifies LLM connectivity but state machine shows INIT → READY only. If LLM is down at
+boot, the transition path is undefined.
+FIX
+Add INIT → DEGRADED path. Startup sequence: if LLM check fails → enter DEGRADED immediately → notify
+user → continue with local-only tools.
+
+
+--- PAGE 5 ---
+KIO Architecture v1.1  ·  Page 5
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+I-08
+LOW
+Observer idle timeout hardcoded, not configurable
+PROBLE
+M
+OBSERVER_IDLE_TIMEOUT referenced as default 60s but not included in config.json schema. Operators
+cannot tune without code change.
+FIX
+Add observer_idle_timeout_s to ~/.kio/config.json schema with default 60.
+I-09
+MEDIUM
+Watchdog attempt_restart() undefined
+PROBLE
+M
+KIOWatchdog calls self.attempt_restart() after 3 missed beats but this method is never defined in the
+architecture document. Leaves critical recovery path as a void.
+FIX
+Define restart procedure: (1) flush in-flight ops with 5s grace, (2) cancel all asyncio tasks, (3) re-run startup
+sequence in-process, (4) if second failure → sys.exit(1) and rely on systemd for process restart.
+I-10
+MEDIUM
+Episodic memory pruning not scheduled
+PROBLE
+M
+Pruning at 1000 events is specified but no scheduling mechanism defined. Pruning only happens... when?
+On every write? At session end? Never?
+FIX
+Run pruning as async background task every 30 minutes. Also prune on session start before loading context. Use
+VACUUM after large prune to reclaim SQLite space.
+
+
+--- PAGE 6 ---
+KIO Architecture v1.1  ·  Page 6
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§3 · Corrections Applied in v1.1
+Summary of all architectural changes from v1.0 to v1.1:
+✓ Thread Timeout Enforcement
+Added asyncio.wait_for() wrapper around ThreadPoolExecutor tasks. Default
+per-thread timeout: OPERATION_TIMEOUT (30s). On timeout: CancelledError
+logged, step marked failed, retry logic engages.
+✓ EventBus Overflow Policy
+maxsize raised 100 → 500. Blocking publish replaced with drop-oldest policy: if
+queue full, oldest event dropped with WARN log. Execution-critical path never
+stalls on notification backpressure.
+✓ Plugin Limit Hard Guard
+PluginManager.load() now raises PluginLimitError if active_plugin_count >=
+MAX_PLUGINS (1 in v1). Documented in PluginManager contract. Test added at
+Gate 5.
+✓ Pre-Load RAM Check
+ObserverManager.load() and PluginManager.load() both call
+ResourceGuard.check_capacity(module_ram_budget_mb) before loading. If
+current_ram + budget > HARD_LIMIT: load rejected with RamBudgetError.
+ResourceGuard 60s poll remains as audit; pre-load check handles spike
+prevention.
+✓ Verifier Confidence Floor
+REPLAN_CONFIDENCE_FLOOR = 0.6 defined in verifier/verifier.py constants.
+Replan triggered when: overall_success=False AND confidence < 0.6.
+Documented in VerificationReport schema.
+✓ DEGRADED Mode Context
+Handling
+Context compression (LLM summarization) disabled in DEGRADED state.
+Fallback: hard truncation — drop oldest N turns to fit 4096 token budget. Logged
+as WARN. Compression resumes automatically on LLM restore.
+✓ Startup DEGRADED Path
+State machine now includes INIT → DEGRADED transition. If LLM connectivity
+check fails at startup step 7: state = DEGRADED, user notified via
+Telegram+CLI, local-only tools remain available. Periodic retry (60s) attempts
+restoration.
+✓ Observer Timeout Config
+observer_idle_timeout_s added to config.json schema. Default: 60. Range:
+10–3600. Validated at startup. PLUGIN_IDLE_TIMEOUT similarly externalized
+as plugin_idle_timeout_s (default 300).
+✓ Watchdog Restart Procedure
+attempt_restart() formally defined: (1) flush in-flight ops, 5s grace; (2) cancel all
+asyncio tasks; (3) re-run startup sequence in-process; (4) on second consecutive
+failure: sys.exit(1) — systemd service restarts process.
+✓ Episodic Pruning Schedule
+Pruning runs as async background task every 30 minutes via
+asyncio.create_task. Also runs on session start before context load. After large
+prune (>500 rows deleted): VACUUM executed. Execution log prune on same
+schedule.
+
+
+--- PAGE 7 ---
+KIO Architecture v1.1  ·  Page 7
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§4 · Runtime Model & Process Architecture
+Single Process Architecture
+KIO runs as a single Python process with asyncio concurrency. No multiprocessing in v1–v2. No persistent child processes.
+■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+■ KIO PROCESS ■
+■ ■
+■ ■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■ asyncio ■ ■ Module Registry ■ ■
+■ ■ Event Loop ■ ■ (lazy-load catalogue) ■ ■
+■ ■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■ ■
+■ ■■■■■■■▼■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■ CORE BRAIN ■ ■
+■ ■ router · planner · context · memory ref ■ ■
+■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■ ■
+■ ■■■■■■■▼■■■■■■■■ ■■■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■ ■
+■ ■ Executor ■ ■ Memory Manager ■ ■ Observer Mgr ■ ■
+■ ■■■■■■■■■■■■■■■■ ■ working/epis/ ■ ■ (lazy-load) ■ ■
+■ ■ ■ semantic/goal ■ ■■■■■■■■■■■■■■■■ ■
+■ ■■■■■■■▼■■■■■■■■ ■■■■■■■■■■■■■■■■■■ ■
+■ ■ Tool Registry■ ■■■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■ ■
+■ ■■■■■■■■■■■■■■■■ ■ EventBus ■ ■ Watchdog ■ ■
+■ ■ (notify only) ■ ■ (30s beats) ■ ■
+■ ■■■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■ ■
+■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+Memory Tier Model
+Tier
+RAM Budget
+Examples
+Load Policy
+Core
+80–120 MB
+Core Brain, Event Loop, Memory Manager
+Always loaded
+Active
++10–30 MB
+Tool executors, active observers
+Load on use,
+pre-checked
+Heavy
++20–50 MB
+OCR, browser automation, image tools
+Load on demand, unload
+after task
+
+
+--- PAGE 8 ---
+KIO Architecture v1.1  ·  Page 8
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+Concurrency Model
+· asyncio — all I/O-bound ops (API calls, file I/O, Telegram)
+· ThreadPoolExecutor (max 2 threads) — CPU-bound tool operations
+· All coroutines: asyncio.wait_for(timeout=OPERATION_TIMEOUT, default 30s)
+· All threads: concurrent.futures timeout enforced, CancelledError → retry
+· No multiprocessing in v1–v2
+
+
+--- PAGE 9 ---
+KIO Architecture v1.1  ·  Page 9
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§5 · Core Brain Specification
+Core Brain is the mandatory routing hub. Every execution decision passes through it. It is a router and coordinator — not an
+implementer.
+Responsibilities
+Responsibility
+Description
+Session Management
+Maintains active session state, user identity, context window
+Intent Routing
+Classifies incoming input → routes to planner or direct response
+LLM Gateway
+Single point of contact for all cloud LLM API calls
+Context Evolution
+Manages context sent to LLM (compression, injection, DEGRADED truncation)
+Goal Tracking
+Maintains active goals, sub-goals, completion states
+Execution Control
+Approves/rejects execution plans before they reach Executor
+Memory Coordination
+Reads/writes to Memory Manager — decides what to persist
+Replanning
+Detects failed plans → triggers replanning with updated context
+What Core Brain Does NOT Do
+✗Directly execute tools
+✗Write to filesystem
+✗Manage observer lifecycles
+✗Handle authentication
+✗Format output for channels
+✗Store secrets or API keys
+Context Window Composition
+Slot
+Max Tokens
+Content
+DEGRADED Behavior
+System Prompt
+~500
+Fixed, hardcoded, read-only at runtime
+Unchanged
+Session Context
+~2000
+Rolling window of session state
+Hard-truncate oldest
+Working Memory
+Inject
+~500
+Current goal + relevant facts
+Unchanged
+Conversation
+History
+~1096
+Last N turns, summarized when needed
+Hard-truncate (no
+summarize)
+Current Input
+variable
+New user input
+Unchanged
+TOTAL BUDGET
+4096
+Hard limit per LLM request
+Hard limit maintained
+LLM Gateway Contract (Key Types)
+@dataclass
+class LLMRequest:
+
+
+--- PAGE 10 ---
+KIO Architecture v1.1  ·  Page 10
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+system_prompt: str
+messages: list[dict] # OpenAI-format
+tools: list[ToolSchema] | None
+max_tokens: int = 2048
+temperature: float = 0.1 # Low for deterministic planning
+timeout_s: float = 30.0
+session_id: str = ''
+degraded_mode: bool = False # NEW v1.1: disables summarization
+@dataclass
+class LLMResponse:
+content: str | None
+tool_calls: list[ToolCallRequest] | None
+usage: TokenUsage
+latency_ms: float
+error: str | None
+Replanning Conditions
+· Verifier returns FAIL with replan=True AND confidence < REPLAN_CONFIDENCE_FLOOR (0.6)
+· Tool execution raises ToolPermissionDenied or ToolSandboxViolation
+· LLM response malformed 2x consecutively
+· User explicitly requests plan change mid-execution
+· Critical dependency tool unavailable
+· RamBudgetError on module pre-load (replan without heavy tool)
+
+
+--- PAGE 11 ---
+KIO Architecture v1.1  ·  Page 11
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§6 · Planner / Executor / Verifier Model
+Strict Separation Contract
+These four components never call each other directly. All communication via DTOs through Core Brain.
+Planner → produces → ExecutionPlan
+■
+consumed by Executor
+■
+produces ExecutionResult
+■
+validated by Verifier
+■
+produces VerificationReport
+■
+read by Core Brain
+Execution Flow
+Core Brain
+■
+■■■ Planner.decompose(goal, context)
+■ ■■■ returns ExecutionPlan
+■
+■■■ [if requires_confirmation] → notify user → await confirm
+■
+■■■ Executor.run(plan)
+■ ■■■ for each step (respecting dependencies):
+■ ■ ■■■ ResourceGuard.check_capacity(tool_ram) ← NEW v1.1
+■ ■ ■■■ ToolRegistry.validate(step)
+■ ■ ■■■ ToolRegistry.execute(step)
+■ ■ ■■■ collect ExecutionResult
+■ ■■■ returns list[ExecutionResult]
+■
+■■■ Verifier.validate(plan, results)
+■ ■■■ returns VerificationReport
+■ confidence < 0.6 + overall_success=False → replan ← NEW v1.1
+
+
+--- PAGE 12 ---
+KIO Architecture v1.1  ·  Page 12
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+■
+■■■ if replan → Core Brain.replan(report) → loop
+else → Response.format(results) → dispatch
+Key DTOs
+@dataclass
+class PlanStep:
+step_id: str
+tool_name: str
+tool_args: dict
+expected_output_type: str
+side_effect_class: SideEffectClass # NONE | READ | WRITE | DESTRUCTIVE
+retry_budget: int = 2
+timeout_s: float = 30.0
+fallback_step_id: str | None = None
+@dataclass
+class VerificationReport:
+plan_id: str
+overall_success: bool
+step_results: list[StepVerification]
+replan: bool
+replan_reason: str | None
+confidence: float # 0.0–1.0 | replan if < 0.6 + fail ← NEW v1.1
+Retry Logic with Thread Timeout (v1.1)
+async def execute_step_with_retry(step: PlanStep) -> ExecutionResult:
+for attempt in range(step.retry_budget + 1):
+try:
+result = await asyncio.wait_for( # NEW v1.1
+tool_registry.execute(step),
+timeout=step.timeout_s
+)
+if result.success:
+return result
+except asyncio.TimeoutError:
+
+
+--- PAGE 13 ---
+KIO Architecture v1.1  ·  Page 13
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+logger.warning(f'Step {step.step_id} timed out attempt {attempt}')
+if attempt == step.retry_budget:
+if step.fallback_step_id:
+return await execute_fallback(step.fallback_step_id)
+return ExecutionResult(success=False, error='timeout', ...)
+except ToolTransientError as e:
+if attempt == step.retry_budget:
+return ExecutionResult(success=False, error=str(e), ...)
+await asyncio.sleep(2 ** attempt) # Exponential backoff
+
+
+--- PAGE 14 ---
+KIO Architecture v1.1  ·  Page 14
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§7 · Tool Registry & Sandboxing
+Tool Contract Protocol
+class KIOTool(Protocol):
+name: str # Unique identifier
+description: str # LLM-readable capability
+version: str # Semantic version
+side_effect_class: SideEffectClass
+permissions_required: list[Permission]
+ram_budget_mb: float # NEW v1.1: declared RAM cost
+input_schema: dict # JSON Schema for arg validation
+output_schema: dict # JSON Schema for output validation
+async def execute(self, args: dict, ctx: ExecutionContext) -> ToolResult: ...
+async def health_check(self) -> bool: ...
+def get_schema(self) -> ToolSchema: ...
+Side Effect Classification & Confirmation Policy
+Class
+Description
+Confirmation Policy
+NONE
+Pure computation, no external effects
+Auto-execute
+READ
+Reads external state, no mutations
+Auto-execute
+WRITE
+Mutates state, reversible
+Log + auto-execute (or
+confirm-mode)
+DESTRUCTIVE
+Mutates state, NOT reversible
+Always require explicit user
+confirmation
+Permission System
+Permission
+Enum Value
+Scope
+Filesystem Read
+fs:read
+Configured allowed paths only
+Filesystem Write
+fs:write
+Configured allowed paths only
+Filesystem Delete
+fs:delete
+Requires DESTRUCTIVE class
+Network Outbound
+net:out
+Via HttpClient wrapper only
+Process Spawn
+proc:spawn
+Explicit confirm + allowlist
+Clipboard R/W
+clip:read / clip:write
+User session only
+System Settings
+sys:settings
+Read-only in v1
+
+
+--- PAGE 15 ---
+KIO Architecture v1.1  ·  Page 15
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+Plugin Execute
+plugin:exec
+PluginManager gate
+4-Layer Permission Validation
+Layer 1: Tool Registration
+Tool declares required permissions at registration time
+Layer 2: Plan Approval
+Core Brain validates plan against user permission profile
+Layer 3: Execution Gate
+Executor re-validates each step before tool call (defense in depth)
+Layer 4: Side Effect Confirmation
+DESTRUCTIVE ops hard-blocked until explicit user confirmation
+Built-In Tool Categories (v1)
+Category
+Tools
+Side Effect
+RAM
+Filesystem
+read_file, write_file, list_dir, search_files
+READ/WRITE
+< 2 MB
+System
+get_active_window, get_system_info,
+run_command
+READ/WRITE
+< 2 MB
+Clipboard
+read_clipboard, write_clipboard
+READ/WRITE
+< 1 MB
+Network
+http_get, http_post, download_file
+READ/WRITE
+< 3 MB
+Telegram
+send_message, send_file
+WRITE
+Shared w/
+channel
+Memory
+store_fact, recall_fact, clear_session
+READ/WRITE
+Shared w/
+MemMgr
+Scheduling
+schedule_task, cancel_task, list_tasks
+WRITE
+< 1 MB
+
+
+--- PAGE 16 ---
+KIO Architecture v1.1  ·  Page 16
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§8 · Memory System
+Memory Architecture Overview
+■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+■ MEMORY MANAGER ■
+■ ■
+■ ■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■ ■
+■ ■ Working ■ ■ Episodic ■ ■ Semantic ■ ■
+■ ■ (dict) ■ ■ (SQLite+ ■ ■ (SQLite KV) ■ ■
+■ ■ ~2–5 MB ■ ■ FTS5) ■ ■ ~3–8 MB ■ ■
+■ ■ ■ ■ ~5–10 MB ■ ■ ■ ■
+■ ■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■ ■
+■ ■
+■ ■■■■■■■■■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■ Goal Memory ■ ■ Execution Log ■ ■
+■ ■ (SQLite) ~1–3 MB ■ ■ (SQLite) ~2–5 MB ■ ■
+■ ■■■■■■■■■■■■■■■■■■■■■■■■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■ ■
+■ ■
+■ Total Budget: ~15–30 MB ■
+■ Pruning: every 30 min + session start ← NEW v1.1 ■
+■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+Memory Type Reference
+Type
+Storage
+Lifecycle
+Retention Limit
+Pruning Schedule
+Working
+Python dict
+in-process
+Session only
+500 keys LRU
+On LRU eviction
+Episodic
+SQLite + FTS5
+Persistent
+1000 events
+Every 30 min + session start
+Semantic
+SQLite KV
+Persistent,
+manual
+No auto-prune
+Manual only
+Goal
+SQLite
+Persistent
+No auto-prune
+Manual / on cancel
+Execution
+Log
+SQLite
+Persistent
+10,000 records
+Every 30 min + session start
+Pruning Background Task (v1.1)
+async def memory_pruning_task():
+while True:
+
+
+--- PAGE 17 ---
+KIO Architecture v1.1  ·  Page 17
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+await asyncio.sleep(30 * 60) # Every 30 minutes
+deleted_ep = await episodic_memory.prune(max_records=1000)
+deleted_log = await execution_log.prune(max_records=10000)
+if deleted_ep > 500 or deleted_log > 2000:
+await db.execute('VACUUM') # Reclaim SQLite space
+logger.info(f'Pruned {deleted_ep} episodes, {deleted_log} log rows. VACUUMed.')
+# Also called at session start, before context load:
+async def on_session_start():
+await episodic_memory.prune(max_records=1000)
+await execution_log.prune(max_records=10000)
+
+
+--- PAGE 18 ---
+KIO Architecture v1.1  ·  Page 18
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§9 · Observer System
+Observer
+RAM Cost
+Mode
+Load Policy
+Filesystem
+~2 MB
+Always-on
+Load at startup if configured
+Clipboard
+~1 MB
+Always-on
+Load at startup
+Active Window
+~2 MB
+On-demand
+Lazy — load on session context request
+Scheduled Tasks
+~1 MB
+Always-on
+Load at startup
+OCR Engine
+50–80 MB
+Lazy
+Explicit request only. Pre-load RAM check required.
+Browser Automation
+~150 MB
+Lazy
+v2+ only. Pre-load RAM check required.
+Screenshot
+~10 MB
+Lazy
+Explicit request only. Pre-load RAM check required.
+Audio Input
+~15 MB
+Lazy
+Phase 3+ only
+Camera / CV
+150+ MB
+REJECTED
+Never — v1 through v3
+Observer Loading Model (v1.1)
+Event / Request Arrives
+■
+■■■ Does required observer exist and is running?
+■ YES → use running observer
+■ NO ↓
+■
+■■■ ResourceGuard.check_capacity(observer.ram_budget_mb) ← NEW v1.1
+■ FAIL → RamBudgetError → notify user → plan without observer
+■ PASS ↓
+■
+■■■ Load observer (lazy import)
+■■■ Register with ObserverManager
+■■■ Activate → emit events → EventBus
+■
+■■■ Unload when:
+idle > observer_idle_timeout_s (config, default 60s) ← NEW v1.1
+OR session end
+OR explicit unload command
+
+
+--- PAGE 19 ---
+KIO Architecture v1.1  ·  Page 19
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§10 · Event System
+Decision: Centralized Core Brain orchestration + lightweight internal notification bus.
+EventBus IS Used For
+EventBus is NEVER Used For
+Observer firing notifications (clipboard changed, file
+modified)
+Tool execution routing
+Watchdog health signals
+Plan dispatch
+Memory persistence signals
+LLM call routing
+Module lifecycle events (loaded, unloaded)
+Response delivery
+EventBus Implementation (v1.1 — Drop-Oldest Policy)
+class KIOEventBus:
+MAX_QUEUE = 500 # v1.1: raised from 100
+def __init__(self):
+self._subscribers: dict[str, list[Callable]] = {}
+self._queue: asyncio.Queue = asyncio.Queue(maxsize=self.MAX_QUEUE)
+async def publish(self, event: KIOEvent) -> None:
+if self._queue.full(): # NEW v1.1
+try:
+self._queue.get_nowait() # Drop oldest
+logger.warning(f'EventBus overflow: dropped oldest event')
+except asyncio.QueueEmpty:
+pass
+await self._queue.put(event) # Non-blocking now
+async def dispatch_loop(self) -> None:
+while True:
+event = await self._queue.get()
+for handler in self._subscribers.get(event.type, []):
+try:
+await handler(event)
+except Exception as e:
+logger.error(f'EventBus handler error: {e}')
+self._queue.task_done()
+
+
+--- PAGE 20 ---
+KIO Architecture v1.1  ·  Page 20
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§11 · Security Architecture
+Hard-Blocked Operations (No Exceptions)
+✗eval() or exec() on user-supplied strings
+✗subprocess.Popen(shell=True) with user-controlled input
+✗Recursive tool calls depth > 5
+✗Plugins writing to Core Brain internal state directly
+✗Network requests to localhost / 127.0.0.1 (SSRF prevention)
+✗Modifying ~/.kio/auth.token or secrets.json via tool execution
+✗Spawning observer processes without registration in ObserverManager
+✗Importing os.system or subprocess without PROCESS_SPAWN permission
+Anti-Prompt-Injection Mitigations
+· User input always injected as role: user — never into system prompt
+· System prompt hardcoded, read-only at runtime
+· Tool calls extracted from LLM response validated against tool registry — unknown names rejected
+· Tool arguments validated against JSON Schema before execution
+· Any plan step with shell=True requires PROCESS_SPAWN permission AND user confirmation
+Auth Boundaries
+Auth Concern
+Implementation
+Local auth token
+~/.kio/auth.token — chmod 600 — loaded once at startup
+Telegram bot token
+~/.kio/secrets.json — chmod 600 — user ID allowlist
+Cloud LLM API key
+~/.kio/secrets.json — never logged, never in error messages
+Audit log
+Append-only SQLite — deletion requires explicit admin command + confirm
+
+
+--- PAGE 21 ---
+KIO Architecture v1.1  ·  Page 21
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§12 · Plugin Architecture
+Plugin Contract
+KIO_PLUGIN_MANIFEST = {
+'name': 'my-plugin',
+'version': '1.0.0',
+'description': 'What this plugin does',
+'tools': ['tool_a', 'tool_b'],
+'permissions': ['fs:read', 'net:out'],
+'ram_budget_mb': 20, # NEW v1.1: required declaration
+'entry_point': 'MyPluginClass',
+'kio_api_version': '1'
+}
+class MyPluginClass:
+async def initialize(self, ctx: PluginContext) -> None: ...
+async def get_tools(self) -> list[KIOTool]: ...
+async def shutdown(self) -> None: ...
+Plugin Restrictions
+· Maximum 1 plugin loaded simultaneously in v1 — hard-enforced in PluginManager.load()
+· Plugins cannot subscribe to EventBus directly
+· Plugins cannot access Memory Manager directly (PluginContext API only)
+· Plugins cannot modify system prompt or Core Brain state
+· Plugin tools validated against same Tool Contract as built-ins
+· Plugin must declare ram_budget_mb — used in pre-load RAM check
+
+
+--- PAGE 22 ---
+KIO Architecture v1.1  ·  Page 22
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§13 · Runtime Lifecycle & State Machine
+■■■■■■■■■■■■
+■■■■■■ INIT ■
+■ ■■■■■■■■■■■■
+■ ■ startup checks
+■ ■■■■■▼■■■■■■ LLM down at boot ■■■■■■■■■■■■■
+■ ■ READY ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ DEGRADED ■ ← NEW v1.1
+■ ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■ (LLM down)■
+■ ■ input received recovery ■■■■■■■■■■■■■
+■ ■■■■■▼■■■■■■ ■ unrecoverable
+■ ■ ACTIVE ■■■ task complete ■■■■■■■■■■■■■■■■■■■ ■
+■ ■■■■■■■■■■■■ ■
+■ ■ idle > timeout ■
+■ ■■■■■▼■■■■■■ ■
+■ ■ IDLE ■■■ input received ■■■■ ACTIVE ■
+■ ■■■■■■■■■■■■ ■
+■ ■ resource constraint / dep fail ■
+■ ■■■■■▼■■■■■■ ■
+■ ■ DEGRADED ■■■ recovery ■■■■ READY ■
+■ ■■■■■■■■■■■■ ▼
+■ ■ unrecoverable ■■■■■■■■■■■■■■■■
+■■■■■■■■■■■ ■ SHUTDOWN ■
+■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+Startup Sequence (v1.1)
+1 Load config (~/.kio/config.json) including observer_idle_timeout_s
+2 Validate auth token exists — exit if missing
+3 Initialize Memory Manager (open SQLite connections, run schema migration)
+4 Run episodic + execution log pruning (session-start prune)
+5 Initialize Tool Registry (scan built-in tools, validate contracts)
+6 Initialize Observer Manager (register always-on observers — do NOT start yet)
+7 Initialize EventBus (start dispatch_loop coroutine)
+8 Initialize Core Brain (load system prompt, verify LLM API connectivity)
+→ If LLM check fails: state = DEGRADED, notify user, continue local-only
+9 Start always-on observers (Filesystem, Clipboard, Scheduled)
+10 Initialize Input Channels (Telegram, CLI)
+11 Start Watchdog (30s heartbeat)
+12 Start ResourceGuard 60s audit loop
+
+
+--- PAGE 23 ---
+KIO Architecture v1.1  ·  Page 23
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+13 Start memory pruning background task (30 min)
+14 Set state = READY (or DEGRADED if LLM failed)
+15 Log startup metrics (RAM usage, load time — target: <3s, <120 MB)
+Watchdog Restart Procedure (v1.1)
+async def attempt_restart(self): # NEW v1.1: defined
+logger.critical('Watchdog: initiating in-process restart')
+# Step 1: Flush in-flight ops
+await asyncio.wait_for(flush_inflight(), timeout=5.0)
+# Step 2: Cancel all asyncio tasks
+for task in asyncio.all_tasks():
+if task is not asyncio.current_task():
+task.cancel()
+await asyncio.gather(*asyncio.all_tasks(), return_exceptions=True)
+# Step 3: Re-run startup sequence
+try:
+await startup_sequence()
+logger.info('Watchdog: restart successful')
+except Exception as e:
+logger.critical(f'Watchdog: restart failed: {e}. Exiting.')
+sys.exit(1) # systemd will restart the process
+
+
+--- PAGE 24 ---
+KIO Architecture v1.1  ·  Page 24
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§14 · Failure Recovery Model
+Failure Type
+Detection
+Response
+Max Recovery Time
+LLM API timeout
+asyncio.TimeoutErro
+r
+Retry ×2 → notify user
+90s
+LLM API error
+(4xx/5xx)
+HTTP status check
+Retry ×1 → DEGRADED template
+response
+30s
+Tool execution error
+Exception catch
+Retry ×2 → fallback tool → replan
+60s
+Tool timeout
+asyncio.TimeoutErro
+r (NEW)
+Kill coroutine → mark failed → replan
+Per step
+Memory read error
+SQLite exception
+In-memory fallback → warn →
+continue
+Immediate
+Observer crash
+Health check fail
+Unload → log → continue without
+observer
+10s
+Network failure
+Connection error
+Queue retry → notify if queued >5 min
+Async
+Plugin crash
+Exception boundary
+Isolate → unload plugin → log →
+continue
+5s
+RAM hard limit
+Pre-load check
+(NEW)
+Reject load → RamBudgetError →
+replan
+Immediate
+DEGRADED Mode Behavior (Updated v1.1)
+· State entered when: LLM API unreachable at startup OR during operation
+· Tool execution continues for pre-approved deterministic tools (filesystem, clipboard, scheduling)
+· Context compression disabled — hard truncation used instead
+· No planning or LLM-dependent features available
+· User notified immediately via all active channels
+· Periodic retry every 60s to restore LLM connectivity
+· Auto-exit DEGRADED when LLM API responds to health check
+
+
+--- PAGE 25 ---
+KIO Architecture v1.1  ·  Page 25
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§15 · Resource Budget Model
+RAM Budget Breakdown
+Component
+Idle
+Active
+Peak
+Python interpreter
+~25 MB
+~25 MB
+~25 MB
+asyncio event loop
+~2 MB
+~2 MB
+~2 MB
+Core Brain + LLM gateway
+~15 MB
+~20 MB
+~30 MB
+Memory Manager (SQLite)
+~10 MB
+~12 MB
+~15 MB
+Tool Registry (built-ins)
+~8 MB
+~10 MB
+~10 MB
+EventBus
+~1 MB
+~1 MB
+~1 MB
+Input Channels (Telegram)
+~10 MB
+~10 MB
+~10 MB
+Observer Manager (idle)
+~2 MB
+~2 MB
+~2 MB
+CORE TOTAL
+~73 MB
+~82 MB
+~95 MB
+Active tool execution
++0
++10 MB
++30 MB
+Active observer
++0
++5 MB
++10 MB
+LLM response buffer
++0
++5 MB
++15 MB
+Plugin (if loaded)
++0
++15 MB
++30 MB
+REALISTIC ACTIVE MAX
+—
+~107 MB
+~180 MB
+ABSOLUTE CEILING
+200 MB
+200 MB
+200 MB
+ResourceGuard (v1.1) — Pre-Load + Audit
+class ResourceGuard:
+SOFT_LIMIT_MB = 150
+HARD_LIMIT_MB = 190
+def check_capacity(self, module_ram_mb: float) -> None:
+'''Called BEFORE every lazy-load. Raises RamBudgetError if no headroom.'''
+current = psutil.Process().memory_info().rss / 1024 / 1024
+if current + module_ram_mb > self.HARD_LIMIT_MB:
+raise RamBudgetError(f'No headroom: {current:.0f}+{module_ram_mb} > {self.HARD_LIMIT_MB} MB')
+async def audit_loop(self) -> None:
+'''60s audit: emergency unload if already over limits.'''
+while True:
+
+
+--- PAGE 26 ---
+KIO Architecture v1.1  ·  Page 26
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+await asyncio.sleep(60)
+ram = psutil.Process().memory_info().rss / 1024 / 1024
+if ram > self.HARD_LIMIT_MB:
+await observer_manager.unload_all()
+await plugin_manager.unload_all()
+gc.collect()
+elif ram > self.SOFT_LIMIT_MB:
+await observer_manager.unload_idle()
+gc.collect()
+
+
+--- PAGE 27 ---
+KIO Architecture v1.1  ·  Page 27
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§16 · Build Gates & Roadmap
+Gates are sequential and non-negotiable. No gate runs in parallel.
+Gate 0
+Skeleton · Week 1–2
+Runnable process with correct shape. Nothing useful yet.
+Artifacts
+Tests Required
+ main.py — entry point, state machine stub
+ core/brain.py — Core Brain stub
+ core/event_bus.py — Working EventBus (v1.1: drop-oldest)
+ core/config.py — Config loader (includes observer_idle_timeout_s)
+ memory/manager.py — SQLite init + schema migration
+ Process starts and reaches READY in <5s
+ EventBus publishes 1000 events without loss or deadlock
+ SQLite schema creates without error
+ RAM at READY: <100 MB
+Gate 1
+Core Brain + LLM · Week 2–4
+KIO receives text input and returns LLM-generated response.
+Artifacts
+Tests Required
+ core/llm_gateway.py — Gemini API integration (degraded_mode flag)
+ core/brain.py — Full intent routing, context management
+ channels/cli.py — Basic CLI input
+ State machine: INIT → READY and INIT → DEGRADED paths
+ 10 inputs → 10 valid responses
+ LLM timeout handled gracefully
+ DEGRADED mode entered if LLM unreachable at startup
+ Token budget enforcement working
+ RAM: <130 MB during active LLM call
+Gate 2
+Tool Registry + Core Tools · Week 4–7
+KIO executes the 5 most critical tools under plan control.
+Artifacts
+Tests Required
+ tools/registry.py — Full ToolRegistry (ram_budget_mb on contracts)
+ tools/filesystem.py, network.py, memory_tools.py
+ planner/planner.py, executor/executor.py (asyncio.wait_for retry)
+ verifier/verifier.py (REPLAN_CONFIDENCE_FLOOR = 0.6)
+ ResourceGuard.check_capacity() called in executor
+ Multi-step plan (3+ steps) executes correctly
+ Tool contract violation rejected before execution
+ DESTRUCTIVE op blocked without confirmation
+ Retry with timeout works (mock transient failure)
+ Verifier confidence < 0.6 triggers replan
+Gate 3
+Memory + Telegram · Week 7–10
+KIO persists context across sessions and is controllable via Telegram.
+Artifacts
+Tests Required
+ memory/episodic.py, semantic.py, goal_memory.py
+ Memory pruning background task (30 min)
+ channels/telegram.py — Full Telegram bot integration
+ Session-start prune on episodic + execution log
+ Facts stored in session persist after restart
+ Episodic log prunes correctly at 1000 limit
+ Telegram → execution → Telegram response
+ Only authorized user IDs accepted
+ RAM: <140 MB with Telegram + memory
+Gate 4
+Observer System · Week 10–13
+KIO reacts to system events with RAM-safe lazy loading.
+Artifacts
+Tests Required
+
+
+--- PAGE 28 ---
+KIO Architecture v1.1  ·  Page 28
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+ observers/manager.py — pre-load RAM check
+ observers/filesystem.py, clipboard.py, window.py
+ ResourceGuard.check_capacity() in ObserverManager.load()
+ observer_idle_timeout_s read from config
+ Observer loads on demand, unloads after idle timeout
+ RAM does not exceed 155 MB with 2 observers active
+ Observer crash does not crash main process
+ RamBudgetError correctly prevents overload
+Gate 5
+Plugin System + Security · Week 13–17
+External plugins loadable. Security model complete.
+Artifacts
+Tests Required
+ plugins/manager.py — PluginLimitError hard guard
+ security/audit_log.py (append-only)
+ security/permission_validator.py
+ Anti-prompt-injection middleware
+ Plugin max=1 limit enforced with PluginLimitError
+ Plugin cannot access Memory Manager directly
+ Audit log records all tool executions
+ Prompt injection attempt does not execute arbitrary tools
+ Permission escalation rejected at all 4 layers
+Gate 6
+Production Hardening · Week 17–20
+KIO stable for daily use without manual intervention.
+Artifacts
+Tests Required
+ Watchdog attempt_restart() implemented and tested
+ DEGRADED mode tested (mock LLM API outage)
+ All ResourceGuard limits load-tested
+ systemd service unit file
+ 7-day soak test (RAM stable, no crash)
+ Startup time <3s verified
+ 7-day run without memory leak or RAM ceiling breach
+ Watchdog auto-restart tested (2 missed beat cycles)
+ DEGRADED → READY restoration tested
+ Full documentation: README + architecture reference
+
+
+--- PAGE 29 ---
+KIO Architecture v1.1  ·  Page 29
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§17 · Anti-Patterns & Rejected Systems
+Anti-Patterns (What Will Kill KIO)
+Anti-Pattern
+Why It Kills KIO
+Direct tool calls bypassing Core Brain
+Breaks audit trail. Hidden execution paths. Security hole.
+Importing LangChain
+80–150 MB import cost alone. Framework lock-in. RAM
+budget dead on arrival.
+Thread-per-observer
+RAM bloat + OS scheduler overhead. Use asyncio.
+Vector DB for all memory
+ChromaDB/Qdrant = 200–500 MB resident. SQLite FTS5 is
+sufficient v1–v2.
+Multi-agent swarms
+On 8 GB: each agent ~100 MB. Three agents = system swap.
+shell=True in tools
+Shell injection. Never with any user-derived input.
+Unbounded context window
+LLM cost explosion + latency death spiral. Always
+compress/truncate.
+EventBus for execution routing
+Untraceable execution. Debug nightmare. Race conditions.
+God class Core Brain
+Keep it a router. A 5000-line Core Brain is a monolith.
+Premature local LLM
+Any 4B+ param model = ≥4 GB RAM. Gate v4+ only with
+hardware upgrade.
+Blocking publisher on EventBus
+Stalls async loop. Drop-oldest policy prevents this (v1.1 fix).
+60s-only RAM monitoring
+Insufficient for spike prevention. Pre-load check required
+(v1.1 fix).
+Permanently Rejected Systems
+System
+Rejection Reason
+Reconsider?
+Local LLM (Llama, Mistral, Phi)
+≥4 GB RAM minimum. Incompatible with 8 GB
+constraint.
+v4+ only if hardware
+upgrades
+LangChain / LlamaIndex
+80–150 MB import overhead. Framework lock-in.
+Never. Build custom.
+ChromaDB / Qdrant / Weaviate
+200–500 MB resident. Overkill for personal scale.
+v4+ with RAM
+upgrade only
+Redis / RabbitMQ
+Separate process, 50–100 MB. No justification at this
+scale.
+Never.
+asyncio.Queue
+sufficient.
+Docker / Kubernetes
+Not a server app. Personal laptop deployment.
+Never for local.
+Always-on camera / CV
+150+ MB. No justified use case. Privacy risk.
+Never.
+Always-on browser automation
+Chromium = 200–400 MB resident.
+Lazy-load v2+
+acceptable
+
+
+--- PAGE 30 ---
+KIO Architecture v1.1  ·  Page 30
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+Multi-agent swarm
+RAM explosion. Coordination overhead exceeds
+benefit.
+Not in scope.
+ASR (always-on speech)
+50–100 MB model + privacy risk + low ROI.
+v3+ if user explicitly
+requests
+
+
+--- PAGE 31 ---
+KIO Architecture v1.1  ·  Page 31
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+§18 · Final Engineering Rules (Permanent)
+These rules govern all future KIO development. Violations require full architectural review.
+MUST Always Follow
+✓ Core Brain is the single execution router. No architecture that bypasses it is acceptable.
+✓ observe → reason → plan → execute → verify → adapt loop is immutable. Steps cannot be skipped.
+✓ RAM targets are hard constraints. Features that breach them are blocked, not deferred.
+✓ Tool contracts are typed. No dynamic, untyped tool execution at any gate.
+✓ Audit log is append-only. Never add deletion API.
+✓ Gates are sequential. Gate N must be complete before Gate N+1 starts.
+✓ Every lazy-load must call ResourceGuard.check_capacity() before loading.
+✓ EventBus is notification-only. Never route execution through it.
+✓ DEGRADED mode must handle gracefully. Never crash when LLM is unreachable.
+✓ Watchdog attempt_restart() must always be implemented before Gate 6.
+✓ Memory pruning must run on a schedule. Never rely on ad-hoc pruning.
+✓ Verifier confidence floor (0.6) must be enforced. Never silently succeed a low-confidence plan.
+MUST NEVER Add
+✗Local LLM integration before v4 (hardware upgrade required)
+✗LangChain, LlamaIndex, or any heavy framework
+✗Vector database (ChromaDB, Qdrant, Weaviate) before v4
+✗Multi-agent architecture or autonomous agent swarms
+✗Always-on camera, persistent OCR, or always-on audio before v3
+✗subprocess mesh for plugins (use subprocess isolation in v2+, not mesh)
+✗eval() or exec() on user-controlled input — ever
+✗Blocking EventBus publishers — use drop-oldest policy
+✗Thread-per-observer model — use asyncio tasks
+✗RAM-unchecked lazy-loads — always pre-check capacity
+Architecture Drift to Prevent
+■ Core Brain growing into an implementer (God class). Keep it a router.
+■ Tool execution leaking outside Executor (shortcut calls, helper functions).
+■ Memory system growing vector embeddings before v4.
+■ Observer system accumulating always-on observers that weren't approved.
+■ Plugin system allowing multiple simultaneous plugins before RAM budget expands.
+■ EventBus being used for execution routing as 'temporary' measure.
+■ Context window growing without compression or truncation enforcement.
+■ Security layers being 'temporarily' skipped for development convenience.
+KIO is buildable. Every component maps to a concrete Python module. No component requires hardware
+beyond spec. No component requires a paid service beyond a cloud LLM API key (Gemini free tier sufficient for
+development). What will kill it: gate skipping, framework temptation, RAM budget drift. Build Gate 0. Run the
+tests. Check the RAM. Then and only then: Gate 1.
+
+
+--- PAGE 32 ---
+KIO Architecture v1.1  ·  Page 32
+INTERNAL ENGINEERING — AUTHORITATIVE
+KIO
+Final Locked Architecture  ·  v1.1
+LOCKED
+ KIO Final Locked Architecture · v1.1 · Generated from v1.0 + nanoscale audit pass
+ Status: LOCKED — AUTHORITATIVE — revision requires full architectural review
+

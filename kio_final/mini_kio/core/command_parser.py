@@ -39,12 +39,38 @@ _FOLDER_KEYWORDS = {
     "music", "videos", "home", "appdata"
 }
 
+_MAX_COMMAND_STEPS = 4
+
 
 def _apply_aliases(text: str) -> str:
     """Replace common speech patterns with normalized names."""
     for pattern, replacement in _ALIASES:
         text = pattern.sub(replacement, text)
     return text
+
+
+def _normalize_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _collapse_repeated_conjunctions(text: str) -> str:
+    text = re.sub(r"(?:\s+(?:and|then))(?:\s+(?:and|then))+", " and", text, flags=re.I)
+    return _normalize_whitespace(text)
+
+
+def _contains_command_connector(text: str) -> bool:
+    return bool(re.search(r"\b(?:and|then)\b", text))
+
+
+def _is_malformed_chain(text: str) -> bool:
+    text = text.strip()
+    if not text:
+        return True
+    if re.match(r"^(?:and|then)\b", text):
+        return True
+    if re.search(r"\b(?:and|then)$", text):
+        return True
+    return False
 
 
 def parse_command(command: str) -> List[Dict[str, Any]]:
@@ -66,26 +92,34 @@ def parse_command(command: str) -> List[Dict[str, Any]]:
         return []
 
     command = _apply_aliases(command)
+    command = _normalize_whitespace(command)
     command_lower = command.lower()
+    command_lower = _collapse_repeated_conjunctions(command_lower)
+
+    if _is_malformed_chain(command_lower):
+        return []
 
     logger.info(f"[KIO] command parsed: {command!r}")
-    steps = []
+    steps: list[dict[str, Any]] = []
 
-    # Only split into multiple parts when the command is truly multi-step.
     if is_multi_step(command_lower):
-        parts = re.split(r"\s+and\s+|\s+then\s+", command_lower)
-    else:
-        parts = [command_lower]
-
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
-        step = _parse_single_step(part)
-        if step:
+        parts = re.split(r"\s+(?:and|then)\s+", command_lower)
+        if len(parts) > _MAX_COMMAND_STEPS:
+            return []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                return []
+            step = _parse_single_step(part)
+            if not step:
+                return []
             steps.append(step)
+        return steps
 
-    return steps
+    step = _parse_single_step(command_lower)
+    if not step:
+        return []
+    return [step]
 
 
 def _parse_single_step(text: str) -> Dict[str, Any]:
@@ -126,16 +160,22 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
 
     # ── CLOSE ─────────────────────────────────────────────────────────────────
     if action == "close":
+        if not target:
+            return {}
         return {"action": "close", "target": target}
 
     # ── SEARCH ────────────────────────────────────────────────────────────────
     if action == "search":
         # Strip leading "for " if present
         query = re.sub(r"^for\s+", "", target, flags=re.I).strip()
-        return {"action": "search", "target": query or target}
+        if not query:
+            return {}
+        return {"action": "search", "target": query}
 
     # ── PLAY ──────────────────────────────────────────────────────────────────
     if action == "play":
+        if not target:
+            return {}
         return {"action": "youtube_play", "target": target}
 
     # ── SEARCH YOUTUBE ────────────────────────────────────────────────────────
@@ -146,9 +186,13 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
 
     # ── FOLDER (explicit) ─────────────────────────────────────────────────────
     if action == "folder":
+        if not target:
+            return {}
         return {"action": "folder", "target": target}
 
-    # Unknown action — pass through for AI fallback
+    # Unknown action — pass through for AI fallback or policy handling
+    if not target and action not in {"shutdown", "restart", "lock"}:
+        return {}
     return {"action": action, "target": target}
 
 
@@ -163,7 +207,18 @@ def is_multi_step(command: str) -> bool:
     lower = command.lower()
     
     # Check for verb on both sides of connector
-    verbs = {"open", "close", "search", "type", "launch", "folder", "play"}
+    verbs = {
+        "open",
+        "close",
+        "search",
+        "type",
+        "launch",
+        "folder",
+        "play",
+        "lock",
+        "shutdown",
+        "restart",
+    }
     
     for sep in (r"\s+and\s+", r"\s+then\s+"):
         parts = re.split(sep, lower, maxsplit=1)

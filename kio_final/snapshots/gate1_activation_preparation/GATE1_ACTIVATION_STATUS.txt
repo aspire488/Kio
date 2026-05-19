@@ -1,0 +1,25 @@
+Gate 1 — Activation-Path Preparation
+Status: GROUNDWORK COMPLETE
+
+Validation: 7/7 PASS
+Harness: snapshots/gate1_activation_preparation/gate1_activation_validation.py
+Audit: GATE1_ACTIVATION_PATH_AUDIT.md
+
+Added:
+- mini_kio/core/activation.py (governance, gating, signals)
+- mini_kio/observers/camera_activation_observer.py (stub only)
+- runtime activation fields + observer kind/type
+- bootstrap prepare_activation_groundwork()
+
+NOT added:
+- camera capture, OpenCV, gesture recognition, loops, voice, planners
+
+Manual smoke:
+  from mini_kio.core.runtime import bootstrap_runtime, set_runtime_observer_enabled
+  from mini_kio.core.activation import submit_activation_signal, release_activation, get_activation_snapshot
+  from mini_kio.observers.camera_activation_observer import OBSERVER_NAME
+  bootstrap_runtime()
+  set_runtime_observer_enabled(OBSERVER_NAME, True)
+  submit_activation_signal(OBSERVER_NAME, "manual")
+  get_activation_snapshot()
+  release_activation()
