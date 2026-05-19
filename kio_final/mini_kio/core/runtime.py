@@ -21,7 +21,7 @@ from mini_kio.core.config import TELEGRAM_TOKEN
 
 logger = logging.getLogger(__name__)
 _CURRENT_RUNTIME: "KioRuntime | None" = None
-_RUNTIME_CONTEXT_LIMIT = 8
+_RUNTIME_CONTEXT_LIMIT = 16
 _RUNTIME_CONTEXT_TTL_S = 300
 _CHANNEL_INPUT_MAX_LEN = 2000
 _RUNTIME_OBSERVER_LIMIT = 8
@@ -246,7 +246,9 @@ def setup_startup_logging() -> None:
 def emit_runtime_trace(event: str, **fields: object) -> None:
     """Write a normalized runtime trace event through the standard logger."""
     payload: dict[str, object] = {"evt": event}
-    payload.update(fields)
+    # Ensure consistent field ordering for automated parsing
+    sorted_fields = dict(sorted(fields.items()))
+    payload.update(sorted_fields)
     logger.info(json.dumps(payload, default=str))
 
 
@@ -277,6 +279,26 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
         integrity_status=runtime.integrity_status,
     )
     remember_runtime_context("integrity_warning", warning)
+
+
+def get_runtime_health_score() -> int:
+    """Calculate a lightweight runtime health score (0-100)."""
+    runtime = _CURRENT_RUNTIME
+    if runtime is None:
+        return 0
+
+    score = 100
+    # Deduct for integrity warnings weighted by their degradation threshold
+    for category, count in runtime.integrity_counts.items():
+        weight = _INTEGRITY_DEGRADE_THRESHOLDS.get(category, 1)
+        score -= count * weight * 2
+
+    # Deduct for degraded observers
+    for observer in runtime.observers.values():
+        if observer.get("health") == "degraded":
+            score -= 15
+
+    return max(0, min(100, score))
 
 
 def get_runtime_integrity_snapshot() -> dict[str, object]:
@@ -385,6 +407,36 @@ def get_runtime_context_snapshot() -> list[dict[str, object]]:
         }
         for item in runtime.context_items
     ]
+
+
+def get_last_successful_interaction(
+    action_type: str | None = None,
+    must_have_target: bool = True,
+) -> dict[str, Any] | None:
+    """
+    Retrieve the last successful interaction from the context buffer.
+    Used for simple short-context references ('it', 'that', 'again').
+    """
+    runtime = _CURRENT_RUNTIME
+    if runtime is None:
+        return None
+
+    _prune_runtime_context(runtime)
+    # Search backwards for the most recent successful execution
+    for item in reversed(runtime.context_items):
+        if item.get("kind") == "execution":
+            val = item.get("value")
+            if not isinstance(val, dict):
+                continue
+            if not val.get("success"):
+                continue
+            if must_have_target and not val.get("target"):
+                continue
+            if action_type and val.get("action") != action_type:
+                # Basic action type matching if needed
+                continue
+            return val
+    return None
 
 
 def register_runtime_observer(
@@ -641,6 +693,7 @@ def get_runtime_snapshot() -> dict[str, object]:
             "camera_state": "camera_off",
             "integrity_status": _INTEGRITY_STATUS_HEALTHY,
             "integrity_warning_count": 0,
+            "health_score": 0,
         }
 
     _prune_runtime_context(runtime)
@@ -658,7 +711,9 @@ def get_runtime_snapshot() -> dict[str, object]:
         "camera_frames_polled": runtime.camera_frames_polled,
         "integrity_status": runtime.integrity_status,
         "integrity_warning_count": len(runtime.integrity_warnings),
+        "health_score": get_runtime_health_score(),
     }
+
 
 
 def bootstrap_runtime() -> KioRuntime:

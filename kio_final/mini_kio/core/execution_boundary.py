@@ -45,8 +45,24 @@ _BLOCKED_ACTIONS: frozenset[str] = frozenset(
     {"shutdown", "shutdown_system", "restart", "restart_system"}
 )
 
+_VERIFICATION_PROBES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+
+def register_verification_probe(
+    action: str, probe: Callable[[dict[str, Any]], dict[str, Any]]
+) -> None:
+    """Register a deterministic diagnostic probe for an action."""
+    _VERIFICATION_PROBES[action] = probe
+
+
+def _default_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Default pass-through probe for Phase 1 groundwork."""
+    result["verification_mode"] = "boundary_probe"
+    return result
+
 
 def classify_action(action: str) -> str:
+
     """Return the minimal category for an action name."""
     return _ACTION_CATEGORIES.get(action, "unknown")
 
@@ -268,7 +284,22 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             elapsed_ms=elapsed_ms,
             handler_name=handler_name,
         )
+
+        # Phase 1 Groundwork: Diagnostic Probe
+        if normalized.get("success"):
+            probe = _VERIFICATION_PROBES.get(canonical_action, _default_probe)
+            try:
+                # Deterministic probe execution (Phase 1: default_probe only)
+                normalized = probe(normalized)
+            except Exception as probe_exc:
+                logger.warning(
+                    "Verification probe failed for %s: %s", canonical_action, probe_exc
+                )
+                normalized["verification_status"] = "probe_error"
+                normalized["probe_error"] = str(probe_exc)
+
         verified_result = _apply_verification(normalized)
+
         _log_execution_event(
             "exec_result",
             action=verified_result["action"],

@@ -105,6 +105,48 @@ def _is_multi_step(lower: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Contextual Resolution (Gate 2 Phase 1)
+# ---------------------------------------------------------------------------
+
+def _resolve_contextual_references(command: str) -> str:
+    """
+    Surgical short-context resolver.
+    Handles 'it' (last target), 'that' (last target), 'again' (last action).
+    """
+    from mini_kio.core.runtime import get_last_successful_interaction
+
+    lower = command.lower().strip()
+
+    # "again", "do it again"
+    if lower == "again" or lower == "do it again":
+        last = get_last_successful_interaction(must_have_target=False)
+        if last:
+            action = (
+                last.get("action", "")
+                .replace("_app", "")
+                .replace("_web", "")
+                .replace("_system", "")
+                .replace("_folder", "")
+                .replace("_youtube", "")
+            )
+            target = str(last.get("target", ""))
+            resolved = f"{action} {target}".strip()
+            _log_route("context_resolve", original=command, resolved=resolved)
+            return resolved
+
+    # Handle "it" and "that"
+    if re.search(r"\b(it|that)\b", lower):
+        last = get_last_successful_interaction(must_have_target=True)
+        if last:
+            target = str(last.get("target", ""))
+            resolved = re.sub(r"\b(it|that)\b", target, command, flags=re.IGNORECASE)
+            _log_route("context_resolve", original=command, resolved=resolved)
+            return resolved.strip()
+
+    return command
+
+
+# ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
@@ -114,9 +156,14 @@ def handle_command(command: str) -> dict:
     Always returns {"success": bool, "message": str}.
     """
     command = command.strip()
+
+    # Phase 1: Contextual Resolution
+    command = _resolve_contextual_references(command)
+
     from mini_kio.core.command_parser import _apply_aliases
     command = _apply_aliases(command)
     logger.info(f"[KIO] handle_command: {command!r}")
+
     if not command:
         return {"success": False, "message": "Empty command"}
 
