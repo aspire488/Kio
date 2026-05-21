@@ -37,6 +37,15 @@ _INTEGRITY_DEGRADE_THRESHOLDS = {
 }
 
 
+def get_runtime() -> "KioRuntime | None":
+    """Return the current KioRuntime singleton instance.
+    
+    This is the proper way to access the runtime from external modules
+    to avoid main-vs-imported-module identity splits.
+    """
+    return _CURRENT_RUNTIME
+
+
 class RuntimeState:
     """Minimal bootstrap states for future lifecycle preparation."""
 
@@ -103,6 +112,7 @@ class KioRuntime:
     integrity_warnings: deque[dict[str, object]] = field(
         default_factory=lambda: deque(maxlen=_INTEGRITY_WARNING_LIMIT)
     )
+    tracked_processes: list[dict[str, object]] = field(default_factory=list)
 
     def transition_to(
         self,
@@ -218,6 +228,98 @@ class KioRuntime:
             pass
         self.transition_to(RuntimeState.STOPPED, reason="runtime_stop")
         logger.info("Runtime stopped")
+
+    def register_tracked_process(self, pid: int, name: str, target: str) -> None:
+        """Register a new tracked process with a FIFO 16-entry limit."""
+        emit_runtime_trace("DEBUG_runtime_register_start", pid=pid, name=name, target=target)
+        import psutil
+        try:
+            p = psutil.Process(pid)
+            create_time = p.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            create_time = 0.0
+
+        entry = {
+            "pid": pid,
+            "name": name,
+            "target": target,
+            "launched_at": time.monotonic(),
+            "create_time": create_time,
+            "status": "active",
+        }
+        # FIFO eviction
+        while len(self.tracked_processes) >= 16:
+            oldest = self.tracked_processes.pop(0)
+            emit_runtime_trace("runtime_process_evicted", pid=oldest["pid"], name=oldest["name"])
+
+        self.tracked_processes.append(entry)
+        emit_runtime_trace("runtime_process_registered", pid=pid, name=name, target=target)
+        emit_runtime_trace("DEBUG_runtime_registry_size", size=len(self.tracked_processes), contents=[(e["pid"], e["name"]) for e in self.tracked_processes])
+
+    def get_tracked_process(self, name: str) -> dict[str, object] | None:
+        """Find a tracked process by its canonical name."""
+        emit_runtime_trace("DEBUG_runtime_lookup_start", lookup_name=name, registry_size=len(self.tracked_processes))
+        for entry in self.tracked_processes:
+            if entry["name"] == name:
+                emit_runtime_trace("DEBUG_runtime_lookup_hit", pid=entry["pid"], name=name)
+                return entry
+        emit_runtime_trace("DEBUG_runtime_lookup_miss", lookup_name=name)
+        return None
+
+    def prune_tracked_processes(self) -> None:
+        """Remove dead processes from the registry (piggybacked on command dispatch)."""
+        import os
+        import platform
+        import subprocess
+
+        is_windows = platform.system() == "Windows"
+        active = []
+        emit_runtime_trace("DEBUG_runtime_prune_start", count=len(self.tracked_processes))
+        for entry in self.tracked_processes:
+            pid = int(entry["pid"])
+            alive = False
+            if is_windows:
+                try:
+                    import psutil
+                    try:
+                        p = psutil.Process(pid)
+                        if p.is_running():
+                            # Phase A: Prevent PID reuse corruption
+                            if entry.get("create_time", 0.0) > 0.0:
+                                current_create_time = p.create_time()
+                                if abs(current_create_time - entry["create_time"]) > 1.0:
+                                    emit_runtime_trace("DEBUG_runtime_prune_pid_reused", pid=pid, name=entry["name"])
+                                    alive = False
+                                else:
+                                    alive = True
+                            else:
+                                alive = True
+                        else:
+                            alive = False
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        alive = False
+                except Exception as e:
+                    emit_runtime_trace("DEBUG_runtime_prune_error", pid=pid, error=str(e))
+                    alive = True
+            else:
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except (OSError, ProcessLookupError):
+                    alive = False
+
+            if alive:
+                active.append(entry)
+            else:
+                emit_runtime_trace(
+                    "runtime_process_pruned",
+                    pid=pid,
+                    name=entry["name"],
+                    reason="process_not_found",
+                )
+        
+        self.tracked_processes = active
+        emit_runtime_trace("DEBUG_runtime_prune_end", count=len(self.tracked_processes))
 
 
 def setup_startup_logging() -> None:
@@ -610,6 +712,8 @@ def dispatch_channel_input(
         touch_activation_session()
     except Exception:
         pass
+
+    runtime.prune_tracked_processes()
 
     command = (text or "").strip()
     if not command:

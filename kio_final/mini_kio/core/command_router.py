@@ -68,43 +68,6 @@ _FOLDER_KEYWORDS: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Multi-step detection
-# ---------------------------------------------------------------------------
-
-def _is_multi_step(lower: str) -> bool:
-    """
-    Detect genuine multi-step commands.
-
-    BUG-01 FIX: Added "play" to the verb set.
-    "open chrome and play messi" now correctly returns True.
-    "search for cats and dogs" still returns False (no verb after 'and').
-    """
-    # FIX: multi-step system commands and lock/restart verbs are also valid RHS verbs
-    verbs = {
-        "open",
-        "close",
-        "search",
-        "type",
-        "launch",
-        "folder",
-        "play",
-        "lock",
-        "shutdown",
-        "restart",
-    }
-
-    for sep in (r"\s+and\s+", r"\s+then\s+"):
-        parts = re.split(sep, lower, maxsplit=1)
-        if len(parts) == 2:
-            left_verb  = parts[0].strip().split()[0] if parts[0].strip() else ""
-            right_verb = parts[1].strip().split()[0] if parts[1].strip() else ""
-            if left_verb in verbs and right_verb in verbs:
-                return True
-
-    return False
-
-
-# ---------------------------------------------------------------------------
 # Contextual Resolution (Gate 2 Phase 1)
 # ---------------------------------------------------------------------------
 
@@ -160,7 +123,7 @@ def handle_command(command: str) -> dict:
     # Phase 1: Contextual Resolution
     command = _resolve_contextual_references(command)
 
-    from mini_kio.core.command_parser import _apply_aliases
+    from mini_kio.core.command_parser import _apply_aliases, _normalize_connectors, is_multi_step
     command = _apply_aliases(command)
     logger.info(f"[KIO] handle_command: {command!r}")
 
@@ -168,10 +131,46 @@ def handle_command(command: str) -> dict:
         return {"success": False, "message": "Empty command"}
 
     lower = command.lower()
+    lower = _normalize_connectors(lower)
+
+    # ── GREETINGS ─────────────────────────────────────────────────────────
+    if lower == "hello":
+        return {"success": True, "message": "KIO online ✓"}
+    if lower in ("hi", "hey"):
+        return {"success": True, "message": "Ready."}
+    if lower in ("yo", "wassup", "what's up", "whats up"):
+        return {"success": True, "message": "I am KIO, a local automation assistant."}
+    if lower in ("how are you", "how are you doing"):
+        return {"success": True, "message": "I am functioning within normal parameters. How can I help?"}
+    if lower in ("bye", "bue"):
+        return {"success": True, "message": "Goodbye."}
+    if lower == "okay":
+        return {"success": True, "message": "Understood."}
+    if lower == "bruh":
+        return {"success": True, "message": "..."}
+
+    # ── DETERMINISTIC RESPONSES ───────────────────────────────────────────
+    if lower in ("who are you", "what are you", "what is kio"):
+        return {"success": True, "message": "I am KIO, a lightweight local AI assistant created by Joel."}
+    
+    if lower in ("who made you", "who created you", "who is your creator", "who built you", "who created kio", "who made u", "who built u"):
+        return {"success": True, "message": "I was created by Joel."}
+
+    if lower in ("who is joel", "who's joel"):
+        return {"success": True, "message": "Joel is the creator of KIO."}
+
+    if lower in ("what can you do", "what are your features", "what can u do"):
+        return {
+            "success": True,
+            "message": (
+                "KIO can: open/close apps, search the web, play YouTube, "
+                "manage files, and execute multi-step automation commands."
+            )
+        }
 
     try:
         # ── MULTI-STEP ────────────────────────────────────────────────────────
-        if _is_multi_step(lower):
+        if is_multi_step(lower):
             _log_route("route", intent="multi_step", text_len=len(command))
             from mini_kio.core.command_parser import parse_command
 
@@ -180,18 +179,33 @@ def handle_command(command: str) -> dict:
             # treat this as a malformed chain rather than attempting
             # to collapse into a single-step command.
             if not steps:
-                if " and " in lower or lower.strip().endswith(" and") or " then " in lower or lower.strip().endswith(" then"):
+                if any(x in lower for x in (" and ", " then ", " anf ", " andd ", " thenn ")):
                     return {"success": False, "message": "Malformed command chain."}
                 return {"success": False, "message": f"Could not parse multi-step command: {command!r}"}
             return _execute_multi_step(steps)
 
-        # If connectors present but not identified as multi-step, treat as malformed
-        if re.search(r"\b(?:and|then)\b", lower) and not _is_multi_step(lower):
-            return {"success": False, "message": "Malformed command chain."}
+        # ── MALFORMED CHAIN DETECTION ─────────────────────────────────────────
+        # Only block if it looks like a multi-step command starting with a verb 
+        # but failing _is_multi_step (meaning the second part is missing or invalid)
+        verbs = {"open", "close", "search", "play", "launch", "folder"}
+        first_word = lower.split()[0] if lower.split() else ""
+        if first_word in verbs:
+            # Detect trailing connectors or connector typos
+            if re.search(r"\b(?:and|then|anf|andd|thenn|theen)\s*$", lower):
+                return {"success": False, "message": "Malformed command chain."}
 
         # ── SEARCH ────────────────────────────────────────────────────────────
         if lower.startswith("search "):
             query = command[7:].strip()
+            for sep in [" in ", " on ", " using "]:
+                if sep in query:
+                    parts = query.rsplit(sep, 1)
+                    target_app = parts[1].strip()
+                    clean_query = parts[0].strip()
+                    if target_app in ("chrome", "edge", "firefox", "brave", "comet"):
+                        _log_route("route", intent="capability", app=target_app, cap="search")
+                        return execute_action("execute_capability", f"{target_app}::search::{clean_query}")
+            
             _log_route("route", intent="search")
             return execute_action("search_web", query)
 
@@ -217,11 +231,23 @@ def handle_command(command: str) -> dict:
             _log_route("route", intent="close_app", target=target)
             return execute_action("close_app", target)
 
-        # ── PLAY (YouTube) ────────────────────────────────────────────────────
+        # ── PLAY (YouTube / Media) ─────────────────────────────────────────────
         if lower.startswith("play "):
             query = command[5:].strip()
-            _log_route("route", intent="play_youtube")
-            return execute_action("play_youtube", query)
+            for sep in [" on ", " in ", " using "]:
+                if sep in query:
+                    parts = query.rsplit(sep, 1)
+                    target_app = parts[1].strip()
+                    clean_query = parts[0].strip()
+                    if target_app == "youtube":
+                         _log_route("route", intent="play_youtube", query=clean_query)
+                         return execute_action("play_youtube", clean_query)
+                    if target_app in ("spotify", "vlc", "capcut"):
+                        _log_route("route", intent="capability", app=target_app, cap="play")
+                        return execute_action("execute_capability", f"{target_app}::play::{clean_query}")
+            
+            # AMBIGUITY FIX: Return choice message instead of defaulting to YouTube
+            return {"success": True, "message": "Play on YouTube or Spotify?"}
 
         # ── SEARCH YOUTUBE ────────────────────────────────────────────────────
         if lower.startswith("search youtube "):
@@ -407,8 +433,8 @@ def _ai_fallback(query: str) -> dict:
     return {
         "success": False,
         "message": (
-            f"I don't know how to handle '{query}'. "
-            "Try: 'open chrome', 'search python tutorial', or 'play messi highlights'."
+            f"I'm not sure how to '{query}'. "
+            "I can open apps, search the web, or play media. Try 'help' for examples."
         ),
     }
 

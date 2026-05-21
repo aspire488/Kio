@@ -28,6 +28,7 @@ from telegram.ext import (
 
 from mini_kio.core.command_router import route
 from mini_kio.core.config import TELEGRAM_TOKEN, ALLOWED_USER_IDS
+from mini_kio.core.runtime import bootstrap_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,20 @@ def run_bot(runtime=None) -> None:
     print("KIO TELEGRAM BOT")
     print("=" * 50)
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    if runtime is None:
+        runtime = bootstrap_runtime()
+        print("Runtime initialized")
+
+    # Apply bounded timeouts for network resilience (30s max)
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
@@ -137,11 +151,16 @@ def run_bot(runtime=None) -> None:
     app.add_error_handler(handle_error)
 
     print("Bot running… Press Ctrl-C to stop.")
-    # BUG-09 FIX: no outer try/except swallowing PTB's own error handling
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-    )
+    # BUG-09 FIX: PTB's run_polling handles its own loops, but we catch
+    # initial startup networking failures (like TimedOut) to exit cleanly.
+    try:
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+    except Exception as exc:
+        logger.error(f"Telegram bot failed to start: {exc}")
+        print(f"\nERROR: Telegram network failure: {exc}")
 
 
 if __name__ == "__main__":

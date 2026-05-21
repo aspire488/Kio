@@ -48,11 +48,103 @@ _BLOCKED_ACTIONS: frozenset[str] = frozenset(
 _VERIFICATION_PROBES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
 
+def _process_liveness_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Verify that a launched process is actually running in the system."""
+    pid = result.get("pid")
+    if pid is None:
+        result["verification_status"] = "failed"
+        result["failure_class"] = "missing_pid"
+        return result
+
+    import platform
+    import subprocess
+    if platform.system() == "Windows":
+        try:
+            r = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            )
+            if str(pid) in r.stdout:
+                result["verification_status"] = "passed"
+            else:
+                result["verification_status"] = "failed"
+                result["failure_class"] = "pid_not_found"
+        except Exception:
+            result["verification_status"] = "probe_error"
+    else:
+        import os
+        try:
+            os.kill(int(pid), 0)
+            result["verification_status"] = "passed"
+        except (OSError, ProcessLookupError):
+            result["verification_status"] = "failed"
+            result["failure_class"] = "pid_not_found"
+
+    result["verification_mode"] = "process_liveness"
+    return result
+
+
+def _process_exit_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Verify that a targeted PID has actually exited."""
+    pid = result.get("pid")
+    if pid is None:
+        # Fallback for image-name kills
+        if result.get("success"):
+            result["verification_status"] = "passed"
+        else:
+            result["verification_status"] = "failed"
+        result["verification_mode"] = "image_exit_check"
+        return result
+
+    import platform
+    import subprocess
+    import time
+
+    # Allow 1.5s grace period for exit
+    deadline = time.time() + 1.5
+    alive = True
+    while time.time() < deadline:
+        if platform.system() == "Windows":
+            try:
+                r = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                    capture_output=True, text=True, timeout=1,
+                )
+                if str(pid) not in r.stdout:
+                    alive = False
+                    break
+            except Exception:
+                pass
+        else:
+            import os
+            try:
+                os.kill(int(pid), 0)
+            except (OSError, ProcessLookupError):
+                alive = False
+                break
+        time.sleep(0.3)
+
+    if not alive:
+        result["verification_status"] = "passed"
+    else:
+        result["verification_status"] = "failed"
+        result["failure_class"] = "process_persists"
+
+    result["verification_mode"] = "process_exit"
+    return result
+
+
 def register_verification_probe(
     action: str, probe: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> None:
     """Register a deterministic diagnostic probe for an action."""
     _VERIFICATION_PROBES[action] = probe
+
+
+register_verification_probe("open_app", _process_liveness_probe)
+register_verification_probe("close_app", _process_exit_probe)
 
 
 def _default_probe(result: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +210,10 @@ def _load_handler(action: str) -> tuple[Callable[..., dict], str]:
         from mini_kio.core.system_operator import restart_system
 
         return restart_system, "restart_system"
+        
+    if action == "execute_capability":
+        from mini_kio.core.app_operator import execute_capability
+        return execute_capability, "execute_capability"
 
     raise ValueError(f"Unknown action: {action}")
 
@@ -271,8 +367,41 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             handler=handler_name,
             runtime=runtime_snapshot,
         )
+
+        # Step 2: PID-Aware Close Retrieval
+        pid_for_close = None
+        if canonical_action == "close_app":
+            try:
+                import mini_kio.core.runtime as runtime
+                from mini_kio.core.app_operator import APP_REGISTRY
+
+                # Resolve canonical name for lookup
+                lookup_name = target.lower().strip()
+                for k, info in APP_REGISTRY.items():
+                    if lookup_name == k or lookup_name in info.get("aliases", []):
+                        lookup_name = k
+                        break
+                
+                emit_runtime_trace("DEBUG_boundary_close_lookup_start", target=target, canonical=lookup_name)
+
+                current_runtime = runtime.get_runtime()
+                if current_runtime:
+                    current_runtime.prune_tracked_processes()
+                    entry = current_runtime.get_tracked_process(lookup_name)
+                    if entry:
+                        pid_for_close = entry.get("pid")
+                        emit_runtime_trace("DEBUG_boundary_close_pid_found", pid=pid_for_close)
+                    else:
+                        emit_runtime_trace("DEBUG_boundary_close_pid_not_found", lookup_name=lookup_name)
+                else:
+                    emit_runtime_trace("DEBUG_boundary_no_runtime_for_lookup")
+            except Exception as pid_lookup_exc:
+                logger.warning("PID lookup failed for close: %s", pid_lookup_exc)
+
         if canonical_action == "lock_system":
             result = handler()
+        elif canonical_action == "close_app" and pid_for_close is not None:
+            result = handler(target, pid=pid_for_close)
         else:
             result = handler(target)
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -299,6 +428,28 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                 normalized["probe_error"] = str(probe_exc)
 
         verified_result = _apply_verification(normalized)
+
+        # Step 1: Process Registration
+        if canonical_action == "open_app" and verified_result.get("success"):
+            pid = verified_result.get("pid")
+            emit_runtime_trace("DEBUG_boundary_reg_check", pid=pid, action=canonical_action)
+            if pid:
+                try:
+                    import mini_kio.core.runtime as runtime
+                    # Use canonical name if returned by operator, else fallback to target
+                    reg_name = verified_result.get("canonical_name", target.lower().strip())
+                    emit_runtime_trace("DEBUG_boundary_reg_start", pid=pid, reg_name=reg_name)
+                    current_runtime = runtime.get_runtime()
+                    if current_runtime:
+                        current_runtime.register_tracked_process(
+                            pid=int(pid),
+                            name=reg_name,
+                            target=target,
+                        )
+                    else:
+                        emit_runtime_trace("DEBUG_boundary_no_runtime_for_reg")
+                except Exception as reg_exc:
+                    logger.warning("Failed to register tracked process: %s", reg_exc)
 
         _log_execution_event(
             "exec_result",
