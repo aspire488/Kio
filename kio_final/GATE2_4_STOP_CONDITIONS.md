@@ -7,7 +7,7 @@
 4. **Validation Pass**: All tests in the Gate 2.4 Validation Matrix pass with 100% success rate.
 
 ## Out of Scope
-- **LLM Reasoning**: Integration of LLM for planning is deferred to Gate 1 (already established or future iterations).
+- **LLM Reasoning**: Integration of LLM for complex planning (Gate 1 status) is considered a prerequisite; Gate 2.4 focuses on local execution integrity.
 - **Persistent Memory**: SQLite episodic/semantic memory persistence is Gate 3.
 - **Observer Logic**: Filesystem/Clipboard observers are Gate 4.
 - **Plugin System**: Gate 5.
