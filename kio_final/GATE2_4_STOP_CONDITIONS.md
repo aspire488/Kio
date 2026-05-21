@@ -1,8 +1,8 @@
 # KIO Gate 2.4: Stop Conditions & Completion Criteria
 
 ## Exit Criteria (Gate Complete)
-1. **Operator Contracts**: All 4 core operators (app, browser, file, system) return `dict` with `success`, `data`, and `error` keys.
-2. **Registry Mapping**: Operators are internally mapped to `KIOTool` metadata (RAM budget, side-effect class).
+1. **Operator Contracts**: All 4 core operators (app, browser, file, system) return `dict` with `success`, `data`, `error`, and resource telemetry (`elapsed_ms`).
+2. **Registry Mapping**: Operators are internally mapped to `KIOTool` metadata (RAM budget, side-effect class) for ResourceGuard enforcement.
 3. **Audit Readiness**: Every operator execution generates a loggable event structure.
 4. **Validation Pass**: All tests in the Gate 2.4 Validation Matrix pass with 100% success rate.
 

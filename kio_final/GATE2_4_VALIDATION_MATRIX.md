@@ -2,7 +2,7 @@
 
 | Category | Test Case | Expected Result |
 | :--- | :--- | :--- |
-| **Startup** | Runtime Integrity Check | Process reaches READY in < 3s with all operators registered. |
+| **Startup** | Runtime Integrity Check | Process reaches READY in < 3s with ResourceGuard active and operators registered. |
 | **Execution** | Browser Routing Integrity | URL opening returns verified PID or window handle, not just `True`. |
 | **Execution** | App Launch Verification | `launch_app` confirms process presence via `psutil` after dispatch. |
 | **Regression** | Command Parsing | Complex multi-step strings still parse into valid command lists. |
