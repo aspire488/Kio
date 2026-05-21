@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from mini_kio.core.config import TELEGRAM_TOKEN
 
@@ -44,6 +44,41 @@ def get_runtime() -> "KioRuntime | None":
     to avoid main-vs-imported-module identity splits.
     """
     return _CURRENT_RUNTIME
+
+
+class RamBudgetError(RuntimeError):
+    """Raised when current RAM usage plus requested module budget exceeds hard limit."""
+    pass
+
+
+class ResourceGuard:
+    """RAM budget enforcement (v1.1)."""
+    SOFT_LIMIT_MB = 150
+    HARD_LIMIT_MB = 190
+
+    def check_capacity(self, module_ram_mb: float) -> None:
+        """Called BEFORE every lazy-load or tool execution."""
+        import psutil
+        import os
+        current = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        if current + module_ram_mb > self.HARD_LIMIT_MB:
+            raise RamBudgetError(
+                f"No headroom: {current:.0f}MB + {module_ram_mb}MB > {self.HARD_LIMIT_MB}MB"
+            )
+
+    def audit_loop_sync(self) -> None:
+        """60s audit logic (synchronous for v1 prototype loop)."""
+        import psutil
+        import os
+        import gc
+        ram = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+        if ram > self.HARD_LIMIT_MB:
+            emit_runtime_trace("resource_guard_hard_limit_breach", ram_mb=ram)
+            # v1: Unload observers if registered
+            # gc.collect()
+        elif ram > self.SOFT_LIMIT_MB:
+            emit_runtime_trace("resource_guard_soft_limit_breach", ram_mb=ram)
+            gc.collect()
 
 
 class RuntimeState:
@@ -113,6 +148,7 @@ class KioRuntime:
         default_factory=lambda: deque(maxlen=_INTEGRITY_WARNING_LIMIT)
     )
     tracked_processes: list[dict[str, object]] = field(default_factory=list)
+    resource_guard: ResourceGuard = field(default_factory=lambda: ResourceGuard())
 
     def transition_to(
         self,

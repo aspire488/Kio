@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable
 
 from mini_kio.core.runtime import (
+    RamBudgetError,
     emit_runtime_trace,
     get_runtime_snapshot,
     record_runtime_integrity_warning,
@@ -304,12 +305,33 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
     Responsibilities:
       1. Receive action request
       2. Perform minimal action classification
-      3. Block clearly destructive actions during Gate 0
-      4. Invoke the operator
-      5. Normalize the result shape
+      3. Pre-load RAM capacity check
+      4. Block clearly destructive actions during Gate 0
+      5. Invoke the operator
+      6. Normalize the result shape
     """
     category = classify_action(action)
     start = time.monotonic()
+
+    # Gate 2.4 Phase 1: Pre-load RAM check
+    try:
+        from mini_kio.core.runtime import get_runtime
+        rt = get_runtime()
+        if rt:
+            # v1 placeholder: use 10MB budget for standard tools if not declared
+            rt.resource_guard.check_capacity(10.0)
+    except RamBudgetError as ram_exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.error("[EXEC] RAM capacity check failed: %s", ram_exc)
+        return _apply_verification({
+            "success": False,
+            "message": f"Resource Limit: {ram_exc}",
+            "action": action,
+            "target": target,
+            "category": category,
+            "elapsed_ms": elapsed_ms,
+            "failure_class": "ram_budget_exceeded",
+        })
     runtime_snapshot = get_runtime_snapshot()
     _log_execution_event(
         "exec_dispatch",
