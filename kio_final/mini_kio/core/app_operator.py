@@ -293,11 +293,19 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
         "process": "explorer.exe",
         "system": True,
     },
+    "terminal": {
+        "lifecycle": "launcher",
+        "exe": "wt.exe",
+        "process": "WindowsTerminal.exe",
+        "aliases": ["terminal", "console"],
+        "paths": ["wt.exe", "powershell.exe", "cmd.exe"],
+        "system": True,
+    },
     "cmd": {
         "lifecycle": "launcher",
         "exe": "cmd.exe",
         "process": "cmd.exe",
-        "aliases": ["command prompt", "terminal"],
+        "aliases": ["command prompt"],
         "system": True,
     },
     "powershell": {
@@ -1259,7 +1267,7 @@ def execute_capability(target: str) -> dict:
                             prior_pids.add(proc.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied): continue
 
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 [path, url], 
                 shell=False,
                 creationflags=_creation_flags(),
@@ -1270,12 +1278,12 @@ def execute_capability(target: str) -> dict:
             # Attempt Ownership Registration
             if _IS_WINDOWS:
                 time.sleep(0.5)
-                final_pid = _refine_pid_windows(0, info.get("process", "chrome.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="browser")
+                final_pid = _refine_pid_windows(proc.pid, info.get("process", "chrome.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="browser")
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, app_name, url)
                     return {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name}
 
-            return {"success": True, "message": f"Launched {cap} in {app_name}."}
+            return {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid}
         except Exception as e:
             return {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}
             
