@@ -389,8 +389,77 @@ _DYNAMIC_RESOLVERS = {
 # Public API
 # ---------------------------------------------------------------------------
 
+def _normalize_public_result(action: str, target: str, result: Dict[str, Any], start_time: float) -> Dict[str, Any]:
+    """Normalize public API results to the deterministic target shape.
+
+    Target shape:
+    {
+      "success": bool,
+      "message": str,
+      "action": str,
+      "target": str,
+      "elapsed_ms": int,
+      "failure_class": str,
+      "pid": int | None
+    }
+    """
+    if not isinstance(result, dict):
+        result = {"success": False, "message": str(result)}
+
+    out: Dict[str, Any] = dict(result)
+    # Ensure core fields
+    out.setdefault("success", bool(out.get("success", False)))
+    out.setdefault("message", out.get("message", ""))
+
+    # Action and target
+    out["action"] = action
+    out["target"] = out.get("canonical_name") or target
+
+    # Elapsed ms telemetry
+    try:
+        out["elapsed_ms"] = int((time.time() - float(start_time)) * 1000)
+    except Exception:
+        out["elapsed_ms"] = 0
+
+    # PID normalization
+    pid = out.get("pid")
+    out["pid"] = int(pid) if isinstance(pid, int) else None
+
+    # Failure class deterministic mapping
+    if "failure_class" in out:
+        # preserve any explicit classification
+        pass
+    else:
+        if out.get("success"):
+            out["failure_class"] = ""
+        else:
+            msg = (out.get("message", "") or "").lower()
+            if "timeout" in msg:
+                out["failure_class"] = "timeout"
+            elif "cannot find" in msg or "not found" in msg or "is it installed" in msg or "cannot find or open" in msg:
+                out["failure_class"] = "not_installed"
+            elif "ownership not tracked" in msg or "ownership not tracked" in msg or "not tracked" in msg:
+                out["failure_class"] = "not_tracked"
+            elif "refusing to kill" in msg or "refusing" in msg:
+                out["failure_class"] = "forbidden_uwp_kill"
+            elif "failed to launch" in msg or "failed to open" in msg or "failed to route" in msg or "failed to" in msg:
+                out["failure_class"] = "launch_failed"
+            elif "permission" in msg or "access denied" in msg:
+                out["failure_class"] = "permission_denied"
+            elif "unsupported" in msg or "not implemented" in msg or "does not support" in msg:
+                out["failure_class"] = "unsupported"
+            elif "invalid" in msg:
+                out["failure_class"] = "invalid_input"
+            elif "already closed" in msg or "not running" in msg:
+                out["failure_class"] = "not_running"
+            else:
+                out["failure_class"] = "internal_error"
+
+    return out
+
 def launch_app(name: str) -> dict:
     """Launch an application by name.  Returns {"success": bool, "message": str, "pid": int, "canonical_name": str}."""
+    start_time = time.time()
     key = name.lower().strip()
     logger.info(f"[APP] launch_app: {key!r}")
 
@@ -405,26 +474,28 @@ def launch_app(name: str) -> dict:
                 break
         result = _launch_from_info(info, key)
         result["canonical_name"] = canonical
-        return result
+        return _normalize_public_result("launch", canonical, result, start_time)
 
     # 2. Web URL
     if key in WEB_URLS:
-        return _open_url(WEB_URLS[key], key)
+        result = _open_url(WEB_URLS[key], key)
+        return _normalize_public_result("launch", key, result, start_time)
 
     # 3. Discovery
     result = _discover_and_launch(key)
     if "canonical_name" not in result:
         result["canonical_name"] = key
-    return result
+    return _normalize_public_result("launch", result.get("canonical_name", key), result, start_time)
 
 
 def close_app(name: str, pid: Optional[int] = None) -> dict:
     """Kill an application.  Returns {"success": bool, "message": str}."""
     key = name.lower().strip()
+    start_time = time.time()
     logger.info(f"[APP] close_app: {key!r} (pid override: {pid})")
 
     if not _IS_WINDOWS:
-        return _pkill(key)
+        return _normalize_public_result("close", key, _pkill(key), start_time)
 
     # Priority 1: Targeted PID termination (Tree-Aware)
     if pid is not None:
@@ -433,7 +504,7 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             try:
                 p = psutil.Process(pid)
                 if p.name().lower() == "applicationframehost.exe":
-                    return {"success": False, "message": f"Refusing to kill UWP wrapper (ApplicationFrameHost). Close the app manually if needed."}
+                    return _normalize_public_result("close", key, {"success": False, "message": f"Refusing to kill UWP wrapper (ApplicationFrameHost). Close the app manually if needed."}, start_time)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -474,14 +545,14 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
                 # Phase E: UWP Container-Aware Check (Honesty)
                 info = _find_in_registry(key)
                 if info and info.get("lifecycle") == "uwp":
-                     return {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}
+                    return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}, start_time)
 
-                return {"success": True, "message": f"Closed {name} (pid {pid})", "pid": pid}
-            
+                return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name} (pid {pid})", "pid": pid}, start_time)
+
             # If PID not found or already gone
             if "not found" in result.stderr.lower() or "not running" in result.stderr.lower():
                 _cleanup_chrome_temp_profile(pid)
-                return {"success": True, "message": f"{name} was already closed.", "pid": pid}
+                return _normalize_public_result("close", key, {"success": True, "message": f"{name} was already closed.", "pid": pid}, start_time)
             
             # SURGICAL FALLBACK: If graceful kill fails because forceful termination is required
             # (common for modern Notepad/UWP apps), we escalate if we have a tracked PID.
@@ -500,20 +571,20 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
                     # Phase E: UWP Container-Aware Check
                     info = _find_in_registry(key)
                     if info and info.get("lifecycle") == "uwp":
-                         return {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}
-                         
-                    return {"success": True, "message": f"Closed {name} (pid {pid}) forcefully.", "pid": pid}
+                        return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}, start_time)
+
+                    return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name} (pid {pid}) forcefully.", "pid": pid}, start_time)
 
             # If it still fails, report it.
             msg = f"Failed to close {name} (pid {pid}) gracefully."
             logger.warning(f"[APP] taskkill /T rc={result.returncode} for pid {pid}: {result.stderr}")
-            return {"success": False, "message": msg, "pid": pid}
+            return _normalize_public_result("close", key, {"success": False, "message": msg, "pid": pid}, start_time)
 
         except subprocess.TimeoutExpired:
-            return {"success": False, "message": f"Timeout closing {name} (pid {pid})", "pid": pid}
+            return _normalize_public_result("close", key, {"success": False, "message": f"Timeout closing {name} (pid {pid})", "pid": pid}, start_time)
         except Exception as exc:
             logger.error(f"[APP] Error closing pid {pid}: {exc}")
-            return {"success": False, "message": f"Error closing {name}: {exc}", "pid": pid}
+            return _normalize_public_result("close", key, {"success": False, "message": f"Error closing {name}: {exc}", "pid": pid}, start_time)
 
     # No wildcard fallback (/IM) for non-system apps to respect ownership isolation.
     # Recovery Phase: if app not tracked, attempt ONE bounded recovery lookup.
@@ -524,22 +595,22 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             logger.info(f"[APP] recovery found unique pid {found_pid} for {key}")
             # Adopt and close
             return close_app(name, pid=found_pid)
-
-    return {"success": False, "message": f"Cannot close {name}: No tracked process found for this session."}
+        return _normalize_public_result("close", key, {"success": False, "message": f"Cannot close {name}: No tracked process found for this session."}, start_time)
 
 
 def search_web(query: str) -> dict:
     """Open a Google search.  Returns {"success": bool, "message": str}."""
+    start_time = time.time()
     if not query:
-        return {"success": False, "message": "No search query"}
+        return _normalize_public_result("search", query or "", {"success": False, "message": "No search query"}, start_time)
     encoded = urllib.parse.quote_plus(query)
     url = f"https://www.google.com/search?q={encoded}"
     try:
         webbrowser.open(url)
         logger.info(f"[APP] search: {query!r}")
-        return {"success": True, "message": f"Searched: {query}"}
+        return _normalize_public_result("search", query, {"success": True, "message": f"Searched: {query}"}, start_time)
     except Exception as exc:
-        return {"success": False, "message": f"Search failed: {str(exc)[:80]}"}
+        return _normalize_public_result("search", query, {"success": False, "message": f"Search failed: {str(exc)[:80]}"}, start_time)
 
 
 # ---------------------------------------------------------------------------
@@ -1187,16 +1258,17 @@ APP_CAPABILITIES = {
 }
 
 def execute_capability(target: str) -> dict:
+    start_time = time.time()
     parts = target.split("::", 2)
     if len(parts) < 2:
-        return {"success": False, "message": "Invalid capability routing format."}
+        return _normalize_public_result("execute_capability", target, {"success": False, "message": "Invalid capability routing format."}, start_time)
     
     app_name, cap = parts[0], parts[1]
     args = parts[2] if len(parts) == 3 else ""
     
     caps = APP_CAPABILITIES.get(app_name, [])
     if cap not in caps:
-        return {"success": False, "message": f"{app_name} does not support '{cap}'."}
+        return _normalize_public_result("execute_capability", target, {"success": False, "message": f"{app_name} does not support '{cap}'."}, start_time)
         
     logger.info(f"[CAPABILITY] Routing {cap} to {app_name} with args: {args}")
 
@@ -1227,13 +1299,13 @@ def execute_capability(target: str) -> dict:
                 final_pid = _refine_pid_windows(proc.pid, info.get("process", "Spotify.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="electron")
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, "spotify", f"spotify:search:{args}")
-                    return {"success": True, "message": f"Playing {args} on Spotify.", "pid": final_pid, "canonical_name": "spotify"}
+                    return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Playing {args} on Spotify.", "pid": final_pid, "canonical_name": "spotify"}, start_time)
 
-            return {"success": True, "message": f"Launched Spotify search for {args}."}
+                return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Launched Spotify search for {args}."}, start_time)
         except Exception:
             # Fallback to web
-            webbrowser.open(f"https://open.spotify.com/search/{query}")
-            return {"success": True, "message": f"Launched {args} search on Spotify Web."}
+                webbrowser.open(f"https://open.spotify.com/search/{query}")
+                return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Launched {args} search on Spotify Web."}, start_time)
 
     if cap in ("search", "open_url", "youtube") or (cap == "play" and app_name == "youtube"):
         if cap == "search":
@@ -1249,12 +1321,12 @@ def execute_capability(target: str) -> dict:
             
         info = _find_in_registry(app_name)
         if not info:
-            return {"success": False, "message": f"Browser {app_name} not found in registry."}
+            return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Browser {app_name} not found in registry."}, start_time)
         
         path = _resolve_path(info)
         if not path:
-             return {"success": False, "message": f"Browser {app_name} path not found."}
-             
+            return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Browser {app_name} path not found."}, start_time)
+        
         try:
             prior_pids = set()
             launch_start = time.time()
@@ -1281,16 +1353,16 @@ def execute_capability(target: str) -> dict:
                 final_pid = _refine_pid_windows(proc.pid, info.get("process", "chrome.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="browser")
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, app_name, url)
-                    return {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name}
+                    return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name}, start_time)
 
-            return {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid}
+            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid}, start_time)
         except Exception as e:
-            return {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}
+            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
             
     # For now, just mock media capabilities since KIO is lightweight and doesn't hook into Windows Media APIs
     if cap in ("play", "pause", "next", "previous", "open_project", "open_file", "send_message"):
-        return {"success": True, "message": f"Successfully routed '{cap}' to {app_name} (mocked API)."}
+        return _normalize_public_result("execute_capability", target, {"success": True, "message": f"Successfully routed '{cap}' to {app_name} (mocked API)."}, start_time)
         
-    return {"success": False, "message": f"Capability {cap} not implemented."}
+    return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Capability {cap} not implemented."}, start_time)
 
 __all__ = ["launch_app", "execute_capability", "close_app", "search_web", "APP_REGISTRY", "WEB_URLS"]
