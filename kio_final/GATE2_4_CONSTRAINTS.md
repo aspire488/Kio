@@ -8,5 +8,6 @@
 
 ## Security Constraints
 - **No Shell=True**: Absolute ban on `shell=True` in `subprocess` calls using user-derived input.
-- **Confirmation Gate**: DESTRUCTIVE class operations (system shutdown/restart) must be mapped but remain blocked without explicit logic for user confirmation.
+- **Confirmation Gate**: DESTRUCTIVE class operations (system shutdown/restart) must be mapped but remain blocked without explicit logic for user confirmation (v1.1 §7).
+- **WRITE**: Mutates state, reversible | Log + auto-execute (v1.1 §7).
 - **Path Sanitization**: Filesystem operations must be constrained to safe, absolute paths.
