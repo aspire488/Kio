@@ -209,6 +209,16 @@ def handle_command(command: str) -> dict:
             _log_route("route", intent="search")
             return execute_action("search_web", query)
 
+        # ── BROWSER WEBAPP ROUTING ────────────────────────────────────────────
+        webapp_match = re.match(
+            r"^open\s+(telegram|whatsapp|chatgpt)\s+in\s+(chrome|edge|comet|firefox|brave)$",
+            lower
+        )
+        if webapp_match:
+            webapp, browser = webapp_match.groups()
+            _log_route("route", intent="capability", app=browser, cap="open_url", target=webapp)
+            return execute_action("execute_capability", f"{browser}::open_url::{webapp}")
+
         # ── OPEN ──────────────────────────────────────────────────────────────
         if lower.startswith("open "):
             target       = command[5:].strip()
