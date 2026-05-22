@@ -202,10 +202,19 @@ def handle_command(command: str) -> dict:
                     parts = query.rsplit(sep, 1)
                     target_app = parts[1].strip()
                     clean_query = parts[0].strip()
+                    if target_app == "youtube":
+                        _log_route("route", intent="search_youtube", query=clean_query)
+                        return execute_action("search_youtube", clean_query)
                     if target_app in ("chrome", "edge", "firefox", "brave", "comet"):
                         _log_route("route", intent="capability", app=target_app, cap="search")
                         return execute_action("execute_capability", f"{target_app}::search::{clean_query}")
             
+            # Handle "search youtube X" swallow fix
+            if query.lower().startswith("youtube "):
+                clean_query = query[8:].strip()
+                _log_route("route", intent="search_youtube", query=clean_query)
+                return execute_action("search_youtube", clean_query)
+
             _log_route("route", intent="search")
             return execute_action("search_web", query)
 

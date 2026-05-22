@@ -595,7 +595,32 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             logger.info(f"[APP] recovery found unique pid {found_pid} for {key}")
             # Adopt and close
             return close_app(name, pid=found_pid)
-        return _normalize_public_result("close", key, {"success": False, "message": f"Cannot close {name}: No tracked process found for this session."}, start_time)
+        return _normalize_public_result("close", key, {"success": False, "message": f"Cannot close {name}: No tracked process found for this session.", "failure_class": "not_found"}, start_time)
+
+    if key in WEB_URLS:
+        return _normalize_public_result(
+            "close",
+            key,
+            {
+                "success": False,
+                "message": f"Cannot close {name}: browser URL launches are non-trackable in current runtime mode.",
+                "pid": None,
+                "failure_class": "non_trackable",
+            },
+            start_time,
+        )
+
+    return _normalize_public_result(
+        "close",
+        key,
+        {
+            "success": False,
+            "message": f"Cannot close {name}: application not registered or no tracked process found.",
+            "pid": None,
+            "failure_class": "not_found",
+        },
+        start_time,
+    )
 
 
 def search_web(query: str) -> dict:
