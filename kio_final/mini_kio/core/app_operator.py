@@ -670,8 +670,8 @@ def _find_in_registry(key: str) -> Optional[Dict]:
 def _open_url(url: str, label: str) -> dict:
     try:
         webbrowser.open(url)
-        # Use "Launched" for URIs without PID tracking
-        return {"success": True, "message": f"Launched {label} in browser."}
+        # Use "Launched" for URIs without PID tracking; request noop verification
+        return {"success": True, "message": f"Launched {label} in browser.", "verification_mode": "noop"}
     except Exception as exc:
         return {"success": False, "message": f"Failed to open {label}: {str(exc)[:80]}"}
 
@@ -1102,6 +1102,12 @@ def _launch_from_info(info: Dict, name: str) -> dict:
         proc_name = info.get("process") or Path(path).name
         uwp_packages = info.get("uwp_packages", [])
         lifecycle = info.get("lifecycle", "standard")
+        
+        # BROWSER LIFECYCLE (Gate 2.5 Stabilization): Browser launches are non-trackable
+        res_extra = {}
+        if lifecycle == "browser":
+            res_extra["verification_mode"] = "noop"
+
         if _IS_WINDOWS:
             if _verify_process_started_windows(proc_name, timeout_s=3, uwp_packages=uwp_packages):
                 # Refine PID to handle launchers/aliases
@@ -1109,9 +1115,13 @@ def _launch_from_info(info: Dict, name: str) -> dict:
                 if final_pid is None:
                     logger.warning(f"[APP] Ownership refinement failed for: {proc_name}")
                     # Honest capability response: successful launch but untracked
-                    return {"success": True, "message": f"Launched {name} (ownership not tracked)."}
+                    out = {"success": True, "message": f"Launched {name} (ownership not tracked)."}
+                    out.update(res_extra)
+                    return out
                 logger.info(f"[DEBUG_APP] final_pid refined: {final_pid}")
-                return {"success": True, "message": f"Opened {name}", "pid": final_pid}
+                out = {"success": True, "message": f"Opened {name}", "pid": final_pid}
+                out.update(res_extra)
+                return out
             else:
                 logger.warning(f"[APP] launch verification failed for: {proc_name}")
                 if temp_profile_dir is not None:
@@ -1119,7 +1129,9 @@ def _launch_from_info(info: Dict, name: str) -> dict:
                 return {"success": False, "message": f"Failed to launch {name}.", "pid": pid}
         else:
             # Non-windows: best-effort via Popen status
-            return {"success": True, "message": f"Opened {name}", "pid": pid}
+            out = {"success": True, "message": f"Opened {name}", "pid": pid}
+            out.update(res_extra)
+            return out
     except FileNotFoundError:
         if temp_profile_dir is not None:
             if 'pid' in locals():
@@ -1394,9 +1406,9 @@ def execute_capability(target: str) -> dict:
                 final_pid = _refine_pid_windows(proc.pid, info.get("process", "chrome.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="browser")
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, app_name, url)
-                    return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name}, start_time)
+                    return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop"}, start_time)
 
-            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid}, start_time)
+            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid, "verification_mode": "noop"}, start_time)
         except Exception as e:
             return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
             

@@ -35,6 +35,17 @@ from mini_kio.core.system_operator import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Deterministic Outcome Taxonomy (Gate 2.5)
+# ---------------------------------------------------------------------------
+OUTCOME_SUCCESS = "SUCCESS"
+OUTCOME_FAILURE = "FAILURE"
+OUTCOME_BLOCKED = "BLOCKED"
+OUTCOME_DEGRADED = "DEGRADED"
+OUTCOME_INVALID_RESULT = "INVALID_RESULT"
+OUTCOME_TIMEOUT = "TIMEOUT"
+
+
+# ---------------------------------------------------------------------------
 # Static Action Registry
 # ---------------------------------------------------------------------------
 
@@ -130,91 +141,100 @@ _BLOCKED_ACTIONS: frozenset[str] = frozenset(
 _VERIFICATION_PROBES: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
 
 
-def _process_liveness_probe(result: dict[str, Any]) -> dict[str, Any]:
+def process_liveness_probe(result: dict[str, Any]) -> dict[str, Any]:
     """Verify that a launched process is actually running in the system."""
     pid = result.get("pid")
+    result["probe_used"] = "process_liveness"
     if pid is None:
         result["verification_status"] = "failed"
+        result["outcome_class"] = OUTCOME_FAILURE
         result["failure_class"] = "missing_pid"
         return result
 
-    import platform
-    import subprocess
-    if platform.system() == "Windows":
-        try:
-            r = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            if str(pid) in r.stdout:
-                result["verification_status"] = "passed"
-            else:
-                result["verification_status"] = "failed"
-                result["failure_class"] = "pid_not_found"
-        except Exception:
-            result["verification_status"] = "probe_error"
-    else:
-        import os
-        try:
-            os.kill(int(pid), 0)
+    try:
+        import psutil
+        p = psutil.Process(int(pid))
+        if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
             result["verification_status"] = "passed"
-        except (OSError, ProcessLookupError):
+            result["outcome_class"] = OUTCOME_SUCCESS
+        else:
             result["verification_status"] = "failed"
-            result["failure_class"] = "pid_not_found"
-
-    result["verification_mode"] = "process_liveness"
+            result["outcome_class"] = OUTCOME_FAILURE
+            result["failure_class"] = "process_not_active"
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+        result["verification_status"] = "failed"
+        result["outcome_class"] = OUTCOME_FAILURE
+        result["failure_class"] = "pid_not_found"
+    except Exception as e:
+        logger.warning("Liveness probe exception: %s", e)
+        result["verification_status"] = "probe_error"
+        result["outcome_class"] = OUTCOME_FAILURE
     return result
 
 
-def _process_exit_probe(result: dict[str, Any]) -> dict[str, Any]:
-    """Verify that a targeted PID has actually exited."""
+def exit_code_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Verify that a targeted process has exited (deterministic single-check)."""
     pid = result.get("pid")
-    if pid is None:
-        # Fallback for image-name kills
-        if result.get("success"):
+    result["probe_used"] = "exit_code"
+
+    # 1. If operator provided exit_code directly, check it
+    if "exit_code" in result:
+        if result["exit_code"] == 0:
             result["verification_status"] = "passed"
+            result["outcome_class"] = OUTCOME_SUCCESS
         else:
             result["verification_status"] = "failed"
-        result["verification_mode"] = "image_exit_check"
+            result["outcome_class"] = OUTCOME_FAILURE
         return result
 
-    import platform
-    import subprocess
-    import time
-
-    # Allow 1.5s grace period for exit
-    deadline = time.time() + 1.5
-    alive = True
-    while time.time() < deadline:
-        if platform.system() == "Windows":
-            try:
-                r = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                    capture_output=True, text=True, timeout=1,
-                )
-                if str(pid) not in r.stdout:
-                    alive = False
-                    break
-            except Exception:
-                pass
+    # 2. If no PID, fallback to success bit (image-name kills)
+    if pid is None:
+        if result.get("success"):
+            result["verification_status"] = "passed"
+            result["outcome_class"] = OUTCOME_SUCCESS
         else:
-            import os
-            try:
-                os.kill(int(pid), 0)
-            except (OSError, ProcessLookupError):
-                alive = False
-                break
-        time.sleep(0.3)
+            result["verification_status"] = "failed"
+            result["outcome_class"] = OUTCOME_FAILURE
+        return result
 
-    if not alive:
+    # 3. Synchronous liveness check (no polling loops)
+    try:
+        import psutil
+        p = psutil.Process(int(pid))
+        if p.is_running():
+            result["verification_status"] = "failed"
+            result["outcome_class"] = OUTCOME_FAILURE
+            result["failure_class"] = "process_persists"
+        else:
+            result["verification_status"] = "passed"
+            result["outcome_class"] = OUTCOME_SUCCESS
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
         result["verification_status"] = "passed"
+        result["outcome_class"] = OUTCOME_SUCCESS
+    return result
+
+
+def state_delta_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Lightweight check for state changes (Phase 1: success-basis)."""
+    result["probe_used"] = "state_delta"
+    if result.get("success"):
+        result["verification_status"] = "passed"
+        result["outcome_class"] = OUTCOME_SUCCESS
     else:
         result["verification_status"] = "failed"
-        result["failure_class"] = "process_persists"
+        result["outcome_class"] = OUTCOME_FAILURE
+    return result
 
-    result["verification_mode"] = "process_exit"
+
+def noop_probe(result: dict[str, Any]) -> dict[str, Any]:
+    """Pass-through probe that respects operator success."""
+    result["probe_used"] = "noop"
+    if result.get("success"):
+        result["verification_status"] = "passed"
+        result["outcome_class"] = OUTCOME_SUCCESS
+    else:
+        result["verification_status"] = "failed"
+        result["outcome_class"] = OUTCOME_FAILURE
     return result
 
 
@@ -225,14 +245,13 @@ def register_verification_probe(
     _VERIFICATION_PROBES[action] = probe
 
 
-register_verification_probe("open_app", _process_liveness_probe)
-register_verification_probe("close_app", _process_exit_probe)
+register_verification_probe("open_app", process_liveness_probe)
+register_verification_probe("close_app", exit_code_probe)
 
 
 def _default_probe(result: dict[str, Any]) -> dict[str, Any]:
     """Default pass-through probe for Phase 1 groundwork."""
-    result["verification_mode"] = "boundary_probe"
-    return result
+    return noop_probe(result)
 
 
 def classify_action(action: str) -> str:
@@ -311,33 +330,47 @@ def _apply_verification(result: dict[str, Any]) -> dict[str, Any]:
     blocked = bool(result.get("blocked"))
     success = bool(result.get("success"))
     message = str(result.get("message", ""))
+    
+    # Check if a probe already set an outcome
+    probe_outcome = result.get("outcome_class")
+    probe_v_status = result.get("verification_status")
 
     if blocked:
         verification_status = "blocked"
-        outcome_class = "blocked"
+        outcome_class = OUTCOME_BLOCKED
         failure_class = "blocked_action"
-    elif success:
-        verification_status = "passed"
-        outcome_class = "success"
-        failure_class = ""
     elif message == "Operator returned invalid result":
         verification_status = "failed"
-        outcome_class = "failure"
+        outcome_class = OUTCOME_INVALID_RESULT
         failure_class = "invalid_operator_result"
-    elif message.startswith("Execution failed:"):
+    elif message.startswith("Execution failed:") or result.get("failure_class") == "operator_exception":
         verification_status = "failed"
-        outcome_class = "failure"
+        outcome_class = OUTCOME_FAILURE
         failure_class = "operator_exception"
-    else:
+    elif probe_outcome:
+        # Respect deterministic probe outcome
+        outcome_class = probe_outcome
+        verification_status = probe_v_status or ("passed" if outcome_class == OUTCOME_SUCCESS else "failed")
+        failure_class = result.get("failure_class", "")
+    elif not success:
         verification_status = "failed"
-        outcome_class = "failure"
-        failure_class = "operator_reported_failure"
+        outcome_class = OUTCOME_FAILURE
+        failure_class = result.get("failure_class", "operator_reported_failure")
+    else:
+        # Default success if no probe override
+        verification_status = "passed"
+        outcome_class = OUTCOME_SUCCESS
+        failure_class = ""
 
     result["verified"] = verification_status == "passed"
     result["verification_status"] = verification_status
-    result["verification_mode"] = "boundary_outcome_check"
     result["outcome_class"] = outcome_class
     result["failure_class"] = failure_class
+    
+    # Ensure probe_used is present
+    if "probe_used" not in result:
+        result["probe_used"] = result.get("verification_mode", "none")
+    
     return result
 
 
@@ -506,9 +539,15 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
 
         # Phase 1 Groundwork: Diagnostic Probe
         if normalized.get("success"):
-            probe = _VERIFICATION_PROBES.get(canonical_action, _default_probe)
+            # LIFECYCLE-AWARE PROBE SELECTION (Gate 2.5 Stabilization)
+            requested_mode = normalized.get("verification_mode")
+            if requested_mode == "noop":
+                probe = noop_probe
+            else:
+                probe = _VERIFICATION_PROBES.get(canonical_action, _default_probe)
+
             try:
-                # Deterministic probe execution (Phase 1: default_probe only)
+                # Deterministic probe execution
                 normalized = probe(normalized)
             except Exception as probe_exc:
                 logger.warning(

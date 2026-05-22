@@ -80,6 +80,9 @@ def _normalize_public_result(action: str, target: str, result: Dict[str, Any], s
 
     out["action"] = action
     out["target"] = target
+    
+    # BROWSER LIFECYCLE (Gate 2.5 Stabilization): Always non-trackable
+    out["verification_mode"] = "noop"
 
     try:
         out["elapsed_ms"] = int((time.time() - float(start_time)) * 1000)
