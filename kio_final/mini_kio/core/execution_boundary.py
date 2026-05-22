@@ -18,28 +18,109 @@ from mini_kio.core.runtime import (
     record_runtime_integrity_warning,
     remember_runtime_context,
 )
+from mini_kio.core.operator_protocol import ActionRegistryEntry
+from mini_kio.core.app_operator import (
+    launch_app, close_app, search_web, execute_capability, APP_OPERATOR_DESCRIPTOR
+)
+from mini_kio.core.browser_operator import (
+    play_youtube, search_youtube, BROWSER_OPERATOR_DESCRIPTOR
+)
+from mini_kio.core.file_operator import (
+    open_folder, FILE_OPERATOR_DESCRIPTOR
+)
+from mini_kio.core.system_operator import (
+    lock_system, shutdown_system, restart_system, SYSTEM_OPERATOR_DESCRIPTOR
+)
 
 logger = logging.getLogger(__name__)
 
-_ACTION_CATEGORIES: dict[str, str] = {
-    "open": "external_open",
-    "open_app": "external_open",
-    "open_folder": "external_open",
-    "folder": "external_open",
-    "close": "external_control",
-    "close_app": "external_control",
-    "search": "external_open",
-    "search_web": "external_open",
-    "play": "external_open",
-    "play_youtube": "external_open",
-    "youtube_play": "external_open",
-    "search_youtube": "external_open",
-    "lock": "system_control",
-    "lock_system": "system_control",
-    "shutdown": "destructive_system",
-    "shutdown_system": "destructive_system",
-    "restart": "destructive_system",
-    "restart_system": "destructive_system",
+# ---------------------------------------------------------------------------
+# Static Action Registry
+# ---------------------------------------------------------------------------
+
+STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
+    "open_app": {
+        "handler": launch_app,
+        "canonical_name": "open_app",
+        "category": "external_open",
+        "descriptor": APP_OPERATOR_DESCRIPTOR
+    },
+    "close_app": {
+        "handler": close_app,
+        "canonical_name": "close_app",
+        "category": "external_control",
+        "descriptor": APP_OPERATOR_DESCRIPTOR
+    },
+    "search_web": {
+        "handler": search_web,
+        "canonical_name": "search_web",
+        "category": "external_open",
+        "descriptor": APP_OPERATOR_DESCRIPTOR
+    },
+    "open_folder": {
+        "handler": open_folder,
+        "canonical_name": "open_folder",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "play_youtube": {
+        "handler": play_youtube,
+        "canonical_name": "play_youtube",
+        "category": "external_open",
+        "descriptor": BROWSER_OPERATOR_DESCRIPTOR
+    },
+    "search_youtube": {
+        "handler": search_youtube,
+        "canonical_name": "search_youtube",
+        "category": "external_open",
+        "descriptor": BROWSER_OPERATOR_DESCRIPTOR
+    },
+    "lock_system": {
+        "handler": lock_system,
+        "canonical_name": "lock_system",
+        "category": "system_control",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
+    "shutdown_system": {
+        "handler": shutdown_system,
+        "canonical_name": "shutdown_system",
+        "category": "destructive_system",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
+    "restart_system": {
+        "handler": restart_system,
+        "canonical_name": "restart_system",
+        "category": "destructive_system",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
+    "execute_capability": {
+        "handler": execute_capability,
+        "canonical_name": "execute_capability",
+        "category": "external_control",
+        "descriptor": APP_OPERATOR_DESCRIPTOR
+    }
+}
+
+_ACTION_MAP: dict[str, str] = {
+    "open": "open_app",
+    "open_app": "open_app",
+    "close": "close_app",
+    "close_app": "close_app",
+    "search": "search_web",
+    "search_web": "search_web",
+    "folder": "open_folder",
+    "open_folder": "open_folder",
+    "play": "play_youtube",
+    "play_youtube": "play_youtube",
+    "youtube_play": "play_youtube",
+    "search_youtube": "search_youtube",
+    "lock": "lock_system",
+    "lock_system": "lock_system",
+    "shutdown": "shutdown_system",
+    "shutdown_system": "shutdown_system",
+    "restart": "restart_system",
+    "restart_system": "restart_system",
+    "execute_capability": "execute_capability"
 }
 
 _BLOCKED_ACTIONS: frozenset[str] = frozenset(
@@ -155,68 +236,31 @@ def _default_probe(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def classify_action(action: str) -> str:
-
     """Return the minimal category for an action name."""
-    return _ACTION_CATEGORIES.get(action, "unknown")
+    canonical = _ACTION_MAP.get(action)
+    if canonical:
+        entry = STATIC_ACTION_TABLE.get(canonical)
+        if entry:
+            return entry["category"]
+    return "unknown"
 
 
-def _load_handler(action: str) -> tuple[Callable[..., dict], str]:
+def _load_handler(action: str) -> tuple[Callable[..., dict], str, dict[str, Any]]:
     """
-    Resolve an action to a concrete operator function.
+    Resolve an action to a concrete operator function and its descriptor.
 
     Returns:
-        (handler, canonical_action_name)
+        (handler, canonical_action_name, descriptor)
     """
-    if action in {"open", "open_app"}:
-        from mini_kio.core.app_operator import launch_app
+    canonical = _ACTION_MAP.get(action)
+    if not canonical:
+        raise ValueError(f"Unknown action: {action}")
 
-        return launch_app, "open_app"
+    entry = STATIC_ACTION_TABLE.get(canonical)
+    if not entry:
+        raise ValueError(f"Action mapped to non-existent entry: {action} -> {canonical}")
 
-    if action in {"close", "close_app"}:
-        from mini_kio.core.app_operator import close_app
-
-        return close_app, "close_app"
-
-    if action in {"search", "search_web"}:
-        from mini_kio.core.app_operator import search_web
-
-        return search_web, "search_web"
-
-    if action in {"folder", "open_folder"}:
-        from mini_kio.core.file_operator import open_folder
-
-        return open_folder, "open_folder"
-
-    if action in {"play", "play_youtube", "youtube_play"}:
-        from mini_kio.core.browser_operator import play_youtube
-
-        return play_youtube, "play_youtube"
-
-    if action == "search_youtube":
-        from mini_kio.core.browser_operator import search_youtube
-
-        return search_youtube, "search_youtube"
-
-    if action in {"lock", "lock_system"}:
-        from mini_kio.core.system_operator import lock_system
-
-        return lock_system, "lock_system"
-
-    if action in {"shutdown", "shutdown_system"}:
-        from mini_kio.core.system_operator import shutdown_system
-
-        return shutdown_system, "shutdown_system"
-
-    if action in {"restart", "restart_system"}:
-        from mini_kio.core.system_operator import restart_system
-
-        return restart_system, "restart_system"
-        
-    if action == "execute_capability":
-        from mini_kio.core.app_operator import execute_capability
-        return execute_capability, "execute_capability"
-
-    raise ValueError(f"Unknown action: {action}")
+    return entry["handler"], entry["canonical_name"], entry["descriptor"]
 
 
 def _normalize_result(
@@ -227,6 +271,7 @@ def _normalize_result(
     category: str,
     elapsed_ms: int,
     handler_name: str | None = None,
+    descriptor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {
@@ -237,6 +282,7 @@ def _normalize_result(
             "category": category,
             "elapsed_ms": elapsed_ms,
             "handler": handler_name or "",
+            "tool_version": descriptor.get("tool_version", "unknown") if descriptor else "unknown",
         }
 
     normalized: dict[str, Any] = {
@@ -247,6 +293,7 @@ def _normalize_result(
         "category": category,
         "elapsed_ms": elapsed_ms,
         "handler": handler_name or "",
+        "tool_version": descriptor.get("tool_version", "unknown") if descriptor else "unknown",
     }
 
     for key, value in result.items():
@@ -304,25 +351,40 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
 
     Responsibilities:
       1. Receive action request
-      2. Perform minimal action classification
-      3. Pre-load RAM capacity check
-      4. Block clearly destructive actions during Gate 0
-      5. Invoke the operator
-      6. Normalize the result shape
+      2. Resolve handler and descriptor
+      3. Perform minimal action classification
+      4. Deterministic RAM capacity check via descriptor
+      5. Block clearly destructive actions during Gate 0
+      6. Invoke the operator
+      7. Normalize the result shape including version telemetry
     """
     category = classify_action(action)
     start = time.monotonic()
 
-    # Gate 2.4 Phase 1: Pre-load RAM check
+    try:
+        handler, canonical_action, descriptor = _load_handler(action)
+    except ValueError as val_exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return _apply_verification({
+            "success": False,
+            "message": str(val_exc),
+            "action": action,
+            "target": target,
+            "category": category,
+            "elapsed_ms": elapsed_ms,
+            "failure_class": "unknown_action",
+        })
+
+    # Gate 2.4: Deterministic RAM check using descriptor
     try:
         from mini_kio.core.runtime import get_runtime
         rt = get_runtime()
         if rt:
-            # v1 placeholder: use 10MB budget for standard tools if not declared
-            rt.resource_guard.check_capacity(10.0)
+            budget = float(descriptor.get("ram_budget_mb", 10.0))
+            rt.resource_guard.check_capacity(budget)
     except RamBudgetError as ram_exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
-        logger.error("[EXEC] RAM capacity check failed: %s", ram_exc)
+        logger.error("[EXEC] RAM capacity check failed for %s: %s", descriptor.get("tool_name"), ram_exc)
         return _apply_verification({
             "success": False,
             "message": f"Resource Limit: {ram_exc}",
@@ -332,12 +394,15 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "elapsed_ms": elapsed_ms,
             "failure_class": "ram_budget_exceeded",
         })
+
     runtime_snapshot = get_runtime_snapshot()
     _log_execution_event(
         "exec_dispatch",
         action=action,
         category=category,
         target=target,
+        tool=descriptor.get("tool_name"),
+        version=descriptor.get("tool_version"),
         runtime=runtime_snapshot,
     )
 
@@ -355,6 +420,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "blocked": True,
             "elapsed_ms": elapsed_ms,
             "handler": "",
+            "tool_version": descriptor.get("tool_version", "unknown"),
         }
         _log_execution_event(
             "exec_blocked",
@@ -379,7 +445,6 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
         return _apply_verification(blocked_result)
 
     try:
-        handler, canonical_action = _load_handler(action)
         handler_name = f"{handler.__module__}.{handler.__name__}"
         _log_execution_event(
             "exec_operator_dispatch",
@@ -387,6 +452,8 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             category=classify_action(canonical_action),
             target=target,
             handler=handler_name,
+            tool=descriptor.get("tool_name"),
+            version=descriptor.get("tool_version"),
             runtime=runtime_snapshot,
         )
 
@@ -434,6 +501,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             category=classify_action(canonical_action),
             elapsed_ms=elapsed_ms,
             handler_name=handler_name,
+            descriptor=descriptor,
         )
 
         # Phase 1 Groundwork: Diagnostic Probe

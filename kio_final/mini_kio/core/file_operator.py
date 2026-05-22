@@ -17,7 +17,23 @@ import platform
 import subprocess
 from pathlib import Path
 
+from mini_kio.core.operator_protocol import OperatorDescriptor
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Operator Descriptor
+# ---------------------------------------------------------------------------
+
+FILE_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
+    "tool_name": "file_operator",
+    "tool_version": "1.0.0",
+    "ram_budget_mb": 5.0,
+    "timeout_seconds": 10,
+    "side_effect": True,
+    "lifecycle_type": "stateless",
+    "supported_actions": ["open_folder", "create_file", "list_directory"]
+}
 
 _IS_WINDOWS = platform.system() == "Windows"
 

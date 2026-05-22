@@ -30,7 +30,23 @@ import ctypes
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from mini_kio.core.operator_protocol import OperatorDescriptor
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Operator Descriptor
+# ---------------------------------------------------------------------------
+
+APP_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
+    "tool_name": "app_operator",
+    "tool_version": "1.1.0",
+    "ram_budget_mb": 12.0,
+    "timeout_seconds": 15,
+    "side_effect": True,
+    "lifecycle_type": "multi",
+    "supported_actions": ["open_app", "close_app", "search_web", "execute_capability"]
+}
 
 _IS_WINDOWS = platform.system() == "Windows"
 

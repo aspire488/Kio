@@ -15,7 +15,23 @@ import logging
 import platform
 import subprocess
 
+from mini_kio.core.operator_protocol import OperatorDescriptor
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Operator Descriptor
+# ---------------------------------------------------------------------------
+
+SYSTEM_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
+    "tool_name": "system_operator",
+    "tool_version": "1.0.0",
+    "ram_budget_mb": 2.0,
+    "timeout_seconds": 10,
+    "side_effect": True,
+    "lifecycle_type": "stateless",
+    "supported_actions": ["lock_system", "shutdown_system", "restart_system"]
+}
 
 _IS_WINDOWS = platform.system() == "Windows"
 

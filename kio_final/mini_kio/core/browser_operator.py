@@ -21,7 +21,23 @@ import urllib.parse
 import webbrowser
 from typing import Any, Dict
 
+from mini_kio.core.operator_protocol import OperatorDescriptor
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Operator Descriptor
+# ---------------------------------------------------------------------------
+
+BROWSER_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
+    "tool_name": "browser_operator",
+    "tool_version": "1.0.0",
+    "ram_budget_mb": 8.0,
+    "timeout_seconds": 10,
+    "side_effect": True,
+    "lifecycle_type": "browser",
+    "supported_actions": ["play_youtube", "search_youtube", "open_url", "search_google"]
+}
 
 
 def _normalize_public_result(action: str, target: str, result: Dict[str, Any], start_time: float) -> Dict[str, Any]:
