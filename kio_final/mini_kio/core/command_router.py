@@ -533,13 +533,14 @@ def _ai_fallback(query: str) -> dict:
     except Exception as exc:
         logger.warning(f"LLM fallback failed: {exc}")
 
-    # 3. Graceful unknown
+    # 3. Graceful unknown — eligible for Gate 3 orchestration pipeline
     return {
         "success": False,
         "message": (
             f"I'm not sure how to '{query}'. "
             "I can open apps, search the web, or play media. Try 'help' for examples."
         ),
+        "_gate3_eligible": True,
     }
 
 

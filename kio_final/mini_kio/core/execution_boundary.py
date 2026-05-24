@@ -3,6 +3,11 @@ Minimal runtime-owned execution handoff for Gate 0 stabilization.
 
 This module is intentionally small. It centralizes side-effect dispatch for
 the current prototype runtime without introducing planner/verifier systems.
+
+HARDENED EXECUTION BOUNDARY CONTRACT:
+1. LLM-derived intents are untrusted until validated.
+2. Intent extraction does not grant execution authority.
+3. Only validated structured intents may reach runtime dispatch.
 """
 
 from __future__ import annotations
@@ -540,6 +545,11 @@ def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
 def execute_action(action: str, target: str = "") -> dict[str, Any]:
     """
     Execute an action through one runtime-owned handoff.
+    
+    ASSERTIONS:
+    - Only validated structured intents may reach this dispatch point.
+    - LLM-derived intents are UNTRUSTED until reaching this boundary.
+    - Execution authority is ONLY granted to known, registered actions.
 
     Responsibilities:
       1. Receive action request

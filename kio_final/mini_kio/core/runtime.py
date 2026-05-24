@@ -875,6 +875,81 @@ def get_runtime_observer_snapshot() -> list[dict[str, object]]:
     return [dict(record) for record in runtime.observers.values()]
 
 
+def _route_via_orchestration(text: str) -> dict[str, object]:
+    """
+    Gate 3 orchestration pipeline for non-deterministic input.
+
+    Pipeline: intent_classifier -> intent_validator -> conversation_orchestrator -> runtime_handoff
+    """
+    runtime = _CURRENT_RUNTIME
+    if runtime is None:
+        return {"success": False, "message": "Runtime not initialized."}
+
+    # Lazy-init singleton pipeline instances on the runtime object
+    if not hasattr(runtime, '_gate3_pipeline'):
+        from mini_kio.llm.intent_classifier import IntentClassifier
+        from mini_kio.llm.intent_validator import IntentValidator
+        from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
+        from mini_kio.runtime.runtime_handoff import RuntimeHandoff
+        runtime._gate3_pipeline = {
+            'classifier': IntentClassifier(),
+            'validator': IntentValidator(),
+            'orchestrator': ConversationOrchestrator(),
+            'handoff': RuntimeHandoff(),
+        }
+
+    pipe = runtime._gate3_pipeline
+
+    emit_runtime_trace("intent_classification", text_len=len(text))
+    classification = pipe['classifier'].classify(text)
+
+    emit_runtime_trace("validator_result",
+                       is_safe=classification.is_safe,
+                       intent_type=str(classification.primary_intent.intent_type)
+                       if classification.primary_intent else "none")
+    validated = pipe['validator'].validate(classification)
+
+    emit_runtime_trace("orchestration_state",
+                       state=str(pipe['orchestrator'].get_state()))
+    orchestration = pipe['orchestrator'].orchestrate(validated)
+
+    handoff_state = str(orchestration.state.value) if hasattr(orchestration.state, 'value') else str(orchestration.state)
+    emit_runtime_trace("handoff_result",
+                       state=handoff_state,
+                       has_pending=orchestration.pending_action is not None)
+    try:
+        handoff_result = pipe['handoff'].handle_handoff(orchestration)
+    except Exception:
+        pipe['orchestrator']._reset_state()
+        return {"success": False, "message": "Orchestration handoff failed."}
+
+    # Gate 3: Generate response through safe text-only responder
+    from mini_kio.llm.conversation_responder import ConversationResponder
+    responder = ConversationResponder()
+    try:
+        response_text = responder.generate(
+            original_text=text,
+            orchestration=orchestration,
+            handoff_result=handoff_result,
+        )
+        emit_runtime_trace("conversation_response_generated",
+                           classification=str(handoff_result.classification.value)
+                           if hasattr(handoff_result.classification, 'value')
+                           else str(handoff_result.classification))
+    except Exception:
+        response_text = "KIO encountered an issue processing that input."
+        emit_runtime_trace("conversation_response_degraded",
+                           classification=str(handoff_result.classification.value)
+                           if hasattr(handoff_result.classification, 'value')
+                           else str(handoff_result.classification))
+
+    return {
+        "success": handoff_result.success,
+        "message": response_text,
+        "_orchestrated": True,
+    }
+
+
 def dispatch_channel_input(
     text: str,
     *,
@@ -885,6 +960,12 @@ def dispatch_channel_input(
     Runtime-owned channel input handoff.
 
     Channels must call this (not operators or execution_boundary directly).
+
+    Gate 3 flow:
+      1. Input validation
+      2. Deterministic fast-path via handle_command
+      3. If fast-path cannot handle (gate3_eligible), route through orchestration pipeline
+      4. Context tracking and response formatting
     """
     runtime = _CURRENT_RUNTIME
     if runtime is None:
@@ -925,13 +1006,14 @@ def dispatch_channel_input(
         }
 
     emit_runtime_trace(
-        "runtime_channel_input",
+        "orchestration_entry",
         channel=channel,
         user_id=user_id,
         text_len=len(command),
         runtime=get_runtime_snapshot(),
     )
 
+    # ── Gate 3: Deterministic fast-path ────────────────────────────────
     try:
         from mini_kio.core.command_router import handle_command
 
@@ -947,6 +1029,10 @@ def dispatch_channel_input(
             "message": "KIO encountered an internal error but is still running.",
             "channel": channel,
         }
+
+    # ── Gate 3: Orchestration pipeline for non-deterministic input ─────
+    if result.get("_gate3_eligible"):
+        result = _route_via_orchestration(command)
 
     if not isinstance(result, dict):
         result = {"success": False, "message": str(result)}
