@@ -41,6 +41,8 @@ _IS_WINDOWS = platform.system() == "Windows"
 # Folder aliases for Windows (using shell: paths for reliability)
 # ─────────────────────────────────────────────────────────────────────────────
 
+KIO_FOLDER_PATH = str(Path(__file__).resolve().parents[3])
+
 FOLDER_ALIASES: dict[str, str] = {
     "downloads": "shell:Downloads",
     "desktop": "shell:Desktop",
@@ -50,6 +52,7 @@ FOLDER_ALIASES: dict[str, str] = {
     "videos": "shell:Videos",
     "home": str(Path.home()),
     "appdata": str(Path(os.environ.get("APPDATA", Path.home()))),
+    "kio": KIO_FOLDER_PATH,
 }
 
 # For compatibility
@@ -109,15 +112,13 @@ def _open_path(path: str, label: str) -> dict:
     try:
         if _IS_WINDOWS:
             # On Windows, use explorer
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["explorer", path],
-                timeout=5,
                 creationflags=0x00000008,  # DETACHED_PROCESS
-                capture_output=True,
             )
-            # explorer often returns non-zero even on success
-            logger.info(f"[FILE] opened: {path}")
-            return {"success": True, "message": f"Opened {label}"}
+            pid = proc.pid
+            logger.info(f"[FILE] opened: {path} (pid: {pid})")
+            return {"success": True, "message": f"Opened {label}", "pid": pid}
         else:
             # On Unix, use xdg-open
             subprocess.Popen(["xdg-open", path])

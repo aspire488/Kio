@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from mini_kio.core.execution_boundary import execute_action
+from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,52 @@ def _log_route(event: str, **fields: Any) -> None:
 
 # Folder keywords for routing (must match file_operator.WINDOWS_FOLDERS)
 _FOLDER_KEYWORDS: frozenset[str] = frozenset(
-    {"downloads", "desktop", "documents", "pictures", "music", "videos", "home", "appdata"}
+    {"downloads", "desktop", "documents", "pictures", "music", "videos", "home", "appdata", "kio"}
 )
+
+_SAFE_WEB_TARGET_RE = re.compile(r"^[a-z0-9-]+$")
+_SAFE_EXPLICIT_DOMAIN_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+)
+_SAFE_WEB_PATH_RE = re.compile(r"^[a-z0-9._~:@%+\-=]+(?:/[a-z0-9._~:@%+\-=]+)*$")
+_ALLOWED_WEB_TLDS = {"com", "ai", "org", "io", "dev", "app"}
+
+
+def _is_generic_web_target(name: str) -> bool:
+    normalized = name.lower().strip()
+    if not normalized:
+        return False
+    if not _SAFE_WEB_TARGET_RE.fullmatch(normalized):
+        return False
+    if normalized in WEB_URLS:
+        return False
+    if normalized in WEB_DOMAIN_ALIASES:
+        return False
+    if normalized in APP_REGISTRY:
+        return False
+    for info in APP_REGISTRY.values():
+        aliases = info.get("aliases", [])
+        if any(normalized == alias.lower() for alias in aliases):
+            return False
+    return True
+
+
+def _contains_forbidden_web_chars(value: str) -> bool:
+    return any(c in value for c in [' ', '&', '|', ';', '$', '(', ')', '`', '\\', '\0', '\n', '\r', '\t'])
+
+
+def _is_registry_alias(name: str) -> bool:
+    normalized = name.lower().strip()
+    if normalized in APP_REGISTRY:
+        return True
+    for info in APP_REGISTRY.values():
+        if any(normalized == alias.lower() for alias in info.get("aliases", [])):
+            return True
+    return False
+
+
+def _normalize_explicit_web_target(target: str) -> str | None:
+    return _normalize_web_target_to_url(target)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +177,19 @@ def handle_command(command: str) -> dict:
 
     lower = command.lower()
     lower = _normalize_connectors(lower)
+
+    # Canonicalize browser prepositions before deterministic browser routing.
+    lower = re.sub(r"\bon\s+(chrome|edge|comet|firefox|brave)\b", r" in \1", lower)
+
+    # ── FORBIDDEN TARGET DETECTION ────────────────────────────────────────
+    # Safety: Forbidden targets must be blocked before ANY resolution or execution dispatch.
+    FORBIDDEN_TARGETS = {
+        "cmd", "powershell", "regedit", "taskmgr", "msconfig", "control.exe", 
+        "explorer", "terminal", "services"
+    }
+    if lower in FORBIDDEN_TARGETS or lower.startswith("open ") and lower[5:].strip().lower() in FORBIDDEN_TARGETS:
+        _log_route("route", intent="forbidden_blocked", target=lower)
+        return {"success": False, "message": "Error: Forbidden system target blocked by security policy."}
 
     # ── GREETINGS ─────────────────────────────────────────────────────────
     if lower == "hello":
@@ -220,13 +278,17 @@ def handle_command(command: str) -> dict:
 
         # ── BROWSER WEBAPP ROUTING ────────────────────────────────────────────
         webapp_match = re.match(
-            r"^open\s+(telegram|whatsapp|chatgpt)\s+in\s+(chrome|edge|comet|firefox|brave)$",
+            r"^open\s+(.+?)\s+in\s+(chrome|edge|comet|firefox|brave)$",
             lower
         )
         if webapp_match:
             webapp, browser = webapp_match.groups()
-            _log_route("route", intent="capability", app=browser, cap="open_url", target=webapp)
-            return execute_action("execute_capability", f"{browser}::open_url::{webapp}")
+            normalized_url = _normalize_explicit_web_target(webapp)
+            # Browser normalization failures must never fall through into native execution.
+            if normalized_url is not None:
+                _log_route("route", intent="capability", app=browser, cap="open_url", target=normalized_url, route_type="explicit_domain_or_path")
+                return execute_action("execute_capability", f"{browser}::open_url::{normalized_url}")
+            return {"success": False, "message": "Invalid browser web target."}
 
         # ── OPEN ──────────────────────────────────────────────────────────────
         if lower.startswith("open "):
@@ -287,9 +349,32 @@ def handle_command(command: str) -> dict:
         if lower in ("lock", "lock computer"):
             return execute_action("lock_system")
 
+        if lower in ("recovery", "recover", "recover runtime", "reset safety"):
+            _log_route("route", intent="recovery_runtime")
+            return execute_action("recovery_runtime")
+
         # ── UTILITY ───────────────────────────────────────────────────────────
         if lower == "ping":
             return {"success": True, "message": "KIO online ✓"}
+
+        if lower == "status":
+            from mini_kio.core.runtime import get_runtime, get_runtime_snapshot, get_runtime_health_score, get_runtime_integrity_snapshot
+            rt = get_runtime()
+            if rt is None:
+                return {"success": True, "message": "Runtime: offline"}
+            snap = get_runtime_snapshot()
+            health = get_runtime_health_score()
+            integrity = get_runtime_integrity_snapshot()
+            return {
+                "success": True,
+                "message": (
+                    f"Safety state: {rt.safety_state}\n"
+                    f"Integrity score: {health}\n"
+                    f"Integrity status: {integrity.get('status', 'unknown')}\n"
+                    f"Uptime: {snap.get('uptime_ms', 0)}ms\n"
+                    f"Observers: {snap.get('observer_count', 0)}"
+                ),
+            }
 
         if "help" in lower:
             return _show_help()

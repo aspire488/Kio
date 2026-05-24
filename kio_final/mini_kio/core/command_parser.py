@@ -24,6 +24,7 @@ _ALIASES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bchrome\s+browser\b", re.I), "chrome"),
     (re.compile(r"\bgoogle\s+chrome\b", re.I), "chrome"),
     (re.compile(r"\bms\s+edge\b", re.I), "edge"),
+    (re.compile(r"\bmicrosoft\s+edge\b", re.I), "edge"),
     (re.compile(r"\bwhatsapp\s+web\b", re.I), "whatsapp"),
     (re.compile(r"\bgmail\b", re.I), "gmail"),
     (re.compile(r"\byoutube\b", re.I), "youtube"),
@@ -49,6 +50,12 @@ _PLATFORM_MARKERS = {"spotify", "youtube", "google", "edge", "chrome", "comet", 
 _INHERITABLE_VERBS = {"play", "search"}
 
 _MAX_COMMAND_STEPS = 4
+_ALLOWED_WEB_TLDS = {"com", "ai", "org", "io", "dev", "app"}
+_SAFE_SINGLE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_SAFE_EXPLICIT_DOMAIN_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+)
+_SAFE_WEB_PATH_RE = re.compile(r"^[a-z0-9._~:@%+\-=]+(?:/[a-z0-9._~:@%+\-=]+)*$")
 
 
 def _apply_aliases(text: str) -> str:
@@ -87,6 +94,18 @@ def _is_malformed_chain(text: str) -> bool:
     if re.search(r"\b(?:and|then)$", text):
         return True
     return False
+
+
+def _contains_forbidden_web_chars(value: str) -> bool:
+    return any(c in value for c in [' ', '&', '|', ';', '$', '(', ')', '`', '\\', '\0', '\n', '\r', '\t'])
+
+
+def _normalize_browser_web_target(webapp: str) -> str | None:
+    try:
+        from mini_kio.core.app_operator import _normalize_web_target_to_url
+    except Exception:
+        return None
+    return _normalize_web_target_to_url(webapp)
 
 
 def parse_command(command: str) -> List[Dict[str, Any]]:
@@ -224,6 +243,10 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
                     url = urls.get(webapp)
                     if url:
                         return {"action": "execute_capability", "target": f"{browser}::open_url::{url}"}
+
+                normalized_url = _normalize_browser_web_target(webapp)
+                if normalized_url and browser in known_browsers:
+                    return {"action": "execute_capability", "target": f"{browser}::open_url::{normalized_url}"}
 
         if action == "open":
             # Check if target contains folder keywords

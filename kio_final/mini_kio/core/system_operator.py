@@ -30,7 +30,7 @@ SYSTEM_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
     "timeout_seconds": 10,
     "side_effect": True,
     "lifecycle_type": "stateless",
-    "supported_actions": ["lock_system", "shutdown_system", "restart_system"]
+    "supported_actions": ["lock_system", "shutdown_system", "restart_system", "recovery_runtime"]
 }
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -156,4 +156,33 @@ def lock_system() -> dict:
         return {"success": False, "message": f"Lock failed: {str(e)[:80]}"}
 
 
-__all__ = ["shutdown_system", "restart_system", "lock_system"]
+def recovery_runtime(target: str = "") -> dict:
+    """
+    Deterministic manual recovery: clear safety state escalation and integrity warnings.
+    
+    This resets the runtime from EMERGENCY or DEGRADED back to NORMAL by clearing
+    all recorded integrity warnings and resetting counters. This requires explicit
+    operator action and is not automatic.
+    
+    Args:
+        target: Unused (present for dispatch contract compatibility)
+    
+    Returns:
+        {"success": bool, "message": str, "cleared_warnings": int, "previous_safety_state": str}
+    """
+    logger.info("[SYSTEM] recovery requested")
+    
+    try:
+        from mini_kio.core.runtime import manual_runtime_recovery
+        result = manual_runtime_recovery()
+        if result.get("success"):
+            logger.info(f"[SYSTEM] runtime recovery successful: {result.get('message')}")
+        else:
+            logger.warning(f"[SYSTEM] runtime recovery failed: {result.get('message')}")
+        return result
+    except Exception as e:
+        logger.exception(f"[SYSTEM] recovery error: {e}")
+        return {"success": False, "message": f"Recovery failed: {str(e)[:80]}"}
+
+
+__all__ = ["shutdown_system", "restart_system", "lock_system", "recovery_runtime"]

@@ -20,6 +20,7 @@ import glob
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,15 @@ APP_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
 }
 
 _IS_WINDOWS = platform.system() == "Windows"
+_RESTRICTED_CANONICAL_TARGETS = {
+    "explorer",
+    "cmd",
+    "powershell",
+    "terminal",
+    "taskmgr",
+    "regedit",
+    "services",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +93,36 @@ def _find_active_process(info: Dict) -> Optional[int]:
     except Exception:
         pass
     return None
+
+
+def _find_active_process_matches(info: Dict) -> list[int]:
+    """Return exact process-name matches only for deterministic ambiguity checks."""
+    if not _IS_WINDOWS:
+        return []
+    try:
+        import psutil
+
+        proc_name = info.get("process", "").lower()
+        if not proc_name:
+            return []
+
+        uwp_packages = info.get("uwp_packages", [])
+        targets = {proc_name}
+        for package_name in uwp_packages:
+            targets.add(package_name.lower())
+        normalized = {t if t.endswith(".exe") else t + ".exe" for t in targets}
+
+        matches: list[int] = []
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                current_name = (proc.info.get('name') or "").lower()
+                if current_name in normalized:
+                    matches.append(int(proc.info['pid']))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                continue
+        return matches
+    except Exception:
+        return []
 
 
 def _graceful_uwp_close(pid: int, name: str):
@@ -307,6 +347,7 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
         "lifecycle": "launcher",
         "exe": "explorer.exe",
         "process": "explorer.exe",
+        "aliases": ["file explorer"],
         "system": True,
     },
     "terminal": {
@@ -375,6 +416,58 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
             r"%APPDATA%\Telegram Desktop\Telegram.exe",
         ],
     },
+    "word": {
+        "lifecycle": "standard",
+        "exe": "WINWORD.EXE",
+        "process": "WINWORD.EXE",
+        "aliases": ["microsoft word", "ms word"],
+        "system": True,
+    },
+    "excel": {
+        "lifecycle": "standard",
+        "exe": "EXCEL.EXE",
+        "process": "EXCEL.EXE",
+        "aliases": ["microsoft excel", "ms excel"],
+        "system": True,
+    },
+    "powerpoint": {
+        "lifecycle": "standard",
+        "exe": "POWERPNT.EXE",
+        "process": "POWERPNT.EXE",
+        "aliases": ["microsoft powerpoint", "ms powerpoint", "ppt"],
+        "system": True,
+    },
+    "snipping tool": {
+        "lifecycle": "uwp",
+        "exe": "SnippingTool.exe",
+        "process": "SnippingTool.exe",
+        "aliases": ["snippingtool"],
+        "system": True,
+    },
+    "microsoft store": {
+        "lifecycle": "uwp",
+        "exe": "WinStore.App.exe",
+        "process": "WinStore.App.exe",
+        "uri": "ms-windows-store://home",
+        "aliases": ["store", "windows store", "ms store"],
+        "uwp_packages": ["WinStore.App.exe", "ApplicationFrameHost.exe"],
+    },
+    "settings": {
+        "lifecycle": "uwp",
+        "exe": "SystemSettings.exe",
+        "process": "SystemSettings.exe",
+        "uri": "ms-settings:",
+        "aliases": ["windows settings", "system settings"],
+        "uwp_packages": ["SystemSettings.exe", "ApplicationFrameHost.exe"],
+    },
+    "photos": {
+        "lifecycle": "uwp",
+        "exe": "PhotosApp.exe",
+        "process": "PhotosApp.exe",
+        "uri": "ms-photos:",
+        "aliases": ["microsoft photos", "windows photos"],
+        "uwp_packages": ["PhotosApp.exe", "ApplicationFrameHost.exe"],
+    },
 }
 
 # Web apps — opened directly in the default browser
@@ -383,13 +476,53 @@ WEB_URLS: Dict[str, str] = {
     "whatsapp":     "https://web.whatsapp.com",
     "whatsapp web": "https://web.whatsapp.com",
     "telegram":     "https://web.telegram.org",
+    "instagram":    "https://instagram.com",
     "claude":       "https://claude.ai",
     "claude ai":    "https://claude.ai",
+    "gemini":       "https://gemini.google.com/app",
     "chatgpt":      "https://chat.openai.com",
     "gmail":        "https://gmail.com",
     "github":       "https://github.com",
     "google":       "https://google.com",
     "netflix":      "https://netflix.com",
+}
+
+WEB_DOMAIN_ALIASES: Dict[str, str] = {
+    "google photos": "https://photos.google.com",
+    "google drive": "https://drive.google.com",
+    "google docs": "https://docs.google.com",
+    "google sheets": "https://sheets.google.com",
+    "google maps": "https://maps.google.com",
+    "google calendar": "https://calendar.google.com",
+    "google keep": "https://keep.google.com",
+    "google translate": "https://translate.google.com",
+    "google classroom": "https://classroom.google.com",
+    "chat qwen ai": "https://chat.qwen.ai",
+    "figma": "https://figma.com",
+    "notion": "https://notion.so",
+}
+
+_ALLOWED_WEB_TLDS = {"com", "ai", "org", "io", "dev", "app"}
+_SAFE_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_SAFE_SYNTHETIC_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9-]{1,63}$")
+_SAFE_EXPLICIT_DOMAIN_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$"
+)
+_SAFE_URL_PATH_RE = re.compile(r"^[a-z0-9._~:@%+\-=]+(?:/[a-z0-9._~:@%+\-=]+)*$")
+_SAFE_SINGLE_PATH_SEGMENT_RE = re.compile(r"^[a-z0-9._-]+$")
+_RESERVED_SYNTHETIC_WEB_LABELS = {
+    "localhost",
+    "explorer",
+    "desktop",
+    "downloads",
+    "documents",
+    "pictures",
+    "music",
+    "videos",
+    "control",
+    "cmd",
+    "powershell",
+    "terminal",
 }
 
 # Dynamic resolvers map
@@ -479,6 +612,20 @@ def launch_app(name: str) -> dict:
     key = name.lower().strip()
     logger.info(f"[APP] launch_app: {key!r}")
 
+    # Safety: Restricted targets must reject before ANY execution logic or discovery.
+    if key in _RESTRICTED_CANONICAL_TARGETS:
+        return _normalize_public_result(
+            "launch",
+            key,
+            {
+                "success": False,
+                "message": f"{name} is restricted for safety.",
+                "failure_class": "restricted_target",
+                "pid": None,
+            },
+            start_time,
+        )
+
     # 1. Registry
     info = _find_in_registry(key)
     if info:
@@ -497,6 +644,16 @@ def launch_app(name: str) -> dict:
         result = _open_url(WEB_URLS[key], key)
         return _normalize_public_result("launch", key, result, start_time)
 
+    # 2b. Deterministic web domain aliases
+    if key in WEB_DOMAIN_ALIASES:
+        result = _open_url(WEB_DOMAIN_ALIASES[key], key)
+        return _normalize_public_result("launch", key, result, start_time)
+
+    normalized_url = _normalize_web_target_to_url(key)
+    if normalized_url is not None:
+        result = _open_url(normalized_url, key)
+        return _normalize_public_result("launch", key, result, start_time)
+
     # 3. Discovery
     result = _discover_and_launch(key)
     if "canonical_name" not in result:
@@ -509,6 +666,27 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
     key = name.lower().strip()
     start_time = time.time()
     logger.info(f"[APP] close_app: {key!r} (pid override: {pid})")
+
+    info = _find_in_registry(key)
+    canonical = key
+    if info:
+        for registry_key, registry_info in APP_REGISTRY.items():
+            if registry_info is info:
+                canonical = registry_key
+                break
+
+    if canonical in _RESTRICTED_CANONICAL_TARGETS:
+        return _normalize_public_result(
+            "close",
+            canonical,
+            {
+                "success": False,
+                "message": f"{name} is restricted for safety." if canonical != "explorer" else "Explorer shell control is restricted for safety.",
+                "pid": None,
+                "failure_class": "restricted_shell_control" if canonical == "explorer" else "restricted_target",
+            },
+            start_time,
+        )
 
     if not _IS_WINDOWS:
         return _normalize_public_result("close", key, _pkill(key), start_time)
@@ -524,77 +702,11 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-            # Use /T (Tree) to ensure all subprocesses (tabs, helpers) are terminated.
-            # No /F for graceful termination as per SPEC 4.1.
-            result = subprocess.run(
-                ["taskkill", "/T", "/PID", str(pid)],
-                capture_output=True, text=True, timeout=6,
-            )
-            
-            # Bounded verification delay: If taskkill failed or reported stubbornness
-            if result.returncode != 0 or "forcefully" in result.stderr.lower():
-                time.sleep(1.2)
-                # FINAL VERIFICATION: Check if it actually closed despite the error
-                try:
-                    import psutil
-                    if not psutil.pid_exists(pid):
-                         result = subprocess.CompletedProcess(result.args, 0, result.stdout, result.stderr)
-                    else:
-                        p = psutil.Process(pid)
-                        if not p.is_running() or p.status() == psutil.STATUS_ZOMBIE:
-                             result = subprocess.CompletedProcess(result.args, 0, result.stdout, result.stderr)
-                        else:
-                            # Maybe it's in the process of closing
-                            time.sleep(1.0)
-                            if not psutil.pid_exists(pid):
-                                result = subprocess.CompletedProcess(result.args, 0, result.stdout, result.stderr)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    result = subprocess.CompletedProcess(result.args, 0, result.stdout, result.stderr)
-
-            if result.returncode == 0:
-                logger.info(f"[APP] targeted tree killed: {pid}")
+            termination = _terminate_with_verification(name, key, pid, info)
+            if termination.get("verified_terminated"):
                 _cleanup_chrome_temp_profile(pid)
-                
-                # Suffix Fix: Graceful WM_CLOSE for Calculator UI
                 _graceful_uwp_close(pid, name)
-
-                # Phase E: UWP Container-Aware Check (Honesty)
-                info = _find_in_registry(key)
-                if info and info.get("lifecycle") == "uwp":
-                    return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}, start_time)
-
-                return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name} (pid {pid})", "pid": pid}, start_time)
-
-            # If PID not found or already gone
-            if "not found" in result.stderr.lower() or "not running" in result.stderr.lower():
-                _cleanup_chrome_temp_profile(pid)
-                return _normalize_public_result("close", key, {"success": True, "message": f"{name} was already closed.", "pid": pid}, start_time)
-            
-            # SURGICAL FALLBACK: If graceful kill fails because forceful termination is required
-            # (common for modern Notepad/UWP apps), we escalate if we have a tracked PID.
-            if "forcefully" in result.stderr.lower() or "/f" in result.stderr.lower():
-                logger.info(f"[APP] Graceful kill failed for pid {pid}, retrying forcefully (/F)")
-                f_result = subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True, text=True, timeout=6,
-                )
-                if f_result.returncode == 0:
-                    _cleanup_chrome_temp_profile(pid)
-                    
-                    # Suffix Fix: Graceful WM_CLOSE for Calculator UI
-                    _graceful_uwp_close(pid, name)
-
-                    # Phase E: UWP Container-Aware Check
-                    info = _find_in_registry(key)
-                    if info and info.get("lifecycle") == "uwp":
-                        return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name}. Core process terminated, but UWP shell may persist.", "pid": pid}, start_time)
-
-                    return _normalize_public_result("close", key, {"success": True, "message": f"Closed {name} (pid {pid}) forcefully.", "pid": pid}, start_time)
-
-            # If it still fails, report it.
-            msg = f"Failed to close {name} (pid {pid}) gracefully."
-            logger.warning(f"[APP] taskkill /T rc={result.returncode} for pid {pid}: {result.stderr}")
-            return _normalize_public_result("close", key, {"success": False, "message": msg, "pid": pid}, start_time)
+            return _normalize_public_result("close", key, termination, start_time)
 
         except subprocess.TimeoutExpired:
             return _normalize_public_result("close", key, {"success": False, "message": f"Timeout closing {name} (pid {pid})", "pid": pid}, start_time)
@@ -604,16 +716,42 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
 
     # No wildcard fallback (/IM) for non-system apps to respect ownership isolation.
     # Recovery Phase: if app not tracked, attempt ONE bounded recovery lookup.
-    info = _find_in_registry(key)
     if info:
+        exact_matches = _find_active_process_matches(info)
+        if len(exact_matches) > 1:
+            return _normalize_public_result(
+                "close",
+                canonical,
+                {
+                    "success": False,
+                    "message": f"Cannot close {name}: multiple ambiguous process matches found.",
+                    "failure_class": "ambiguous_target",
+                    "pid": None,
+                },
+                start_time,
+            )
         found_pid = _find_active_process(info)
         if found_pid:
             logger.info(f"[APP] recovery found unique pid {found_pid} for {key}")
             # Adopt and close
             return close_app(name, pid=found_pid)
+
+        # Fall back to runtime tracked ownership if exact active process enumeration fails.
+        try:
+            from mini_kio.core.runtime import get_runtime
+            rt = get_runtime()
+            if rt:
+                tracked = rt.get_tracked_process(canonical)
+                if tracked and isinstance(tracked.get("pid"), int):
+                    tracked_pid = int(tracked["pid"])
+                    logger.info(f"[APP] close_app using tracked pid {tracked_pid} for {key}")
+                    return close_app(name, pid=tracked_pid)
+        except Exception:
+            pass
+
         return _normalize_public_result("close", key, {"success": False, "message": f"Cannot close {name}: No tracked process found for this session.", "failure_class": "not_found"}, start_time)
 
-    if key in WEB_URLS:
+    if key in WEB_URLS or key in WEB_DOMAIN_ALIASES:
         return _normalize_public_result(
             "close",
             key,
@@ -674,6 +812,248 @@ def _open_url(url: str, label: str) -> dict:
         return {"success": True, "message": f"Launched {label} in browser.", "verification_mode": "noop"}
     except Exception as exc:
         return {"success": False, "message": f"Failed to open {label}: {str(exc)[:80]}"}
+
+
+def _contains_forbidden_web_chars(value: str) -> bool:
+    return any(c in value for c in [' ', '&', '|', ';', '$', '(', ')', '`', '\\', '\0', '\n', '\r', '\t'])
+
+
+def _is_registry_alias(key: str) -> bool:
+    if key in APP_REGISTRY:
+        return True
+    for info in APP_REGISTRY.values():
+        if key in info.get("aliases", []):
+            return True
+    return False
+
+
+def _is_internal_or_local_web_target(value: str) -> bool:
+    normalized = value.lower().strip()
+    if not normalized:
+        return False
+    if normalized == "::1":
+        return True
+
+    host = normalized
+    if "/" in host:
+        host = host.split("/", 1)[0]
+    if host.startswith("localhost:"):
+        return True
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    if host.startswith("127."):
+        return True
+    if host.startswith("10."):
+        return True
+    if host.startswith("192.168."):
+        return True
+    if host.startswith("169.254."):
+        return True
+    return False
+
+
+def _can_synthesize_single_label_domain(label: str) -> bool:
+    normalized = label.lower().strip()
+    if not normalized or not normalized.isascii():
+        return False
+    if normalized in _RESERVED_SYNTHETIC_WEB_LABELS:
+        return False
+    if _is_registry_alias(normalized) or _is_internal_or_local_web_target(normalized):
+        return False
+    return bool(_SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized))
+
+
+def _normalize_web_target_to_url(target: str) -> Optional[str]:
+    normalized = " ".join(target.lower().strip().split())
+    if not normalized:
+        return None
+    if normalized in WEB_URLS:
+        return WEB_URLS[normalized]
+    if normalized in WEB_DOMAIN_ALIASES:
+        return WEB_DOMAIN_ALIASES[normalized]
+    if _contains_forbidden_web_chars(normalized):
+        return None
+    if _is_internal_or_local_web_target(normalized):
+        return None
+    if (
+        "://" in normalized
+        or ".." in normalized
+        or "//" in normalized
+        or normalized.startswith((".", "/"))
+    ):
+        return None
+    if _can_synthesize_single_label_domain(normalized):
+        return f"https://{normalized}.com"
+    if _SAFE_EXPLICIT_DOMAIN_RE.fullmatch(normalized):
+        domain_parts = normalized.split(".")
+        if len(domain_parts) >= 2 and domain_parts[-1] in _ALLOWED_WEB_TLDS:
+            return f"https://{normalized}"
+        return None
+    if normalized.count("/") != 1 or normalized.endswith("/"):
+        return None
+
+    domain_candidate, path = normalized.split("/", 1)
+    if (
+        not domain_candidate
+        or not path
+        or _is_internal_or_local_web_target(domain_candidate)
+        or not _SAFE_SINGLE_PATH_SEGMENT_RE.fullmatch(path)
+    ):
+        return None
+    if path in _ALLOWED_WEB_TLDS and _can_synthesize_single_label_domain(domain_candidate):
+        return None
+
+    base_url: Optional[str] = None
+    if domain_candidate in WEB_URLS:
+        base_url = WEB_URLS[domain_candidate]
+    elif domain_candidate in WEB_DOMAIN_ALIASES:
+        base_url = WEB_DOMAIN_ALIASES[domain_candidate]
+    elif _SAFE_EXPLICIT_DOMAIN_RE.fullmatch(domain_candidate):
+        domain_parts = domain_candidate.split(".")
+        if len(domain_parts) >= 2 and domain_parts[-1] in _ALLOWED_WEB_TLDS:
+            base_url = f"https://{domain_candidate}"
+    elif _can_synthesize_single_label_domain(domain_candidate):
+        base_url = f"https://{domain_candidate}.com"
+
+    if base_url is None:
+        return None
+    return f"{base_url.rstrip('/')}/{path}"
+
+
+def _matching_process_names(key: str, info: Optional[Dict]) -> set[str]:
+    names: set[str] = set()
+    if info:
+        proc_name = str(info.get("process") or "").lower()
+        if proc_name:
+            names.add(proc_name if proc_name.endswith(".exe") else f"{proc_name}.exe")
+        for package_name in info.get("uwp_packages", []):
+            normalized = str(package_name).lower()
+            if normalized:
+                names.add(normalized if normalized.endswith(".exe") else f"{normalized}.exe")
+        if info.get("lifecycle") == "uwp":
+            names.discard("applicationframehost.exe")
+    if not names and key:
+        names.add(key if key.endswith(".exe") else f"{key}.exe")
+    return names
+
+
+def _find_matching_process_pid(key: str, info: Optional[Dict], *, exclude: set[int] | None = None) -> Optional[int]:
+    if not _IS_WINDOWS:
+        return None
+    exclude = exclude or set()
+    names = _matching_process_names(key, info)
+    try:
+        import psutil
+
+        matches: list[tuple[float, int]] = []
+        for proc in psutil.process_iter(['pid', 'name', 'create_time']):
+            try:
+                proc_name = (proc.info.get("name") or "").lower()
+                if proc.info['pid'] in exclude or proc_name not in names:
+                    continue
+                matches.append((float(proc.info.get("create_time") or 0.0), int(proc.info['pid'])))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                continue
+        if not matches:
+            return None
+        matches.sort()
+        return matches[-1][1]
+    except Exception:
+        return None
+
+
+def _pid_is_alive(pid: Optional[int]) -> bool:
+    if pid is None:
+        return False
+    try:
+        import psutil
+
+        proc = psutil.Process(int(pid))
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+        return False
+
+
+def _verification_residual_pid(target_pid: Optional[int], key: str, info: Optional[Dict]) -> Optional[int]:
+    if _pid_is_alive(target_pid):
+        return int(target_pid)
+    exclude = {int(target_pid)} if isinstance(target_pid, int) else set()
+    return _find_matching_process_pid(key, info, exclude=exclude)
+
+
+def _wait_for_termination_verification(target_pid: Optional[int], key: str, info: Optional[Dict], *, attempts: int) -> Optional[int]:
+    for _ in range(attempts):
+        residual_pid = _verification_residual_pid(target_pid, key, info)
+        if residual_pid is None:
+            return None
+        time.sleep(0.4)
+    return _verification_residual_pid(target_pid, key, info)
+
+
+def _run_taskkill(pid: int, *, force: bool) -> subprocess.CompletedProcess[str]:
+    cmd = ["taskkill"]
+    if force:
+        cmd.append("/F")
+    cmd.extend(["/T", "/PID", str(pid)])
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+
+
+def _terminate_with_verification(name: str, key: str, pid: int, info: Optional[Dict]) -> dict:
+    graceful_result = _run_taskkill(pid, force=False)
+    residual_pid = _wait_for_termination_verification(pid, key, info, attempts=4)
+
+    force_attempted = False
+    terminated_pid = pid
+    lifecycle = str(info.get("lifecycle") if info else "")
+    if residual_pid is not None:
+        force_attempted = True
+        terminated_pid = residual_pid
+        logger.info(f"[APP] residual detected after graceful close for {key}; forcing pid {residual_pid}")
+        _run_taskkill(residual_pid, force=True)
+        residual_pid = _wait_for_termination_verification(residual_pid, key, info, attempts=3)
+        if residual_pid is not None and lifecycle == "browser":
+            time.sleep(0.8)
+            residual_pid = _verification_residual_pid(residual_pid, key, info)
+
+    if residual_pid is None:
+        payload = {
+            "success": True,
+            "message": f"Closed {name} (pid {pid})",
+            "pid": pid,
+            "primary_termination_attempted": True,
+            "force_kill_attempted": force_attempted,
+            "verified_terminated": True,
+            "verification_status": "passed",
+        }
+        if info and info.get("lifecycle") == "uwp":
+            payload["message"] = f"Closed {name}. Core process terminated, but UWP shell may persist."
+        return payload
+
+    stderr_lower = (graceful_result.stderr or "").lower()
+    if lifecycle == "uwp":
+        message = f"Closed {name}. Core process terminated, but UWP shell may persist."
+    elif key == "explorer" or lifecycle == "launcher":
+        message = f"Closed {name}. Explorer shell may persist after the window closes."
+    elif lifecycle == "browser":
+        message = f"Closed {name}. Primary browser process terminated, but helper processes may persist."
+    elif "not found" in stderr_lower or "not running" in stderr_lower:
+        message = f"{name} was already closed."
+    else:
+        message = f"Close requested for {name}, but {name} is still running."
+
+    return {
+        "success": True,
+        "message": message,
+        "pid": pid,
+        "residual_pid": residual_pid,
+        "terminated_pid": terminated_pid,
+        "primary_termination_attempted": True,
+        "force_kill_attempted": force_attempted,
+        "verified_terminated": False,
+        "verification_status": "passed_with_residuals",
+        "outcome_class": "SUCCESS_WITH_RESIDUALS",
+        "failure_class": "residual_processes",
+    }
 
 
 def _resolve_path(info: Dict) -> Optional[str]:
@@ -1023,7 +1403,67 @@ def _refine_pid_windows(
     return _apply_fallback(initial_pid)
 
 
+def _launch_uri(uri: str, name: str, info: Dict) -> dict:
+    """Launch a UWP app via protocol URI (e.g. ms-windows-store://home)."""
+    launch_start = time.time()
+    prior_pids: set[int] = set()
+    proc_name = info.get("process") or ""
+    uwp_packages = info.get("uwp_packages", [])
+    lifecycle = info.get("lifecycle", "standard")
+    try:
+        import psutil
+        target_names = {proc_name.lower()} if proc_name else set()
+        for u in uwp_packages:
+            target_names.add(u.lower())
+        normalized_targets = {t if t.endswith(".exe") else t + ".exe" for t in target_names}
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if proc.info['name'] and proc.info['name'].lower() in normalized_targets:
+                    prior_pids.add(proc.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        prior_pids = set()
+    pid = 0
+    try:
+        os.startfile(uri)
+    except AttributeError:
+        try:
+            proc = subprocess.Popen(
+                ["cmd", "/c", "start", "", uri],
+                shell=False,
+                creationflags=_creation_flags(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            pid = proc.pid
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
+
+    if _IS_WINDOWS and proc_name:
+        verified_started = _verify_process_started_windows(proc_name, timeout_s=4, uwp_packages=uwp_packages)
+        latest_pid = _find_matching_process_pid(name.lower(), info, exclude=prior_pids)
+        if verified_started and latest_pid is None:
+            latest_pid = _find_matching_process_pid(name.lower(), info)
+        if verified_started or latest_pid is not None:
+            final_pid = latest_pid
+            if final_pid is None:
+                final_pid = _refine_pid_windows(pid, proc_name, prior_pids=prior_pids, launch_start=launch_start, uwp_packages=uwp_packages, lifecycle=lifecycle)
+            if final_pid is None:
+                return {"success": True, "message": f"Launched {name} (ownership not tracked)."}
+            return {"success": True, "message": f"Opened {name}", "pid": final_pid}
+        else:
+            return {"success": False, "message": f"Failed to launch {name}.", "pid": pid}
+    return {"success": True, "message": f"Opened {name}", "pid": pid}
+
+
 def _launch_from_info(info: Dict, name: str) -> dict:
+    # URI-launched apps (e.g. Microsoft Store, Settings, Photos)
+    uri = info.get("uri")
+    if uri:
+        return _launch_uri(uri, name, info)
     path = _resolve_path(info)
     if not path:
         if name.lower() == "codex":
@@ -1407,6 +1847,14 @@ def execute_capability(target: str) -> dict:
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, app_name, url)
                     return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop"}, start_time)
+
+                try:
+                    import psutil
+                    if rt and psutil.pid_exists(proc.pid):
+                        rt.register_tracked_process(proc.pid, app_name, url)
+                        return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": proc.pid, "canonical_name": app_name, "verification_mode": "noop"}, start_time)
+                except Exception:
+                    pass
 
             return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid, "verification_mode": "noop"}, start_time)
         except Exception as e:

@@ -29,12 +29,15 @@ _OBSERVER_HEALTH_STATES = frozenset({"inactive", "ready", "degraded"})
 _INTEGRITY_WARNING_LIMIT = 8
 _INTEGRITY_STATUS_HEALTHY = "healthy"
 _INTEGRITY_STATUS_DEGRADED = "degraded"
-_INTEGRITY_DEGRADE_THRESHOLDS = {
-    "execution_failure": 3,
-    "invalid_transition": 2,
-    "observer_degraded": 1,
-    "runtime_degraded": 1,
+_INTEGRITY_DEGRADE_THRESHOLDS: dict[str, int] = {}
+_INTEGRITY_SEVERITY_WEIGHTS = {
+    "low": 1,
+    "medium": 2,
+    "high": 4,
+    "critical": 10,
 }
+_INTEGRITY_SCORE_DEGRADED_THRESHOLD = 6
+_INTEGRITY_SCORE_EMERGENCY_THRESHOLD = 10
 
 
 def get_runtime() -> "KioRuntime | None":
@@ -61,9 +64,18 @@ class ResourceGuard:
         import psutil
         import os
         current = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-        if current + module_ram_mb > self.HARD_LIMIT_MB:
+        
+        # Gate 2.5: Degradation behavior - halve allowed headroom if degraded
+        hard_limit = self.HARD_LIMIT_MB
+        runtime = get_runtime()
+        if runtime and runtime.safety_state == SafetyState.DEGRADED:
+            # When degraded, we halve the available headroom from current to HARD_LIMIT
+            headroom = hard_limit - current
+            hard_limit = current + (headroom / 2)
+
+        if current + module_ram_mb > hard_limit:
             raise RamBudgetError(
-                f"No headroom: {current:.0f}MB + {module_ram_mb}MB > {self.HARD_LIMIT_MB}MB"
+                f"No headroom: {current:.0f}MB + {module_ram_mb}MB > {hard_limit:.0f}MB"
             )
 
     def audit_loop_sync(self) -> None:
@@ -90,6 +102,14 @@ class RuntimeState:
     RUNNING = "running"
     DEGRADED = "degraded"
     STOPPED = "stopped"
+
+
+class SafetyState:
+    """Deterministic runtime safety states (Gate 2.5)."""
+    NORMAL = "NORMAL"
+    DEGRADED = "DEGRADED"
+    EMERGENCY = "EMERGENCY"
+    LOCKDOWN = "LOCKDOWN"
 
 
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
@@ -124,6 +144,7 @@ class KioRuntime:
     """Lightweight runtime container for startup ownership."""
 
     state: str = RuntimeState.INIT
+    safety_state: str = SafetyState.NORMAL
     started_at: float = field(default_factory=time.monotonic)
     channels: list[str] = field(default_factory=list)
     shutdown_requested: bool = False
@@ -144,11 +165,19 @@ class KioRuntime:
     activation_last_candidate_emitted_ms: int | None = None
     integrity_status: str = _INTEGRITY_STATUS_HEALTHY
     integrity_counts: dict[str, int] = field(default_factory=dict)
+    integrity_score: int = 0
+    integrity_severity_counts: dict[str, int] = field(default_factory=dict)
     integrity_warnings: deque[dict[str, object]] = field(
         default_factory=lambda: deque(maxlen=_INTEGRITY_WARNING_LIMIT)
     )
     tracked_processes: list[dict[str, object]] = field(default_factory=list)
     resource_guard: ResourceGuard = field(default_factory=lambda: ResourceGuard())
+    execution_counter: int = 0
+
+    def get_execution_id(self) -> str:
+        """Generate a deterministic monotonic execution ID."""
+        self.execution_counter += 1
+        return f"exec_{int(self.started_at)}_{self.execution_counter:04d}"
 
     def transition_to(
         self,
@@ -283,6 +312,10 @@ class KioRuntime:
             "create_time": create_time,
             "status": "active",
         }
+        self.tracked_processes = [
+            existing for existing in self.tracked_processes
+            if existing.get("name") != name
+        ]
         # FIFO eviction
         while len(self.tracked_processes) >= 16:
             oldest = self.tracked_processes.pop(0)
@@ -292,15 +325,40 @@ class KioRuntime:
         emit_runtime_trace("runtime_process_registered", pid=pid, name=name, target=target)
         emit_runtime_trace("DEBUG_runtime_registry_size", size=len(self.tracked_processes), contents=[(e["pid"], e["name"]) for e in self.tracked_processes])
 
+    def refresh_tracked_process(self, pid: int, name: str, target: str) -> None:
+        """Refresh or replace an existing tracked process entry for a canonical family."""
+        emit_runtime_trace("DEBUG_runtime_refresh_start", pid=pid, name=name, target=target)
+        self.unregister_tracked_process(name)
+        self.register_tracked_process(pid=pid, name=name, target=target)
+
     def get_tracked_process(self, name: str) -> dict[str, object] | None:
         """Find a tracked process by its canonical name."""
         emit_runtime_trace("DEBUG_runtime_lookup_start", lookup_name=name, registry_size=len(self.tracked_processes))
-        for entry in self.tracked_processes:
+        for entry in reversed(self.tracked_processes):
             if entry["name"] == name:
                 emit_runtime_trace("DEBUG_runtime_lookup_hit", pid=entry["pid"], name=name)
                 return entry
         emit_runtime_trace("DEBUG_runtime_lookup_miss", lookup_name=name)
         return None
+
+    def unregister_tracked_process(self, name: str, pid: int | None = None) -> None:
+        """Remove tracked process entries by canonical family and optional pid."""
+        emit_runtime_trace("DEBUG_runtime_unregister_start", name=name, pid=pid)
+        retained: list[dict[str, object]] = []
+        for entry in self.tracked_processes:
+            same_name = entry.get("name") == name
+            same_pid = pid is None or int(entry.get("pid", -1)) == int(pid)
+            if same_name and same_pid:
+                emit_runtime_trace(
+                    "runtime_process_unregistered",
+                    pid=entry.get("pid"),
+                    name=entry.get("name"),
+                    reason="verified_close",
+                )
+                continue
+            retained.append(entry)
+        self.tracked_processes = retained
+        emit_runtime_trace("DEBUG_runtime_unregister_end", name=name, pid=pid, count=len(self.tracked_processes))
 
     def prune_tracked_processes(self) -> None:
         """Remove dead processes from the registry (piggybacked on command dispatch)."""
@@ -390,6 +448,65 @@ def emit_runtime_trace(event: str, **fields: object) -> None:
     logger.info(json.dumps(payload, default=str))
 
 
+def _classify_integrity_severity(category: str, detail: object) -> str:
+    """Deterministically classify runtime integrity warnings by severity."""
+    failure_class = ""
+    verification_status = ""
+    if isinstance(detail, dict):
+        failure_class = str(detail.get("failure_class", "") or "").lower()
+        verification_status = str(detail.get("verification_status", "") or "").lower()
+
+    if category == "blocked_attempt":
+        return "high"
+    if category == "invalid_result":
+        return "medium"
+    if category == "observer_degraded":
+        return "medium"
+    if category == "runtime_degraded":
+        return "medium"
+    if category == "invalid_transition":
+        return "critical"
+    if category == "channel_dispatch_failure":
+        return "high"
+    if category == "ram_budget_exceeded":
+        return "medium"
+
+    if category == "execution_failure":
+        if verification_status == "blocked":
+            return "high"
+        if verification_status == "passed_with_residuals":
+            return "low"
+        if failure_class in {
+            "not_installed",
+            "not_found",
+            "not_running",
+            "not_tracked",
+            "launch_failed",
+            "invalid_input",
+            "invalid_url",
+        }:
+            return "low"
+        if failure_class in {
+            "timeout",
+            "unsupported",
+            "invalid_operator_result",
+        }:
+            return "medium"
+        if failure_class in {
+            "permission_denied",
+            "blocked_action",
+            "operator_exception",
+            "internal_error",
+            "forbidden_uwp_kill",
+        }:
+            return "high"
+        if failure_class == "invalid_transition":
+            return "critical"
+        return "medium"
+
+    return "low"
+
+
 def record_runtime_integrity_warning(category: str, detail: object) -> None:
     """Store a bounded integrity warning and update explicit integrity state."""
     runtime = _CURRENT_RUNTIME
@@ -398,23 +515,66 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
 
     count = runtime.integrity_counts.get(category, 0) + 1
     runtime.integrity_counts[category] = count
+
+    severity = _classify_integrity_severity(category, detail)
+    weight = 0 if category == "blocked_attempt" else _INTEGRITY_SEVERITY_WEIGHTS.get(severity, 1)
+    runtime.integrity_score += weight
+    runtime.integrity_severity_counts[severity] = (
+        runtime.integrity_severity_counts.get(severity, 0) + 1
+    )
+
+    threshold_trigger = ""
+    if severity == "critical" or runtime.integrity_score >= _INTEGRITY_SCORE_EMERGENCY_THRESHOLD:
+        threshold_trigger = "EMERGENCY"
+    elif runtime.integrity_score >= _INTEGRITY_SCORE_DEGRADED_THRESHOLD:
+        threshold_trigger = "DEGRADED"
+
     warning = {
         "category": category,
         "detail": detail,
         "count": count,
+        "severity": severity,
+        "weight": weight,
+        "score": runtime.integrity_score,
+        "threshold_trigger": threshold_trigger,
         "created_at_ms": int((time.monotonic() - runtime.started_at) * 1000),
     }
     runtime.integrity_warnings.append(warning)
 
-    threshold = _INTEGRITY_DEGRADE_THRESHOLDS.get(category)
-    if threshold is not None and count >= threshold:
+    if runtime.integrity_score >= _INTEGRITY_SCORE_DEGRADED_THRESHOLD:
         runtime.integrity_status = _INTEGRITY_STATUS_DEGRADED
+
+    # Gate 2.5: Safety state evaluation
+    if runtime.safety_state != SafetyState.LOCKDOWN:
+        if threshold_trigger == "EMERGENCY":
+            if runtime.safety_state != SafetyState.EMERGENCY:
+                runtime.safety_state = SafetyState.EMERGENCY
+                emit_runtime_trace(
+                    "runtime_safety_escalation",
+                    safety_state=runtime.safety_state,
+                    reason="weighted_emergency_breach",
+                    threshold_trigger=threshold_trigger,
+                )
+        elif threshold_trigger == "DEGRADED":
+            if runtime.safety_state == SafetyState.NORMAL:
+                runtime.safety_state = SafetyState.DEGRADED
+                emit_runtime_trace(
+                    "runtime_safety_escalation",
+                    safety_state=runtime.safety_state,
+                    reason="weighted_degradation_breach",
+                    threshold_trigger=threshold_trigger,
+                )
 
     emit_runtime_trace(
         "runtime_integrity_warning",
         category=category,
         count=count,
+        severity=severity,
+        weight=weight,
+        score=runtime.integrity_score,
+        threshold_trigger=threshold_trigger,
         integrity_status=runtime.integrity_status,
+        safety_state=runtime.safety_state,
     )
     remember_runtime_context("integrity_warning", warning)
 
@@ -426,10 +586,7 @@ def get_runtime_health_score() -> int:
         return 0
 
     score = 100
-    # Deduct for integrity warnings weighted by their degradation threshold
-    for category, count in runtime.integrity_counts.items():
-        weight = _INTEGRITY_DEGRADE_THRESHOLDS.get(category, 1)
-        score -= count * weight * 2
+    score -= runtime.integrity_score * 2
 
     # Deduct for degraded observers
     for observer in runtime.observers.values():
@@ -445,14 +602,16 @@ def get_runtime_integrity_snapshot() -> dict[str, object]:
     if runtime is None:
         return {
             "status": _INTEGRITY_STATUS_HEALTHY,
-            "counts": {},
-            "warning_count": 0,
-            "recent_warnings": [],
+        "score": 0,
+        "counts": {},
+        "severity_counts": {},
         }
 
     return {
         "status": runtime.integrity_status,
+        "score": runtime.integrity_score,
         "counts": dict(runtime.integrity_counts),
+        "severity_counts": dict(runtime.integrity_severity_counts),
         "warning_count": len(runtime.integrity_warnings),
         "recent_warnings": [dict(item) for item in runtime.integrity_warnings],
     }
@@ -804,6 +963,53 @@ def dispatch_channel_input(
     return result
 
 
+def manual_runtime_recovery() -> dict[str, object]:
+    """
+    Deterministic manual recovery: clears safety state escalation and integrity warnings.
+    
+    This is an EXPLICIT manual action only — no automatic decay, no timers, no backgrounds.
+    Caller must be explicitly aware of triggering recovery.
+    
+    Returns:
+        {"success": bool, "message": str, "cleared_warnings": int, "previous_safety_state": str}
+    """
+    runtime = _CURRENT_RUNTIME
+    if runtime is None:
+        return {
+            "success": False,
+            "message": "Runtime not initialized.",
+        }
+    
+    # Record state before recovery
+    previous_safety_state = runtime.safety_state
+    cleared_warning_count = len(runtime.integrity_warnings)
+    
+    # Clear integrity state
+    runtime.integrity_warnings.clear()
+    runtime.integrity_counts.clear()
+    runtime.integrity_score = 0
+    runtime.integrity_severity_counts.clear()
+    runtime.integrity_status = _INTEGRITY_STATUS_HEALTHY
+    
+    # Reset safety state to NORMAL
+    runtime.safety_state = SafetyState.NORMAL
+    
+    # Emit deterministic recovery audit event
+    emit_runtime_trace(
+        "runtime_manual_recovery",
+        previous_safety_state=previous_safety_state,
+        cleared_warning_count=cleared_warning_count,
+        new_safety_state=runtime.safety_state,
+    )
+    
+    return {
+        "success": True,
+        "message": f"Runtime recovered. Cleared {cleared_warning_count} warnings. Reset safety state from {previous_safety_state} to NORMAL.",
+        "cleared_warnings": cleared_warning_count,
+        "previous_safety_state": previous_safety_state,
+    }
+
+
 def format_channel_reply(result: dict[str, object]) -> str:
     """Normalize a runtime dispatch result into channel-safe plain text."""
     if result.get("success"):
@@ -840,6 +1046,7 @@ def get_runtime_snapshot() -> dict[str, object]:
     uptime_ms = int((time.monotonic() - runtime.started_at) * 1000)
     return {
         "state": runtime.state,
+        "safety_state": runtime.safety_state,
         "channels": list(runtime.channels),
         "uptime_ms": uptime_ms,
         "last_error": runtime.last_error,
@@ -850,6 +1057,7 @@ def get_runtime_snapshot() -> dict[str, object]:
         "camera_state": runtime.camera_state,
         "camera_frames_polled": runtime.camera_frames_polled,
         "integrity_status": runtime.integrity_status,
+        "integrity_score": runtime.integrity_score,
         "integrity_warning_count": len(runtime.integrity_warnings),
         "health_score": get_runtime_health_score(),
     }

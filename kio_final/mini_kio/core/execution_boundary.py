@@ -13,14 +13,30 @@ from typing import Any, Callable
 
 from mini_kio.core.runtime import (
     RamBudgetError,
+    SafetyState,
     emit_runtime_trace,
+    get_runtime,
     get_runtime_snapshot,
     record_runtime_integrity_warning,
     remember_runtime_context,
 )
-from mini_kio.core.operator_protocol import ActionRegistryEntry
+from mini_kio.core.operator_protocol import (
+    ActionRegistryEntry,
+    OUTCOME_SUCCESS,
+    OUTCOME_FAILURE,
+    OUTCOME_BLOCKED,
+    OUTCOME_DEGRADED,
+    OUTCOME_INVALID_RESULT,
+    OUTCOME_TIMEOUT,
+    FAILURE_OPERATOR_EXCEPTION,
+    FAILURE_RAM_EXCEEDED,
+    FAILURE_INVALID_RESULT,
+    FAILURE_BLOCKED_ACTION,
+    FAILURE_UNKNOWN_ACTION,
+    FAILURE_VERIFICATION_FAILED,
+)
 from mini_kio.core.app_operator import (
-    launch_app, close_app, search_web, execute_capability, APP_OPERATOR_DESCRIPTOR
+    launch_app, close_app, search_web, execute_capability, APP_OPERATOR_DESCRIPTOR, APP_REGISTRY
 )
 from mini_kio.core.browser_operator import (
     play_youtube, search_youtube, BROWSER_OPERATOR_DESCRIPTOR
@@ -29,7 +45,7 @@ from mini_kio.core.file_operator import (
     open_folder, FILE_OPERATOR_DESCRIPTOR
 )
 from mini_kio.core.system_operator import (
-    lock_system, shutdown_system, restart_system, SYSTEM_OPERATOR_DESCRIPTOR
+    lock_system, shutdown_system, restart_system, recovery_runtime, SYSTEM_OPERATOR_DESCRIPTOR
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +54,7 @@ logger = logging.getLogger(__name__)
 # Deterministic Outcome Taxonomy (Gate 2.5)
 # ---------------------------------------------------------------------------
 OUTCOME_SUCCESS = "SUCCESS"
+OUTCOME_SUCCESS_WITH_RESIDUALS = "SUCCESS_WITH_RESIDUALS"
 OUTCOME_FAILURE = "FAILURE"
 OUTCOME_BLOCKED = "BLOCKED"
 OUTCOME_DEGRADED = "DEGRADED"
@@ -92,6 +109,12 @@ STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
         "category": "system_control",
         "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
     },
+    "recovery_runtime": {
+        "handler": recovery_runtime,
+        "canonical_name": "recovery_runtime",
+        "category": "system_control",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
     "shutdown_system": {
         "handler": shutdown_system,
         "canonical_name": "shutdown_system",
@@ -127,6 +150,8 @@ _ACTION_MAP: dict[str, str] = {
     "search_youtube": "search_youtube",
     "lock": "lock_system",
     "lock_system": "lock_system",
+    "recovery": "recovery_runtime",
+    "recovery_runtime": "recovery_runtime",
     "shutdown": "shutdown_system",
     "shutdown_system": "shutdown_system",
     "restart": "restart_system",
@@ -177,6 +202,13 @@ def exit_code_probe(result: dict[str, Any]) -> dict[str, Any]:
     pid = result.get("pid")
     result["probe_used"] = "exit_code"
 
+    if result.get("verification_status") in {"passed", "passed_with_residuals"}:
+        if result.get("verification_status") == "passed_with_residuals":
+            result["outcome_class"] = OUTCOME_SUCCESS_WITH_RESIDUALS
+        elif not result.get("outcome_class"):
+            result["outcome_class"] = OUTCOME_SUCCESS
+        return result
+
     # 1. If operator provided exit_code directly, check it
     if "exit_code" in result:
         if result["exit_code"] == 0:
@@ -202,9 +234,14 @@ def exit_code_probe(result: dict[str, Any]) -> dict[str, Any]:
         import psutil
         p = psutil.Process(int(pid))
         if p.is_running():
-            result["verification_status"] = "failed"
-            result["outcome_class"] = OUTCOME_FAILURE
-            result["failure_class"] = "process_persists"
+            if result.get("primary_termination_attempted"):
+                result["verification_status"] = "passed_with_residuals"
+                result["outcome_class"] = OUTCOME_SUCCESS_WITH_RESIDUALS
+                result["failure_class"] = "residual_processes"
+            else:
+                result["verification_status"] = "failed"
+                result["outcome_class"] = OUTCOME_FAILURE
+                result["failure_class"] = "process_persists"
         else:
             result["verification_status"] = "passed"
             result["outcome_class"] = OUTCOME_SUCCESS
@@ -280,6 +317,97 @@ def _load_handler(action: str) -> tuple[Callable[..., dict], str, dict[str, Any]
         raise ValueError(f"Action mapped to non-existent entry: {action} -> {canonical}")
 
     return entry["handler"], entry["canonical_name"], entry["descriptor"]
+
+
+def _resolve_registry_key(name: str) -> str | None:
+    key = name.lower().strip()
+    if not key:
+        return None
+    if key in APP_REGISTRY:
+        return key
+    for canonical, info in APP_REGISTRY.items():
+        aliases = info.get("aliases", [])
+        if any(key == alias.lower() for alias in aliases):
+            return canonical
+    return None
+
+
+def _resolve_live_registration_pid(name: str, fallback_pid: int | None) -> int | None:
+    if fallback_pid is not None:
+        try:
+            import psutil
+
+            proc = psutil.Process(int(fallback_pid))
+            if proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE:
+                return int(fallback_pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+            pass
+
+    registry_key = _resolve_registry_key(name)
+    info = APP_REGISTRY.get(registry_key or "")
+    if not info:
+        return fallback_pid
+
+    process_names: set[str] = set()
+    proc_name = str(info.get("process") or "").lower()
+    if proc_name:
+        process_names.add(proc_name if proc_name.endswith(".exe") else f"{proc_name}.exe")
+    for package_name in info.get("uwp_packages", []):
+        normalized = str(package_name).lower()
+        if normalized:
+            process_names.add(normalized if normalized.endswith(".exe") else f"{normalized}.exe")
+    if not process_names:
+        return fallback_pid
+
+    try:
+        import psutil
+
+        matches: list[tuple[float, int]] = []
+        for proc in psutil.process_iter(['pid', 'name', 'create_time']):
+            try:
+                proc_name = (proc.info.get("name") or "").lower()
+                if proc_name not in process_names:
+                    continue
+                matches.append((float(proc.info.get("create_time") or 0.0), int(proc.info["pid"])))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                continue
+        if not matches:
+            return fallback_pid
+        matches.sort()
+        return matches[-1][1]
+    except Exception:
+        return fallback_pid
+
+
+def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
+    """Check if the action is permitted in the current safety state (Gate 2.5)."""
+    state = rt.safety_state
+    category = classify_action(action)
+
+    if state == SafetyState.LOCKDOWN:
+        return False, "System is in LOCKDOWN. All actions are blocked."
+
+    if state == SafetyState.EMERGENCY:
+        # EMERGENCY allows ONLY system_control (lock) and future read_only
+        if category in ("system_control", "read_only"):
+            return True, ""
+        return False, f"System is in EMERGENCY. Action category '{category}' is blocked."
+
+    if state == SafetyState.DEGRADED:
+        if category == "external_open":
+            return False, f"System is DEGRADED. Action category '{category}' is blocked."
+        if action == "close_app":
+            registry_key = _resolve_registry_key(target)
+            if registry_key:
+                rt.prune_tracked_processes()
+                if rt.get_tracked_process(registry_key) is not None:
+                    return True, ""
+            return False, "System is DEGRADED. close_app is allowed only for tracked owned processes."
+        if category == "external_control":
+            return False, f"System is DEGRADED. Action category '{category}' is blocked."
+        return True, ""
+
+    return True, ""
 
 
 def _normalize_result(
@@ -378,6 +506,37 @@ def _log_execution_event(event: str, **fields: Any) -> None:
     emit_runtime_trace(event, **fields)
 
 
+def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
+    """Check if the action is permitted in the current safety state (Gate 2.5)."""
+    state = rt.safety_state
+    category = classify_action(action)
+
+    if state == SafetyState.LOCKDOWN:
+        return False, "System is in LOCKDOWN. All actions are blocked."
+
+    if state == SafetyState.EMERGENCY:
+        # EMERGENCY allows ONLY system_control (lock) and future read_only
+        if category in ("system_control", "read_only"):
+            return True, ""
+        return False, f"System is in EMERGENCY. Action category '{category}' is blocked."
+
+    if state == SafetyState.DEGRADED:
+        if category == "external_open":
+            return False, f"System is DEGRADED. Action category '{category}' is blocked."
+        if action == "close_app":
+            registry_key = _resolve_registry_key(target)
+            if registry_key:
+                rt.prune_tracked_processes()
+                if rt.get_tracked_process(registry_key) is not None:
+                    return True, ""
+            return False, "System is DEGRADED. close_app is allowed only for tracked owned processes."
+        if category == "external_control":
+            return False, f"System is DEGRADED. Action category '{category}' is blocked."
+        return True, ""
+
+    return True, ""
+
+
 def execute_action(action: str, target: str = "") -> dict[str, Any]:
     """
     Execute an action through one runtime-owned handoff.
@@ -385,14 +544,37 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
     Responsibilities:
       1. Receive action request
       2. Resolve handler and descriptor
-      3. Perform minimal action classification
-      4. Deterministic RAM capacity check via descriptor
-      5. Block clearly destructive actions during Gate 0
-      6. Invoke the operator
-      7. Normalize the result shape including version telemetry
+      3. Perform safety policy check (Gate 2.5)
+      4. Throttling in DEGRADED state (Gate 2.5)
+      5. Deterministic RAM capacity check via descriptor
+      6. Block clearly destructive actions during Gate 0
+      7. Invoke the operator
+      8. Normalize the result shape including execution_id and version telemetry
     """
     category = classify_action(action)
     start = time.monotonic()
+    rt = get_runtime()
+    execution_id = rt.get_execution_id() if rt else "exec_standalone"
+
+    # ── BROWSER NORMALIZATION ENFORCEMENT ───────────────────────────
+    # Safety: Browser routing in handle_command must have already normalized 
+    # to a valid URL. If an action arrives here that should be browser-routed
+    # but isn't a valid URL, it must reject.
+    if action == "execute_capability" and "::open_url::" in target:
+        url = target.split("::open_url::", 1)[1]
+        if not url.startswith("http"):
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            return _apply_verification({
+                "success": False,
+                "message": "Security Violation: Unnormalized browser target reached execution boundary.",
+                "action": action,
+                "target": target,
+                "category": category,
+                "elapsed_ms": elapsed_ms,
+                "failure_class": "security_violation",
+                "execution_id": execution_id,
+            })
+    # ────────────────────────────────────────────────────────────────
 
     try:
         handler, canonical_action, descriptor = _load_handler(action)
@@ -405,13 +587,45 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "target": target,
             "category": category,
             "elapsed_ms": elapsed_ms,
-            "failure_class": "unknown_action",
+            "failure_class": FAILURE_UNKNOWN_ACTION,
+            "execution_id": execution_id,
         })
+
+    # Gate 2.5: Safety Policy Check
+    if rt:
+        permitted, reason = check_safety_policy(action, target, rt)
+        if not permitted:
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            blocked_result = {
+                "success": False,
+                "message": reason,
+                "action": action,
+                "target": target,
+                "category": category,
+                "blocked": True,
+                "elapsed_ms": elapsed_ms,
+                "execution_id": execution_id,
+                "failure_class": FAILURE_BLOCKED_ACTION,
+                "outcome_class": OUTCOME_BLOCKED,
+                "tool_version": descriptor.get("tool_version", "unknown"),
+            }
+            _log_execution_event(
+                "exec_blocked",
+                execution_id=execution_id,
+                action=action,
+                category=category,
+                reason=reason,
+                runtime=get_runtime_snapshot(),
+            )
+            record_runtime_integrity_warning("blocked_attempt", {"action": action, "reason": reason})
+            return _apply_verification(blocked_result)
+
+        # Gate 2.5: Throttling in DEGRADED state
+        if rt.safety_state == SafetyState.DEGRADED:
+            time.sleep(0.5)
 
     # Gate 2.4: Deterministic RAM check using descriptor
     try:
-        from mini_kio.core.runtime import get_runtime
-        rt = get_runtime()
         if rt:
             budget = float(descriptor.get("ram_budget_mb", 10.0))
             rt.resource_guard.check_capacity(budget)
@@ -425,12 +639,15 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "target": target,
             "category": category,
             "elapsed_ms": elapsed_ms,
-            "failure_class": "ram_budget_exceeded",
+            "failure_class": FAILURE_RAM_EXCEEDED,
+            "execution_id": execution_id,
+            "tool_version": descriptor.get("tool_version", "unknown"),
         })
 
     runtime_snapshot = get_runtime_snapshot()
     _log_execution_event(
         "exec_dispatch",
+        execution_id=execution_id,
         action=action,
         category=category,
         target=target,
@@ -454,25 +671,29 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "elapsed_ms": elapsed_ms,
             "handler": "",
             "tool_version": descriptor.get("tool_version", "unknown"),
+            "execution_id": execution_id,
         }
         _log_execution_event(
             "exec_blocked",
+            execution_id=execution_id,
             action=action,
             category=category,
             target=target,
             elapsed_ms=elapsed_ms,
             verification_status="blocked",
-            outcome_class="blocked",
-            failure_class="blocked_action",
+            outcome_class=OUTCOME_BLOCKED,
+            failure_class=FAILURE_BLOCKED_ACTION,
             runtime=runtime_snapshot,
         )
+        record_runtime_integrity_warning("blocked_attempt", {"action": action, "reason": "destructive_blocked"})
         remember_runtime_context(
             "execution",
             {
                 "action": action,
                 "target": target,
                 "verification_status": "blocked",
-                "outcome_class": "blocked",
+                "outcome_class": OUTCOME_BLOCKED,
+                "execution_id": execution_id,
             },
         )
         return _apply_verification(blocked_result)
@@ -481,6 +702,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
         handler_name = f"{handler.__module__}.{handler.__name__}"
         _log_execution_event(
             "exec_operator_dispatch",
+            execution_id=execution_id,
             action=canonical_action,
             category=classify_action(canonical_action),
             target=target,
@@ -494,7 +716,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
         pid_for_close = None
         if canonical_action == "close_app":
             try:
-                import mini_kio.core.runtime as runtime
+                import mini_kio.core.runtime as runtime_mod
                 from mini_kio.core.app_operator import APP_REGISTRY
 
                 # Resolve canonical name for lookup
@@ -506,9 +728,8 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                 
                 emit_runtime_trace("DEBUG_boundary_close_lookup_start", target=target, canonical=lookup_name)
 
-                current_runtime = runtime.get_runtime()
+                current_runtime = runtime_mod.get_runtime()
                 if current_runtime:
-                    current_runtime.prune_tracked_processes()
                     entry = current_runtime.get_tracked_process(lookup_name)
                     if entry:
                         pid_for_close = entry.get("pid")
@@ -521,6 +742,8 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                 logger.warning("PID lookup failed for close: %s", pid_lookup_exc)
 
         if canonical_action == "lock_system":
+            result = handler()
+        elif canonical_action == "recovery_runtime":
             result = handler()
         elif canonical_action == "close_app" and pid_for_close is not None:
             result = handler(target, pid=pid_for_close)
@@ -536,6 +759,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             handler_name=handler_name,
             descriptor=descriptor,
         )
+        normalized["execution_id"] = execution_id
 
         # Phase 1 Groundwork: Diagnostic Probe
         if normalized.get("success"):
@@ -564,11 +788,11 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             emit_runtime_trace("DEBUG_boundary_reg_check", pid=pid, action=canonical_action)
             if pid:
                 try:
-                    import mini_kio.core.runtime as runtime
+                    import mini_kio.core.runtime as runtime_mod
                     # Use canonical name if returned by operator, else fallback to target
                     reg_name = verified_result.get("canonical_name", target.lower().strip())
                     emit_runtime_trace("DEBUG_boundary_reg_start", pid=pid, reg_name=reg_name)
-                    current_runtime = runtime.get_runtime()
+                    current_runtime = runtime_mod.get_runtime()
                     if current_runtime:
                         current_runtime.register_tracked_process(
                             pid=int(pid),
@@ -580,8 +804,47 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                 except Exception as reg_exc:
                     logger.warning("Failed to register tracked process: %s", reg_exc)
 
+        # Explorer/folder ownership registration
+        if canonical_action == "open_folder" and verified_result.get("success"):
+            pid = verified_result.get("pid")
+            if pid:
+                try:
+                    import mini_kio.core.runtime as runtime_mod
+                    emit_runtime_trace("DEBUG_boundary_folder_reg", pid=pid)
+                    current_runtime = runtime_mod.get_runtime()
+                    if current_runtime:
+                        explorer_pid = _resolve_live_registration_pid("explorer", int(pid))
+                        current_runtime.register_tracked_process(
+                            pid=int(explorer_pid or pid),
+                            name="explorer",
+                            target=target,
+                        )
+                except Exception as reg_exc:
+                    logger.warning("Failed to register explorer process: %s", reg_exc)
+
+        if canonical_action == "close_app":
+            try:
+                import mini_kio.core.runtime as runtime_mod
+
+                current_runtime = runtime_mod.get_runtime()
+                registry_key = _resolve_registry_key(target) or target.lower().strip()
+                if current_runtime and registry_key:
+                    if verified_result.get("verification_status") == "passed":
+                        current_runtime.unregister_tracked_process(registry_key)
+                    elif verified_result.get("verification_status") == "passed_with_residuals":
+                        residual_pid = verified_result.get("residual_pid")
+                        if isinstance(residual_pid, int):
+                            current_runtime.refresh_tracked_process(
+                                pid=residual_pid,
+                                name=registry_key,
+                                target=target,
+                            )
+            except Exception as close_reg_exc:
+                logger.warning("Failed to finalize close ownership: %s", close_reg_exc)
+
         _log_execution_event(
             "exec_result",
+            execution_id=execution_id,
             action=verified_result["action"],
             category=verified_result["category"],
             target=verified_result["target"],
@@ -589,9 +852,12 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             success=verified_result["success"],
             blocked=verified_result.get("blocked", False),
             handler=verified_result["handler"],
+            tool_name=descriptor.get("tool_name"),
+            tool_version=verified_result["tool_version"],
             verification_status=verified_result["verification_status"],
             outcome_class=verified_result["outcome_class"],
             failure_class=verified_result["failure_class"],
+            probe_used=verified_result.get("probe_used"),
             runtime=runtime_snapshot,
         )
         if (
@@ -606,9 +872,14 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                     "failure_class": verified_result["failure_class"],
                 },
             )
+        
+        if verified_result.get("outcome_class") == OUTCOME_INVALID_RESULT:
+            record_runtime_integrity_warning("invalid_result", {"action": verified_result["action"]})
+
         remember_runtime_context(
             "execution",
             {
+                "execution_id": execution_id,
                 "action": verified_result["action"],
                 "target": verified_result["target"],
                 "verification_status": verified_result["verification_status"],
@@ -622,6 +893,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
         logger.error("[EXEC] action=%s failed: %s", action, exc)
         _log_execution_event(
             "exec_failure",
+            execution_id=execution_id,
             action=action,
             category=category,
             target=target,
@@ -634,7 +906,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             {
                 "action": action,
                 "target": target,
-                "failure_class": "operator_exception",
+                "failure_class": FAILURE_OPERATOR_EXCEPTION,
                 "error": str(exc)[:120],
             },
         )
@@ -646,10 +918,13 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "category": category,
             "elapsed_ms": elapsed_ms,
             "handler": "",
+            "execution_id": execution_id,
+            "tool_version": descriptor.get("tool_version", "unknown") if 'descriptor' in locals() else "unknown",
         })
         remember_runtime_context(
             "execution",
             {
+                "execution_id": execution_id,
                 "action": failure_result["action"],
                 "target": failure_result["target"],
                 "verification_status": failure_result["verification_status"],
