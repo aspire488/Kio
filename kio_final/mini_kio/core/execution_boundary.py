@@ -41,7 +41,8 @@ from mini_kio.core.operator_protocol import (
     FAILURE_VERIFICATION_FAILED,
 )
 from mini_kio.core.app_operator import (
-    launch_app, close_app, search_web, execute_capability, APP_OPERATOR_DESCRIPTOR, APP_REGISTRY
+    launch_app, close_app, search_web, execute_capability,
+    APP_OPERATOR_DESCRIPTOR, APP_REGISTRY, _RESTRICTED_CANONICAL_TARGETS,
 )
 from mini_kio.core.browser_operator import (
     play_youtube, search_youtube, BROWSER_OPERATOR_DESCRIPTOR
@@ -585,6 +586,25 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
                 "execution_id": execution_id,
             })
     # ────────────────────────────────────────────────────────────────
+
+    # ── RESTRICTED TARGET ENFORCEMENT ──────────────────────────────
+    resolved = _ACTION_MAP.get(action, action)
+    norm_target = target.lower().strip()
+    if norm_target.endswith(".exe"):
+        norm_target = norm_target[:-4]
+    if resolved in ("open_app", "close_app") and norm_target in _RESTRICTED_CANONICAL_TARGETS:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return _apply_verification({
+            "success": False,
+            "message": "Restricted system target.",
+            "action": action,
+            "target": target,
+            "category": category,
+            "blocked": True,
+            "elapsed_ms": elapsed_ms,
+            "execution_id": execution_id,
+            "failure_class": "restricted_target",
+        })
 
     try:
         handler, canonical_action, descriptor = _load_handler(action)

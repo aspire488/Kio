@@ -187,7 +187,10 @@ def handle_command(command: str) -> dict:
         "cmd", "powershell", "regedit", "taskmgr", "msconfig", "control.exe", 
         "explorer", "terminal", "services"
     }
-    if lower in FORBIDDEN_TARGETS or lower.startswith("open ") and lower[5:].strip().lower() in FORBIDDEN_TARGETS:
+    norm = lower[5:].strip().lower()
+    if norm.endswith(".exe"):
+        norm = norm[:-4]
+    if lower in FORBIDDEN_TARGETS or lower.startswith("open ") and norm in FORBIDDEN_TARGETS:
         _log_route("route", intent="forbidden_blocked", target=lower)
         return {"success": False, "message": "Error: Forbidden system target blocked by security policy."}
 

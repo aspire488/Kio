@@ -613,7 +613,8 @@ def launch_app(name: str) -> dict:
     logger.info(f"[APP] launch_app: {key!r}")
 
     # Safety: Restricted targets must reject before ANY execution logic or discovery.
-    if key in _RESTRICTED_CANONICAL_TARGETS:
+    norm_key = key[:-4] if key.endswith(".exe") else key
+    if norm_key in _RESTRICTED_CANONICAL_TARGETS:
         return _normalize_public_result(
             "launch",
             key,
@@ -675,7 +676,8 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
                 canonical = registry_key
                 break
 
-    if canonical in _RESTRICTED_CANONICAL_TARGETS:
+    norm_canonical = canonical[:-4] if canonical.endswith(".exe") else canonical
+    if norm_canonical in _RESTRICTED_CANONICAL_TARGETS:
         return _normalize_public_result(
             "close",
             canonical,
