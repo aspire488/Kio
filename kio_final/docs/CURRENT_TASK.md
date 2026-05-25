@@ -1,39 +1,39 @@
-# CURRENT TASK: Gate 4A Entrypoint — Provider Lifecycle Harden
+# CURRENT TASK: Gate 4D Entrypoint — Context Intelligence
 
-Target:   mini_kio/llm/provider_manager.py
-Contract: Harden provider registration, health tracking, and failover
-          selection logic. No runtime changes. No conversational changes.
+Target:   mini_kio/context/context_manager.py
+Contract: Refine keyword/relevance matching for imported memory retrieval.
+          Deterministic only — no probabilistic ranking, no embeddings, no AI.
+          No runtime changes. No conversational changes.
 
 ## Scope (exact)
 
-- ProviderManager.register_provider() — duplicate registration handling,
-  provider_name validation, health metric initialization
-- ProviderManager.record_failure() — state transition edge cases
-- ProviderManager.get_health_status() — deterministic query
-- ProviderManager._select_provider() — failover logic hardening
+- Keyword matching refinement — multiple keyword search, fuzzy substring matching
+  (contiguous subsequence, not semantic)
+- Relevance scoring — normalized score based on occurrence density, position
+- Retrieval with scoring — return scored results without affecting deterministic
+  prioritization
+- Budget-aware retrieval — scored results respect max_total_chars and limit
 
 ## NOT in Scope
 
-- llm_gateway.py (already normalized in Gate 3)
-- provider_base.py (contract review only if needed)
 - Any core/ runtime file
-- Any context/ file
 - Any conversational changes
-- Real provider integration
+- Probabilistic or embedding-based relevance
+- Profile or identity changes
+- Persistence format changes
 
 ## Entry Criteria
 
-- [ ] Branch: gate4_foundance
+- [ ] Branch: gate4_foundation
 - [ ] Working tree clean
-- [ ] 89/89 Gate 3 tests passing
+- [ ] 341/341 Gate 3 + Gate 4A + Gate 4C tests passing
 - [ ] No pending changes in core/ or runtime/
 
 ## Exit Criteria
 
-- [ ] All 89 Gate 3 tests still pass
+- [ ] All existing tests still pass
 - [ ] No new lint or type errors
-- [ ] Provider health transitions are deterministic
-- [ ] Circuit breaker state machine handles: registration, failure,
-      cooldown, recovery, re-registration
-- [ ] Failover selection logic has edge-case coverage
+- [ ] Multiple keyword search returns intersection of matches
+- [ ] Relevance scoring is deterministic and bounded
+- [ ] Scored retrieval respects budget limits
 - [ ] gitnexus_detect_changes() confirms scope

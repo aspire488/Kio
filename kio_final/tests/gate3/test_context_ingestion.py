@@ -6,7 +6,9 @@ import json
 import base64
 from mini_kio.context.context_models import (
     ContextType, ContextEntry, ContextSnapshot, ImportEntry, IngestResult,
-    ContextPartition, AssembledContext, CONTEXT_TYPE_TO_PARTITION,
+    ContextPartition, AssembledContext, ProfileSummary,
+    CONTEXT_TYPE_TO_PARTITION, PROFILE_CATEGORIES,
+    MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
 )
 from mini_kio.context.context_manager import ContextManager
 from mini_kio.context.context_sanitizer import ContextSanitizer
@@ -1164,6 +1166,624 @@ class TestContextPartitionOrdering(unittest.TestCase):
     def test_partitions_used_tracks_input(self):
         result = self.mgr.assemble_context_window(partitions=["system", "temporary"])
         self.assertEqual(result.partitions_used, ["system", "temporary"])
+
+
+class TestProfileCategories(unittest.TestCase):
+    """Profile category validation and bounded storage."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_valid_categories_accepted(self):
+        for cat in PROFILE_CATEGORIES:
+            result = self.mgr.set_profile(cat, "key", "value")
+            self.assertTrue(result, f"Category {cat} should be accepted")
+
+    def test_invalid_category_rejected(self):
+        result = self.mgr.set_profile("nonexistent", "key", "value")
+        self.assertFalse(result)
+
+    def test_empty_value_rejected(self):
+        result = self.mgr.set_profile("preferences", "key", "")
+        self.assertFalse(result)
+
+    def test_whitespace_value_rejected(self):
+        result = self.mgr.set_profile("preferences", "key", "   ")
+        self.assertFalse(result)
+
+    def test_value_truncated_at_limit(self):
+        long_val = "x" * (MAX_PROFILE_VALUE_LENGTH + 100)
+        result = self.mgr.set_profile("identity", "name", long_val)
+        self.assertTrue(result)
+        stored = self.mgr.get_profile("identity", "name")
+        self.assertIsNotNone(stored)
+        self.assertLessEqual(len(stored), MAX_PROFILE_VALUE_LENGTH)
+
+    def test_get_profile_nonexistent_key(self):
+        val = self.mgr.get_profile("preferences", "does_not_exist")
+        self.assertIsNone(val)
+
+    def test_get_profile_invalid_category(self):
+        val = self.mgr.get_profile("invalid", "key")
+        self.assertIsNone(val)
+
+    def test_get_profile_category(self):
+        self.mgr.set_profile("habits", "sleep", "8h")
+        self.mgr.set_profile("habits", "exercise", "running")
+        cat = self.mgr.get_profile_category("habits")
+        self.assertEqual(cat, {"sleep": "8h", "exercise": "running"})
+
+    def test_get_profile_category_invalid(self):
+        cat = self.mgr.get_profile_category("invalid")
+        self.assertEqual(cat, {})
+
+    def test_bounded_entries_per_category(self):
+        for i in range(MAX_PROFILE_ENTRIES_PER_CATEGORY + 10):
+            self.mgr.set_profile("preferences", f"key{i}", f"val{i}")
+        cat = self.mgr.get_profile_category("preferences")
+        self.assertLessEqual(len(cat), MAX_PROFILE_ENTRIES_PER_CATEGORY)
+
+    def test_clear_profile_category(self):
+        self.mgr.set_profile("projects", "current", "kio")
+        self.mgr.clear_profile_category("projects")
+        cat = self.mgr.get_profile_category("projects")
+        self.assertEqual(cat, {})
+
+    def test_clear_profile_category_invalid(self):
+        result = self.mgr.clear_profile_category("invalid")
+        self.assertFalse(result)
+
+    def test_clear_profile(self):
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.mgr.set_profile("preferences", "tone", "concise")
+        self.mgr.clear_profile()
+        self.assertEqual(self.mgr.get_profile_category("identity"), {})
+        self.assertEqual(self.mgr.get_profile_category("preferences"), {})
+
+
+class TestProfileIdentityHelpers(unittest.TestCase):
+    """Identity helpers derived from stored profile metadata."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_preferred_name(self):
+        self.assertIsNone(self.mgr.get_preferred_name())
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.assertEqual(self.mgr.get_preferred_name(), "Alex")
+
+    def test_preferred_tone(self):
+        self.assertIsNone(self.mgr.get_preferred_tone())
+        self.mgr.set_profile("preferences", "tone", "concise")
+        self.assertEqual(self.mgr.get_preferred_tone(), "concise")
+
+    def test_recurring_projects(self):
+        self.assertEqual(self.mgr.get_recurring_projects(), [])
+        self.mgr.set_profile("projects", "recurring", "kio, website, blog")
+        self.assertEqual(self.mgr.get_recurring_projects(), ["kio", "website", "blog"])
+
+    def test_preferred_tools(self):
+        self.assertEqual(self.mgr.get_preferred_tools(), [])
+        self.mgr.set_profile("preferences", "tools", "python, vscode, git")
+        self.assertEqual(self.mgr.get_preferred_tools(), ["python", "vscode", "git"])
+
+    def test_recurring_topics(self):
+        self.assertEqual(self.mgr.get_recurring_topics(), [])
+        self.mgr.set_profile("habits", "topics", "ai, security, testing")
+        self.assertEqual(self.mgr.get_recurring_topics(), ["ai", "security", "testing"])
+
+    def test_helpers_no_ai_inference(self):
+        self.mgr.set_profile("preferences", "tone", "friendly")
+        self.assertEqual(self.mgr.get_preferred_tone(), "friendly")
+        self.assertIsNone(self.mgr.get_preferred_name())
+
+
+class TestProfileSummaryAssembly(unittest.TestCase):
+    """Deterministic profile summary assembly."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.mgr.set_profile("preferences", "tone", "concise")
+        self.mgr.set_profile("projects", "current", "kio")
+
+    def test_returns_profile_summary(self):
+        result = self.mgr.assemble_profile_summary()
+        self.assertIsInstance(result, ProfileSummary)
+
+    def test_grouped_by_category(self):
+        result = self.mgr.assemble_profile_summary()
+        self.assertIn("[identity]", result.text)
+        self.assertIn("[preferences]", result.text)
+        self.assertIn("[projects]", result.text)
+
+    def test_deterministic_ordering(self):
+        r1 = self.mgr.assemble_profile_summary()
+        r2 = self.mgr.assemble_profile_summary()
+        self.assertEqual(r1.text, r2.text)
+
+    def test_bounded_output(self):
+        result = self.mgr.assemble_profile_summary(max_total_chars=50)
+        self.assertLessEqual(result.total_chars, 50)
+
+    def test_truncated_flag(self):
+        tiny = self.mgr.assemble_profile_summary(max_total_chars=10)
+        self.assertTrue(tiny.truncated)
+        large = self.mgr.assemble_profile_summary(max_total_chars=100000)
+        self.assertFalse(large.truncated)
+
+    def test_duplicate_suppression(self):
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.mgr.set_profile("identity", "name", "Alex")
+        result = self.mgr.assemble_profile_summary()
+        count = result.text.count("name: Alex")
+        self.assertEqual(count, 1)
+
+    def test_categories_used_tracks_non_empty(self):
+        result = self.mgr.assemble_profile_summary()
+        self.assertIn("identity", result.categories_used)
+        self.assertIn("preferences", result.categories_used)
+        self.assertIn("projects", result.categories_used)
+        self.assertNotIn("habits", result.categories_used)
+        self.assertNotIn("relationships", result.categories_used)
+        self.assertNotIn("system_preferences", result.categories_used)
+
+    def test_empty_profile_summary(self):
+        mgr = ContextManager()
+        result = mgr.assemble_profile_summary()
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.entries_count, 0)
+        self.assertFalse(result.truncated)
+
+    def test_deterministic_key_order_within_category(self):
+        self.mgr.set_profile("preferences", "z_last", "val")
+        self.mgr.set_profile("preferences", "a_first", "val")
+        result = self.mgr.assemble_profile_summary()
+        text = result.text
+        pref_section = text.split("[preferences]")[1] if "[preferences]" in text else ""
+        if pref_section:
+            a_pos = pref_section.find("a_first")
+            z_pos = pref_section.find("z_last")
+            if a_pos >= 0 and z_pos >= 0:
+                self.assertLess(a_pos, z_pos)
+
+    def test_no_markdown_in_summary(self):
+        result = self.mgr.assemble_profile_summary()
+        self.assertNotIn("```", result.text)
+
+    def test_repeated_retrieval_stability(self):
+        for _ in range(5):
+            r = self.mgr.assemble_profile_summary()
+            self.assertGreater(len(r.text), 0)
+
+
+class TestProfilePersistence(unittest.TestCase):
+    """Profile metadata persists in save/load roundtrip."""
+
+    def setUp(self):
+        self.manager = ContextManager()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _path(self, name):
+        return os.path.join(self.tmpdir, name)
+
+    def test_profile_persists_roundtrip(self):
+        self.manager.set_profile("identity", "name", "Alex")
+        self.manager.set_profile("preferences", "tone", "concise")
+        path = self._path("profile.json")
+        self.manager.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertEqual(fresh.get_preferred_name(), "Alex")
+        self.assertEqual(fresh.get_preferred_tone(), "concise")
+
+    def test_v2_roundtrip_no_profile(self):
+        path = self._path("v2_no_profile.json")
+        v2_data = {
+            "version": 2,
+            "partitions": {"conversational": [], "imported": [], "system": [], "temporary": []},
+            "counts": {"conversational": 0, "imported": 0, "system": 0, "temporary": 0},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(v2_data, f)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertIsNone(fresh.get_preferred_name())
+
+    def test_v3_backward_compat_with_v2(self):
+        path = self._path("v3_from_v2.json")
+        v2_data = {
+            "version": 2,
+            "partitions": {"conversational": [], "imported": [], "system": [], "temporary": []},
+            "counts": {"conversational": 0, "imported": 0, "system": 0, "temporary": 0},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(v2_data, f)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertEqual(fresh.get_profile_category("identity"), {})
+
+    def test_malformed_profile_data(self):
+        path = self._path("bad_profile.json")
+        data = {
+            "version": 3,
+            "partitions": {"conversational": [], "imported": [], "system": [], "temporary": []},
+            "profile": "not a dict",
+            "counts": {"conversational": 0, "imported": 0, "system": 0, "temporary": 0},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertEqual(fresh.get_profile_category("identity"), {})
+
+    def test_unknown_category_in_profile_skipped(self):
+        path = self._path("bad_cat.json")
+        data = {
+            "version": 3,
+            "partitions": {"conversational": [], "imported": [], "system": [], "temporary": []},
+            "profile": {"invalid_category": {"key": "val"}, "identity": {"name": "Alex"}},
+            "counts": {"conversational": 0, "imported": 0, "system": 0, "temporary": 0},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertEqual(fresh.get_preferred_name(), "Alex")
+
+
+class TestProfileBoundaryHardening(unittest.TestCase):
+    """Profile memory cannot affect execution routing."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_no_execution_attributes_on_profile_methods(self):
+        for attr in ["execute", "dispatch", "run", "launch", "route"]:
+            self.assertFalse(hasattr(self.mgr.set_profile, attr))
+            self.assertFalse(hasattr(self.mgr.get_profile, attr))
+            self.assertFalse(hasattr(self.mgr.assemble_profile_summary, attr))
+
+    def test_set_profile_returns_bool_only(self):
+        result = self.mgr.set_profile("identity", "name", "Alex")
+        self.assertIsInstance(result, bool)
+
+    def test_profile_does_not_affect_execution_path(self):
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.assertTrue(hasattr(self.mgr, "set_profile"))
+        self.assertFalse(hasattr(self.mgr.set_profile, "execute"))
+        self.assertFalse(hasattr(self.mgr.set_profile, "dispatch"))
+
+    def test_identity_helpers_not_callable_routes(self):
+        for helper in ["get_preferred_name", "get_preferred_tone", "get_recurring_projects"]:
+            fn = getattr(self.mgr, helper)
+            self.assertFalse(hasattr(fn, "execute"))
+            self.assertFalse(hasattr(fn, "dispatch"))
+
+    def test_profile_summary_not_execution_context(self):
+        self.mgr.set_profile("identity", "name", "Alex")
+        summary = self.mgr.assemble_profile_summary()
+        self.assertIsInstance(summary, ProfileSummary)
+        self.assertIsInstance(summary.text, str)
+        self.assertFalse(hasattr(summary, "execute"))
+        self.assertFalse(hasattr(summary, "dispatch"))
+
+
+class TestProfileExportIntegration(unittest.TestCase):
+    """Imported entries can include profile tags."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_profile_tags_accepted(self):
+        entries = [{
+            "timestamp": 100, "role": "user", "text": "hello",
+            "source": "test", "profile_tags": ["identity.name=Alex", "preferences.tone=concise"],
+        }]
+        count = self.mgr.ingest_imported_history(entries)
+        self.assertEqual(count, 1)
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        meta = snap.entries[0].metadata
+        self.assertIn("profile_tags", meta)
+        self.assertIn("profile:identity.name=Alex", snap.entries[0].tags)
+
+    def test_invalid_profile_tags_skipped(self):
+        entries = [{
+            "timestamp": 100, "role": "user", "text": "hello",
+            "source": "test",
+            "profile_tags": ["invalid_cat.key=val", "preferences.tone=concise"],
+        }]
+        count = self.mgr.ingest_imported_history(entries)
+        self.assertEqual(count, 1)
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        meta = snap.entries[0].metadata
+        self.assertEqual(len(meta.get("profile_tags", [])), 1)
+        self.assertNotIn("invalid_cat", str(meta.get("profile_tags", [])))
+
+    def test_no_profile_tags_is_fine(self):
+        entries = [{"timestamp": 100, "role": "user", "text": "hello", "source": "test"}]
+        count = self.mgr.ingest_imported_history(entries)
+        self.assertEqual(count, 1)
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        self.assertNotIn("profile_tags", snap.entries[0].metadata)
+
+    def test_profile_tags_dont_affect_system_partition(self):
+        self.mgr.add_entry("system value", ContextType.SYSTEM_FEEDBACK)
+        entries = [{
+            "timestamp": 100, "role": "user", "text": "imported",
+            "source": "test", "profile_tags": ["identity.name=Hacker"],
+        }]
+        self.mgr.ingest_imported_history(entries)
+        sys_snap = self.mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        self.assertEqual(sys_snap.count, 1)
+        self.assertEqual(sys_snap.entries[0].content, "system value")
+
+    def test_profile_tags_no_auto_tagging_pipeline(self):
+        entries = [{"timestamp": 100, "role": "user", "text": "I like Python", "source": "test"}]
+        self.mgr.ingest_imported_history(entries)
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        self.assertNotIn("profile_tags", snap.entries[0].metadata)
+
+
+class TestSequenceCounterPersistence(unittest.TestCase):
+    """Sequence counters are properly restored on save/load."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _path(self, name):
+        return os.path.join(self.tmpdir, name)
+
+    def test_sequence_ordering_preserved_after_load(self):
+        self.mgr.add_entry("first", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("second", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("third", ContextType.CONVERSATIONAL)
+        path = self._path("seq_order.json")
+        self.mgr.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        fresh.add_entry("fourth", ContextType.CONVERSATIONAL)
+        snap = fresh.get_snapshot(limit=10)
+        contents = [e.content for e in snap.entries]
+        self.assertEqual(contents[0], "fourth")
+
+    def test_sequence_import_ordering_after_load(self):
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "old", "source": "test"},
+        ])
+        path = self._path("imp_seq.json")
+        self.mgr.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        fresh.ingest_imported_history([
+            {"timestamp": 200, "role": "user", "text": "newer", "source": "test"},
+        ])
+        snap = fresh.get_imported_snapshot(limit=10)
+        self.assertEqual(snap.entries[0].content, "newer")
+
+    def test_sequence_counter_recovery_all_partitions(self):
+        for p, ct in [(ContextPartition.CONVERSATIONAL, ContextType.CONVERSATIONAL),
+                       (ContextPartition.SYSTEM, ContextType.SYSTEM_FEEDBACK)]:
+            self.mgr.add_entry("x", ct)
+        self.mgr.add_temporary_entry("y")
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "z", "source": "test"},
+        ])
+        path = self._path("all_seq.json")
+        self.mgr.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        fresh.add_entry("new convo", ContextType.CONVERSATIONAL)
+        fresh.add_entry("new sys", ContextType.SYSTEM_FEEDBACK)
+        fresh.add_temporary_entry("new temp")
+        fresh.ingest_imported_history([
+            {"timestamp": 200, "role": "user", "text": "new import", "source": "test"},
+        ])
+        for p in ContextPartition:
+            snap = fresh.get_partition_snapshot(p, limit=100)
+            self.assertEqual(snap.count, 2, f"Partition {p} should have 2 entries")
+
+
+class TestAssembleContextWindowBoundaries(unittest.TestCase):
+    """Edge cases for assemble_context_window."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_empty_partitions_list(self):
+        result = self.mgr.assemble_context_window(partitions=[])
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.entry_count, 0)
+
+    def test_invalid_partition_name_raises(self):
+        with self.assertRaises(ValueError):
+            self.mgr.assemble_context_window(partitions=["nonexistent"])
+
+    def test_none_partitions_defaults(self):
+        result = self.mgr.assemble_context_window(partitions=None)
+        self.assertIsInstance(result, AssembledContext)
+
+    def test_single_partition_selection(self):
+        self.mgr.add_entry("convo msg", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("sys msg", ContextType.SYSTEM_FEEDBACK)
+        result = self.mgr.assemble_context_window(partitions=["conversational"])
+        self.assertIn("[conversational]", result.text)
+        self.assertNotIn("[system]", result.text)
+
+    def test_negative_limit_returns_empty(self):
+        result = self.mgr.assemble_context_window(limit=-1)
+        self.assertEqual(result.entry_count, 0)
+
+
+class TestContextEdgeCases(unittest.TestCase):
+    """Edge case hardening for context operations."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_add_entry_non_string_tags(self):
+        result = self.mgr.add_entry("test", ContextType.CONVERSATIONAL, tags=[42, None])
+        self.assertTrue(result)
+        snap = self.mgr.get_snapshot(limit=10)
+        self.assertEqual(snap.entries[0].tags, [])
+
+    def test_add_entry_non_dict_metadata(self):
+        result = self.mgr.add_entry("test", ContextType.CONVERSATIONAL, metadata="not a dict")
+        self.assertTrue(result)
+        snap = self.mgr.get_snapshot(limit=10)
+        self.assertEqual(snap.entries[0].metadata, {})
+
+    def test_get_partition_snapshot_unknown_partition(self):
+        snap = self.mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL)
+        self.assertEqual(snap.count, 0)
+
+    def test_profile_key_empty_rejected(self):
+        result = self.mgr.set_profile("preferences", "", "value")
+        self.assertTrue(result)
+
+    def test_profile_value_not_string_rejected(self):
+        result = self.mgr.set_profile("preferences", "key", 42)
+        self.assertFalse(result)
+
+    def test_ingest_mixed_profile_tags_format(self):
+        entries = [{
+            "timestamp": 100, "role": "user", "text": "hi",
+            "source": "test",
+            "profile_tags": ["identity.name=Alex", "", "preferences.tone=concise", 42],
+        }]
+        count = self.mgr.ingest_imported_history(entries)
+        self.assertEqual(count, 1)
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        meta = snap.entries[0].metadata
+        self.assertEqual(len(meta.get("profile_tags", [])), 2)
+
+    def test_clear_temporary_independence(self):
+        self.mgr.add_temporary_entry("temp1")
+        self.mgr.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.mgr.clear_temporary()
+        conv = self.mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        self.assertEqual(conv.count, 1)
+        temp = self.mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(temp.count, 0)
+
+    def test_system_clear_independence(self):
+        self.mgr.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("sys", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.clear_system()
+        conv = self.mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        self.assertEqual(conv.count, 1)
+        sys = self.mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        self.assertEqual(sys.count, 0)
+
+
+class TestImportSequenceMonotonic(unittest.TestCase):
+    """Sequences increase monotonically across clear_imported cycles."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_sequence_increases_after_clear_and_reimport(self):
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "batch1", "source": "test"},
+        ])
+        self.mgr.clear_imported()
+        self.mgr.ingest_imported_history([
+            {"timestamp": 150, "role": "user", "text": "batch2_a", "source": "test"},
+        ])
+        self.mgr.ingest_imported_history([
+            {"timestamp": 150, "role": "user", "text": "batch2_b", "source": "test"},
+        ])
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        contents = [e.content for e in snap.entries]
+        self.assertEqual(contents, ["batch2_b", "batch2_a"])
+
+    def test_multiple_clear_cycles_preserve_ordering(self):
+        for i in range(3):
+            self.mgr.ingest_imported_history([
+                {"timestamp": 100, "role": "user", "text": f"cycle{i}_a", "source": "test"},
+                {"timestamp": 100, "role": "user", "text": f"cycle{i}_b", "source": "test"},
+            ])
+            self.mgr.clear_imported()
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "final_a", "source": "test"},
+            {"timestamp": 100, "role": "user", "text": "final_b", "source": "test"},
+        ])
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        contents = [e.content for e in snap.entries]
+        self.assertEqual(contents, ["final_b", "final_a"])
+
+    def test_clear_imported_does_not_affect_conversational_sequence(self):
+        self.mgr.add_entry("convo1", ContextType.CONVERSATIONAL)
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "import1", "source": "test"},
+        ])
+        self.mgr.clear_imported()
+        self.mgr.add_entry("convo2", ContextType.CONVERSATIONAL)
+        self.mgr.ingest_imported_history([
+            {"timestamp": 200, "role": "user", "text": "import2", "source": "test"},
+        ])
+        conv = self.mgr.get_snapshot(limit=10)
+        self.assertEqual(conv.entries[0].content, "convo2")
+        imp = self.mgr.get_imported_snapshot(limit=10)
+        self.assertEqual(imp.entries[0].content, "import2")
+
+
+class TestProfileSummaryEntryCount(unittest.TestCase):
+    """entries_count in ProfileSummary reflects only assembled entries."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.mgr.set_profile("identity", "name", "Alex")
+        self.mgr.set_profile("identity", "age", "30")
+        self.mgr.set_profile("preferences", "tone", "concise")
+        self.mgr.set_profile("habits", "exercise", "running")
+        self.mgr.set_profile("projects", "current", "kio")
+
+    def test_entries_count_matches_assembled_lines(self):
+        result = self.mgr.assemble_profile_summary()
+        expected_lines = sum(1 for line in result.text.split("\n") if line.startswith("  "))
+        self.assertEqual(result.entries_count, expected_lines)
+
+    def test_entries_count_excludes_empty_categories(self):
+        result = self.mgr.assemble_profile_summary()
+        self.assertEqual(result.entries_count, 5)
+        self.assertNotIn("relationships", result.text)
+
+    def test_entries_count_with_truncation(self):
+        result = self.mgr.assemble_profile_summary(max_total_chars=50)
+        if result.truncated:
+            visible = sum(1 for line in result.text.split("\n") if line.startswith("  "))
+            self.assertEqual(result.entries_count, visible)
+
+    def test_entries_count_no_truncation_all_included(self):
+        result = self.mgr.assemble_profile_summary(max_total_chars=10000)
+        self.assertEqual(result.entries_count, 5)
+
+    def test_entries_count_zero_for_empty_profile(self):
+        mgr = ContextManager()
+        result = mgr.assemble_profile_summary()
+        self.assertEqual(result.entries_count, 0)
+        self.assertEqual(result.text, "")
+
+    def test_entries_count_deterministic_across_calls(self):
+        r1 = self.mgr.assemble_profile_summary()
+        r2 = self.mgr.assemble_profile_summary()
+        self.assertEqual(r1.entries_count, r2.entries_count)
+
+    def test_entries_count_with_single_category(self):
+        mgr = ContextManager()
+        mgr.set_profile("identity", "name", "Bob")
+        result = mgr.assemble_profile_summary()
+        self.assertEqual(result.entries_count, 1)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,9 @@
 # CURRENT_GATE: Gate 4 — Provider Stabilization & Operational Refinement
 
 Branch:          gate4_foundation
-Status:          PLANNING (no implementation started)
+Status:          ACTIVE (4A COMPLETE, 4C COMPLETE)
 Upstream:        Gate 3 — COMPLETE (tagged gate3_complete, gate3_final_locked)
-Test baseline:   89/89 passing (tests/gate3/)
+Test baseline:   341/341 passing (tests/gate3/)
 Compile:         CLEAN
 Working tree:    CLEAN
 Snapshots:       ARCHIVED
@@ -14,22 +14,22 @@ Snapshots:       ARCHIVED
 
 Each sub-gate must reach COMPLETE (tests + compile + signoff) before next begins.
 
-## Active Sub-Gate: 4A — Provider Stabilization
+## Active Sub-Gate: 4D — Context Intelligence
 
-Entrypoint:     mini_kio/llm/provider_manager.py
-Scope:          Provider lifecycle hardening, health tracking, failover logic
-Dependencies:   None (Gate 3 LLM gateway normalization already complete)
-RAM budget:     +0 MB (uses existing infrastructure)
-Risk:           Low — isolated to llm/ layer, no runtime changes
+Entrypoint:     mini_kio/context/context_manager.py
+Scope:          Keyword/relevance refinement for imported memory retrieval
+Dependencies:   Gate 4C complete (memory infrastructure in place)
+RAM budget:     +3 MB (relevance indices)
+Risk:           Low — context retrieval only, no execution changes
 
 ## Dependency Map
 
-4A Provider Stabilization       ← Gate 3 complete
-4C Bounded Memory Ingestion     ← depends on 4A (needs stable provider for context)
-4D Context Intelligence         ← depends on 4C (needs memory infrastructure)
-4B Conversational Refinement    ← depends on 4D (needs memory + context before refinement)
-4E Operational Refinement       ← depends on 4B (needs all subsystems stable)
-4F Future-Gated Integrations    ← depends on 4E (locked — DO NOT TOUCH YET)
+4A Provider Stabilization       COMPLETE
+4C Bounded Memory Ingestion     COMPLETE
+4D Context Intelligence         ← ACTIVE (depends on 4C)
+4B Conversational Refinement    ← depends on 4D
+4E Operational Refinement       ← depends on 4B
+4F Future-Gated Integrations    ← depends on 4E (locked)
 
 ## LOCKED (DO NOT TOUCH)
 
@@ -45,8 +45,8 @@ Risk:           Low — isolated to llm/ layer, no runtime changes
 
 | Sub-Gate | Risk | Pass Criteria |
 |----------|------|---------------|
-| 4A       | Provider changes destabilize existing 89 tests | All Gate 3 tests pass unchanged |
-| 4C       | Memory ingestion creates injection vector | Sanitizer tests pass, no new security issues |
+| 4A       | Provider changes destabilize existing tests | ALL 341 tests pass unchanged |
+| 4C       | Memory ingestion creates injection vector | Sanitizer tests pass, no security issues |
 | 4D       | Context leaks degrade isolation | Isolation tests pass unchanged |
 | 4B       | Conversational changes leak into execution | All conversational routing tests pass |
 | 4E       | Operational changes introduce regressions | Full suite passes |

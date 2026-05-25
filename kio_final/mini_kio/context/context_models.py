@@ -84,3 +84,25 @@ class AssembledContext:
     total_chars: int
     partitions_used: List[str]
     truncated: bool
+
+
+PROFILE_CATEGORIES = frozenset({
+    "preferences",
+    "identity",
+    "habits",
+    "projects",
+    "relationships",
+    "system_preferences",
+})
+
+MAX_PROFILE_ENTRIES_PER_CATEGORY = 50
+MAX_PROFILE_VALUE_LENGTH = 500
+
+
+@dataclass(frozen=True)
+class ProfileSummary:
+    text: str
+    categories_used: List[str]
+    entries_count: int
+    total_chars: int
+    truncated: bool

@@ -4,8 +4,10 @@ import os
 from typing import List, Optional, Dict, Any, Tuple
 from .context_models import (
     ContextType, ContextPartition, ContextEntry, ContextSnapshot,
-    AssembledContext, CONTEXT_TYPE_TO_PARTITION, PARTITION_PRECEDENCE,
-    PARTITION_NAMES,
+    AssembledContext, ProfileSummary,
+    CONTEXT_TYPE_TO_PARTITION, PARTITION_PRECEDENCE,
+    PARTITION_NAMES, PROFILE_CATEGORIES,
+    MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
 )
 from .context_sanitizer import ContextSanitizer
 
@@ -52,6 +54,9 @@ class ContextManager:
         self._import_sequence_counter = 0
         self._system_sequence_counter = 0
         self._temporary_sequence_counter = 0
+        self._profile: Dict[str, Dict[str, str]] = {
+            cat: {} for cat in PROFILE_CATEGORIES
+        }
 
     # ── Partition helpers ──────────────────────────────────────────────
 
@@ -106,6 +111,16 @@ class ContextManager:
             return self._temporary_sequence_counter
         self._sequence_counter += 1
         return self._sequence_counter
+
+    def _set_sequence_counter(self, partition: ContextPartition, value: int):
+        if partition == ContextPartition.CONVERSATIONAL:
+            self._sequence_counter = value
+        elif partition == ContextPartition.IMPORTED:
+            self._import_sequence_counter = value
+        elif partition == ContextPartition.SYSTEM:
+            self._system_sequence_counter = value
+        elif partition == ContextPartition.TEMPORARY:
+            self._temporary_sequence_counter = value
 
     def _enforce_partition_boundaries(self, partition: ContextPartition):
         entries = self._entries_for(partition)
@@ -186,6 +201,13 @@ class ContextManager:
         if not is_safe:
             return False
 
+        if not isinstance(tags, list):
+            tags = []
+        else:
+            tags = [t for t in tags if isinstance(t, str)]
+        if not isinstance(metadata, dict):
+            metadata = {}
+
         partition = self._partition_for(entry_type)
         seq = self._sequence_for(partition)
         entry = ContextEntry(
@@ -193,8 +215,8 @@ class ContextManager:
             entry_type=entry_type,
             priority=priority,
             sequence=seq,
-            tags=tags or [],
-            metadata=metadata or {}
+            tags=tags,
+            metadata=metadata
         )
 
         entries_list = self._entries_for(partition)
@@ -236,13 +258,28 @@ class ContextManager:
             role = entry.get("role", "user")
             source = entry.get("source", "external_memory")
 
+            tags = [role, source]
+
+            meta = {"role": role, "source": source}
+
+            profile_tags = entry.get("profile_tags")
+            if isinstance(profile_tags, list):
+                valid_tags = []
+                for pt in profile_tags:
+                    if isinstance(pt, str) and pt.count(".") == 1:
+                        cat, key = pt.split(".", 1)
+                        if cat in PROFILE_CATEGORIES and key.strip():
+                            valid_tags.append(pt)
+                meta["profile_tags"] = valid_tags
+                tags.extend(f"profile:{t}" for t in valid_tags)
+
             context_entry = ContextEntry(
                 content=sanitized_text,
                 entry_type=ContextType.IMPORTED_HISTORY,
                 timestamp=float(timestamp),
                 sequence=self._import_sequence_counter,
-                tags=[role, source],
-                metadata={"role": role, "source": source}
+                tags=tags,
+                metadata=meta,
             )
 
             self._imported_entries.append(context_entry)
@@ -261,7 +298,6 @@ class ContextManager:
     def clear_imported(self):
         self._imported_entries = []
         self._import_total_size = 0
-        self._import_sequence_counter = 0
 
     def clear_system(self):
         self._system_entries = []
@@ -448,6 +484,113 @@ class ContextManager:
             truncated=truncated,
         )
 
+    # ── Public API: profile ──────────────────────────────────────────────
+
+    def set_profile(self, category: str, key: str, value: str) -> bool:
+        if category not in PROFILE_CATEGORIES:
+            return False
+        if not isinstance(value, str) or not value.strip():
+            return False
+        if len(value) > MAX_PROFILE_VALUE_LENGTH:
+            value = value[:MAX_PROFILE_VALUE_LENGTH]
+        entries = self._profile[category]
+        if len(entries) >= MAX_PROFILE_ENTRIES_PER_CATEGORY and key not in entries:
+            return False
+        entries[key] = value
+        return True
+
+    def get_profile(self, category: str, key: str) -> Optional[str]:
+        if category not in PROFILE_CATEGORIES:
+            return None
+        return self._profile[category].get(key)
+
+    def get_profile_category(self, category: str) -> Dict[str, str]:
+        if category not in PROFILE_CATEGORIES:
+            return {}
+        return dict(self._profile[category])
+
+    def clear_profile_category(self, category: str) -> bool:
+        if category not in PROFILE_CATEGORIES:
+            return False
+        self._profile[category].clear()
+        return True
+
+    def clear_profile(self):
+        for cat in PROFILE_CATEGORIES:
+            self._profile[cat].clear()
+
+    def get_preferred_name(self) -> Optional[str]:
+        return self._profile["identity"].get("name")
+
+    def get_preferred_tone(self) -> Optional[str]:
+        return self._profile["preferences"].get("tone")
+
+    def get_recurring_projects(self) -> List[str]:
+        raw = self._profile["projects"].get("recurring", "")
+        if not raw:
+            return []
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def get_preferred_tools(self) -> List[str]:
+        raw = self._profile["preferences"].get("tools", "")
+        if not raw:
+            return []
+        return [t.strip() for t in raw.split(",") if t.strip()]
+
+    def get_recurring_topics(self) -> List[str]:
+        raw = self._profile["habits"].get("topics", "")
+        if not raw:
+            return []
+        return [t.strip() for t in raw.split(",") if t.strip()]
+
+    def assemble_profile_summary(self, max_total_chars: int = 2000) -> ProfileSummary:
+        lines: List[str] = []
+        cat_order = [
+            "identity", "preferences", "projects", "habits",
+            "relationships", "system_preferences",
+        ]
+        used_categories: List[str] = []
+
+        for cat in cat_order:
+            if cat not in PROFILE_CATEGORIES:
+                continue
+            entries = self._profile[cat]
+            if not entries:
+                continue
+            used_categories.append(cat)
+            lines.append(f"[{cat}]")
+            for key in sorted(entries.keys()):
+                val = entries[key]
+                lines.append(f"  {key}: {val}")
+
+        full_text = "\n".join(lines)
+        total_chars = len(full_text)
+        truncated = False
+
+        if total_chars > max_total_chars:
+            clipped: List[str] = []
+            running = 0
+            for line in lines:
+                line_len = len(line) + (1 if clipped else 0)
+                if running + line_len > max_total_chars:
+                    truncated = True
+                    break
+                clipped.append(line)
+                running += line_len
+            full_text = "\n".join(clipped)
+            total_chars = running
+            entry_count = sum(1 for line in clipped if line.startswith("  "))
+        else:
+            entry_count = sum(1 for line in lines if line.startswith("  "))
+
+        return ProfileSummary(
+            text=full_text,
+            categories_used=used_categories,
+            entries_count=entry_count,
+            total_chars=total_chars,
+            truncated=truncated,
+        )
+
     # ── Public API: persistence ─────────────────────────────────────────
 
     def save_context_snapshot(self, path: str) -> None:
@@ -457,10 +600,15 @@ class ContextManager:
             entries = self._entries_for(part)
             partitions_data[pname] = [self._entry_to_dict(e) for e in entries]
 
+        profile_data = {
+            cat: dict(entries) for cat, entries in self._profile.items()
+        }
+
         snapshot = {
-            "version": 2,
+            "version": 3,
             "timestamp": time.time(),
             "partitions": partitions_data,
+            "profile": profile_data,
             "counts": {p: len(partitions_data[p]) for p in PARTITION_NAMES},
         }
 
@@ -487,6 +635,8 @@ class ContextManager:
             self._load_v1_snapshot(data)
         elif version == 2:
             self._load_v2_snapshot(data)
+        elif version == 3:
+            self._load_v3_snapshot(data)
         else:
             raise ValueError(f"Unsupported snapshot version: {version}")
 
@@ -551,6 +701,7 @@ class ContextManager:
 
             part = ContextPartition(pname)
             entries = self._entries_for(part)
+            max_seq = 0
 
             for entry_data in entry_list:
                 entry = self._dict_to_entry(entry_data)
@@ -558,9 +709,34 @@ class ContextManager:
                     entries.append(entry)
                     total = self._total_size_for(part) + entry.size
                     self._set_total_size_for(part, total)
-                    self._sequence_for(part)
+                    if entry.sequence > max_seq:
+                        max_seq = entry.sequence
 
+            if max_seq > 0:
+                self._set_sequence_counter(part, max_seq)
             self._enforce_partition_boundaries(part)
+
+    def _load_v3_snapshot(self, data: Dict[str, Any]) -> None:
+        self._load_v2_snapshot(data)
+
+        profile_data = data.get("profile")
+        if not isinstance(profile_data, dict):
+            return
+
+        for cat in PROFILE_CATEGORIES:
+            self._profile[cat].clear()
+
+        for cat, entries in profile_data.items():
+            if cat not in PROFILE_CATEGORIES:
+                continue
+            if not isinstance(entries, dict):
+                continue
+            for key, val in entries.items():
+                if not isinstance(key, str) or not isinstance(val, str):
+                    continue
+                if len(self._profile[cat]) >= MAX_PROFILE_ENTRIES_PER_CATEGORY:
+                    break
+                self._profile[cat][key] = val[:MAX_PROFILE_VALUE_LENGTH]
 
     # ── Serialization helpers ───────────────────────────────────────────
 
