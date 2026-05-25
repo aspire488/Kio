@@ -21,6 +21,26 @@ class IntentClassifier:
             r"(?:click|press)\s+(.+)",
             r"(?:close|kill|exit)\s+([a-zA-Z0-9\s\.\-_]+)"
         ]
+        # Broad conversational/informational keywords — checked after exec patterns
+        # Each keyword is a substring match against normalized lower text.
+        # Avoid overly broad single words (e.g. bare "how") that catch greetings.
+        self.informational_keywords = [
+            "what is", "what's", "what are",
+            "how to", "how do", "how does", "how can", "how is",
+            "who is", "who's",
+            "tell me", "tell us",
+            "why",
+            "can you", "can u", "could you",
+            "do you", "does you",
+            "what do you think",
+            "explain",
+            "meaning of",
+            "define",
+            "what does", "what do",
+            "is there",
+            "give me",
+            "what is the",
+        ]
 
     def classify(self, raw_llm_output: str) -> IntentClassification:
         """
@@ -95,7 +115,7 @@ class IntentClassifier:
 
         # Check for informational
         if intent_type == IntentType.CONVERSATIONAL:
-            if any(kw in text_lower for kw in ["what is", "how to", "who is", "tell me about", "why"]):
+            if any(kw in text_lower for kw in self.informational_keywords):
                 intent_type = IntentType.INFORMATIONAL
                 confidence = 0.6
 

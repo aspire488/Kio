@@ -1,181 +1,64 @@
 """
-LLM Router - Multi-provider fallback system.
+llm_router.py — Conversational Authority Bridge
 
-Supports Claude, Gemini, OpenAI, Perplexity with automatic fallback.
-All requests have timeout=8 seconds, max_tokens=200.
+Unifies the legacy core with the modern LLM gateway.
+Ensures ONE authoritative path for conversational Gemini dispatch.
 """
 
 import asyncio
 import logging
-import os
 from typing import Optional
+
+from mini_kio.core import config
+from mini_kio.llm.llm_gateway import LLMGateway
+from mini_kio.llm.gemini_provider import GeminiProvider
+from mini_kio.llm.models import LLMRequest
 
 logger = logging.getLogger(__name__)
 
-# Provider priority order
-PROVIDERS = ["claude", "openai", "gemini", "perplexity"]
-
-# API endpoints and models
-ENDPOINTS = {
-    "claude": {
-        "url": "https://api.anthropic.com/v1/messages",
-        "model": "claude-3-haiku-20240307",
-        "key_env": "CLAUDE_API_KEY",
-    },
-    "gemini": {
-        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-        "model": "gemini-1.5-flash",
-        "key_env": "GEMINI_API_KEY",
-    },
-    "openai": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "model": "gpt-3.5-turbo",
-        "key_env": "OPENAI_API_KEY",
-    },
-    "perplexity": {
-        "url": "https://api.perplexity.ai/chat/completions",
-        "model": "llama-3.1-sonar-small-128k-online",
-        "key_env": "PERPLEXITY_API_KEY",
-    },
-}
+# Singleton gateway for the runtime
+_GATEWAY: Optional[LLMGateway] = None
 
 
-async def _ask_claude(query: str, api_key: str, timeout: float, max_tokens: int) -> Optional[str]:
-    """Ask Claude API."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                ENDPOINTS["claude"]["url"],
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": ENDPOINTS["claude"]["model"],
-                    "max_tokens": max_tokens,
-                    "messages": [{"role": "user", "content": query}],
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["content"][0]["text"].strip()
-    except Exception as e:
-        logger.debug(f"Claude failed: {e}")
-        return None
-
-
-async def _ask_gemini(query: str, api_key: str, timeout: float, max_tokens: int) -> Optional[str]:
-    """Ask Gemini API."""
-    try:
-        import httpx
-        url = f"{ENDPOINTS['gemini']['url']}?key={api_key}"
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{
-                        "parts": [{"text": query}]
-                    }],
-                    "generationConfig": {
-                        "maxOutputTokens": max_tokens,
-                    }
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        logger.debug(f"Gemini failed: {e}")
-        return None
-
-
-async def _ask_openai(query: str, api_key: str, timeout: float, max_tokens: int) -> Optional[str]:
-    """Ask OpenAI API."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                ENDPOINTS["openai"]["url"],
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": ENDPOINTS["openai"]["model"],
-                    "messages": [{"role": "user", "content": query}],
-                    "max_tokens": max_tokens,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.debug(f"OpenAI failed: {e}")
-        return None
-
-
-async def _ask_perplexity(query: str, api_key: str, timeout: float, max_tokens: int) -> Optional[str]:
-    """Ask Perplexity API."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                ENDPOINTS["perplexity"]["url"],
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": ENDPOINTS["perplexity"]["model"],
-                    "messages": [{"role": "user", "content": query}],
-                    "max_tokens": max_tokens,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.debug(f"Perplexity failed: {e}")
-        return None
+def _get_gateway() -> LLMGateway:
+    """Initialize and return the singleton LLM gateway."""
+    global _GATEWAY
+    if _GATEWAY is None:
+        _GATEWAY = LLMGateway()
+    
+    # Ensure Gemini provider is registered if key is available and not already present
+    if config.GEMINI_API_KEY and "gemini" not in _GATEWAY._providers:
+        provider = GeminiProvider(
+            api_key=config.GEMINI_API_KEY,
+            timeout_s=config.GEMINI_TIMEOUT_S,
+            max_tokens=config.GEMINI_MAX_TOKENS,
+            model_name=config.GEMINI_MODEL
+        )
+        _GATEWAY.register_provider(provider)
+        logger.info(f"Gemini provider registered with model: {config.GEMINI_MODEL}")
+        
+    return _GATEWAY
 
 
 async def ask_llm(query: str, timeout: float = 8.0, max_tokens: int = 200) -> Optional[str]:
     """
-    Ask LLM providers in priority order until one succeeds.
-    
-    Args:
-        query: The question to ask
-        timeout: Request timeout in seconds (default 8)
-        max_tokens: Maximum tokens in response (default 200)
-        
-    Returns:
-        Response string or None if all fail
+    Authoritative entry point for conversational LLM requests.
+    Routes through LLMGateway -> GeminiProvider.
     """
-    provider_funcs = {
-        "claude": _ask_claude,
-        "gemini": _ask_gemini,
-        "openai": _ask_openai,
-        "perplexity": _ask_perplexity,
-    }
+    gateway = _get_gateway()
     
-    for provider in PROVIDERS:
-        api_key = os.getenv(ENDPOINTS[provider]["key_env"])
-        if not api_key:
-            continue
-            
-        try:
-            logger.debug(f"Trying {provider}")
-            func = provider_funcs[provider]
-            result = await func(query, api_key, timeout, max_tokens)
-            if result:
-                logger.info(f"LLM success: {provider}")
-                return result
-        except Exception as e:
-            logger.debug(f"{provider} error: {e}")
-            continue
+    request = LLMRequest(
+        prompt=query,
+        max_tokens=max_tokens,
+        timeout_s=timeout,
+        provider="gemini"
+    )
     
-    logger.warning("All LLM providers failed")
+    try:
+        response = await gateway.generate(request)
+        if response.success and response.content:
+            return response.content.strip()
+    except Exception as e:
+        logger.warning(f"Unified LLM path failed: {e}")
+        
     return None

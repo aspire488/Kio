@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 from mini_kio.core.execution_boundary import execute_action
 from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
@@ -196,17 +196,17 @@ def handle_command(command: str) -> dict:
 
     # ── GREETINGS ─────────────────────────────────────────────────────────
     if lower == "hello":
-        return {"success": True, "message": "KIO online ✓"}
+        return {"success": True, "message": "Hello!"}
     if lower in ("hi", "hey"):
-        return {"success": True, "message": "Ready."}
+        return {"success": True, "message": "Hey!"}
     if lower in ("yo", "wassup", "what's up", "whats up"):
-        return {"success": True, "message": "I am KIO, a local automation assistant."}
+        return {"success": True, "message": "KIO here. Ask me anything."}
     if lower in ("how are you", "how are you doing"):
-        return {"success": True, "message": "I am functioning within normal parameters. How can I help?"}
+        return {"success": True, "message": "Doing good! What can I do?"}
     if lower in ("bye", "bue"):
-        return {"success": True, "message": "Goodbye."}
+        return {"success": True, "message": "See you!"}
     if lower == "okay":
-        return {"success": True, "message": "Understood."}
+        return {"success": True, "message": "Got it."}
     if lower == "bruh":
         return {"success": True, "message": "..."}
 
@@ -358,7 +358,7 @@ def handle_command(command: str) -> dict:
 
         # ── UTILITY ───────────────────────────────────────────────────────────
         if lower == "ping":
-            return {"success": True, "message": "KIO online ✓"}
+            return {"success": True, "message": "Here."}
 
         if lower == "status":
             from mini_kio.core.runtime import get_runtime, get_runtime_snapshot, get_runtime_health_score, get_runtime_integrity_snapshot
@@ -390,6 +390,51 @@ def handle_command(command: str) -> dict:
         logger.exception(f"handle_command unhandled exception: {exc}")
         return {"success": False, "message": f"Internal error: {str(exc)[:120]}"}
 
+
+_ACTION_VERBS: dict[str, str] = {
+    "open_app": "opened",
+    "close_app": "closed",
+    "search_web": "searched",
+    "search_google": "searched",
+    "search_youtube": "searched",
+    "play_youtube": "played",
+    "open_folder": "opened",
+    "execute_capability": "ran",
+}
+
+def _format_list(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
+    succeeded: list[str] = []
+    blocked: list[str] = []
+    last_verb: Optional[str] = None
+    for step, result in zip(steps, results):
+        action = step.get("action", "")
+        target = step.get("target", "")
+        verb = _ACTION_VERBS.get(action, action)
+        if verb and verb == last_verb:
+            entry = target
+        else:
+            entry = f"{verb} {target}" if verb else target
+        if result.get("blocked"):
+            blocked.append(entry)
+        elif result.get("success"):
+            succeeded.append(entry)
+        last_verb = verb if verb else last_verb
+    if not succeeded and not blocked:
+        return "done"
+    if succeeded and not blocked:
+        return "done - " + _format_list(succeeded)
+    if not succeeded and blocked:
+        return "all blocked - " + _format_list(blocked)
+    return "done - " + _format_list(succeeded) + "; blocked " + _format_list(blocked)
 
 def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
     """Execute parsed multi-step commands through runtime execution policy."""
@@ -444,14 +489,9 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
                 "results": results,
             }
 
-    message = (
-        f"Completed {success_count} step(s); blocked {blocked_count} step(s)."
-        if blocked_count
-        else f"Completed {len(steps)} step(s)."
-    )
     return {
         "success": blocked_count == 0 and success_count > 0,
-        "message": message,
+        "message": _summarize_steps(steps, results),
         "results": results,
     }
 
@@ -510,12 +550,7 @@ def _ai_fallback(query: str) -> dict:
 
     Order:
       1. Knowledge-base lookup (instant, no network).
-      2. LLM via llm_router (async, 8 s timeout).
-      3. Helpful error message.
-
-    BUG-02 FIX: Removed duplicate unreachable return statements.
-    BUG-03 FIX: LLM is now actually called via asyncio.run() instead of
-                being hard-disabled with `response = None`.
+      2. Signal eligibility for Gate 3 orchestration pipeline.
     """
     q = query.lower().strip()
 
@@ -524,19 +559,7 @@ def _ai_fallback(query: str) -> dict:
         if key in q:
             return {"success": True, "message": answer}
 
-    # 2. LLM providers (attempt with asyncio.run; skip if no event loop available)
-    try:
-        from mini_kio.core.llm_router import ask_llm
-        response = asyncio.run(ask_llm(query, timeout=8.0, max_tokens=200))
-        if response:
-            return {"success": True, "message": response}
-    except RuntimeError:
-        # asyncio.run() cannot be called when a loop is already running
-        logger.debug("asyncio.run() skipped — already inside an event loop")
-    except Exception as exc:
-        logger.warning(f"LLM fallback failed: {exc}")
-
-    # 3. Graceful unknown — eligible for Gate 3 orchestration pipeline
+    # 2. Graceful unknown — eligible for Gate 3 orchestration pipeline
     return {
         "success": False,
         "message": (

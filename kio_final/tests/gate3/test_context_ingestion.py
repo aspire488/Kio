@@ -653,9 +653,9 @@ class TestContextMaxAgeFilter(unittest.TestCase):
     def test_max_age_session_entries(self):
         mgr = ContextManager()
         mgr.add_entry("first", ContextType.CONVERSATIONAL)
-        time.sleep(0.05)
+        time.sleep(0.2)
         mgr.add_entry("second", ContextType.CONVERSATIONAL)
-        snapshot = mgr.get_snapshot(limit=10, max_age_s=0.03)
+        snapshot = mgr.get_snapshot(limit=10, max_age_s=0.15)
         self.assertEqual(snapshot.count, 1)
         self.assertEqual(snapshot.entries[0].content, "second")
 

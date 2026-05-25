@@ -122,7 +122,7 @@ class TestConversationResponder(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "how are you")
         response = self.responder.generate("how are you", orch, result)
         self.assertNotEqual(response, "how are you")
-        self.assertIn("functioning", response.lower())
+        self.assertIn("doing", response.lower())
 
     def test_greeting_thanks(self):
         """'thanks' returns acknowledgment."""
@@ -187,12 +187,12 @@ class TestConversationResponder(unittest.TestCase):
     # ── Orchestration summaries ────────────────────────────────────────
 
     def test_execution_summary_preserved(self):
-        """Execution result message from handoff must be preserved."""
+        """Execution result summary must reference target."""
         orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       "Opened notepad", success=True)
         response = self.responder.generate("open notepad", orch, result)
-        self.assertEqual(response, "Opened notepad")
+        self.assertIn("notepad", response.lower())
 
     def test_execution_summary_truncated(self):
         """Execution summary must be bounded."""
@@ -367,13 +367,13 @@ class TestToneProfiles(unittest.TestCase):
     def test_tone_neutral_generic(self):
         """Neutral generic response is standard."""
         response = self._generic()
-        self.assertIn("I understand", response)
+        self.assertIn("Alright", response)
 
     def test_tone_concise(self):
         """Concise tone generic response is shorter."""
         self.responder.set_tone(ConversationTone.CONCISE)
         response = self._generic()
-        self.assertEqual(response, "Got it.")
+        self.assertEqual(response, "Okay.")
 
     def test_tone_helpful(self):
         """Helpful tone generic response."""
@@ -462,6 +462,408 @@ class TestSafetyResponseImmutability(unittest.TestCase):
         response = self.responder.generate("hello", orch, result)
         self.assertNotIn("pending_action", response)
         self.assertNotIn("raw_text", response)
+
+
+
+class TestExecutionRotation(unittest.TestCase):
+    """Deterministic execution response rotation tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _open(self, msg: str = "Opened chrome"):
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED, msg, success=True)
+        return self.responder.generate("open chrome", orch, result)
+
+    def test_execution_rotation_three_calls_different(self):
+        """Same execution message 3 times returns 3 different responses."""
+        r1 = self._open()
+        r2 = self._open()
+        r3 = self._open()
+        self.assertNotEqual(r1, r2)
+        self.assertNotEqual(r2, r3)
+
+    def test_execution_rotation_exhausts_and_wraps(self):
+        """Execution rotation wraps around when all variants used."""
+        results = set()
+        for _ in range(8):
+            results.add(self._open())
+        self.assertGreaterEqual(len(results), 3)
+
+    def test_execution_close_variant_target_present(self):
+        """Close execution variant includes target name."""
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      "Closed chrome", success=True)
+        response = self.responder.generate("close chrome", orch, result)
+        self.assertIn("chrome", response.lower())
+
+    def test_execution_search_variant_target_present(self):
+        """Search execution variant includes query."""
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      "Searched Google: python", success=True)
+        response = self.responder.generate("search python", orch, result)
+        self.assertIn("python", response.lower())
+
+    def test_execution_unknown_message_passthrough(self):
+        """Unrecognized execution messages pass through unchanged."""
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      "Custom action result", success=True)
+        response = self.responder.generate("custom", orch, result)
+        self.assertEqual(response, "Custom action result")
+
+    def test_execution_deterministic_same_sequence(self):
+        """Same execution sequence across fresh responders."""
+        r1 = ConversationResponder()
+        r2 = ConversationResponder()
+        seq1, seq2 = [], []
+        for _ in range(4):
+            o = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+            h = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED, "Opened chrome", success=True)
+            seq1.append(r1.generate("open chrome", o, h))
+            seq2.append(r2.generate("open chrome", o, h))
+        self.assertEqual(seq1, seq2)
+
+    def test_execution_pid_stripped(self):
+        """PID info in close message is stripped before variant selection."""
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      "Closed notepad (pid 1234)", success=True)
+        response = self.responder.generate("close notepad", orch, result)
+        self.assertIn("notepad", response.lower())
+
+    def test_execution_summary_bounded(self):
+        """Execution summary respects max length."""
+        long_target = "x" * 2000
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      f"Opened {long_target}", success=True)
+        response = self.responder.generate(f"open {long_target}", orch, result)
+        self.assertLessEqual(len(response), 600)
+
+
+class TestGenericVariation(unittest.TestCase):
+    """Generic fallback response rotation tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _generic(self):
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="tell me about quantum physics")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "tell me about quantum physics")
+        return self.responder.generate("tell me about quantum physics", orch, result)
+
+    def test_generic_neutral_rotates(self):
+        """Neutral generic responses rotate through variants."""
+        r1 = self._generic()
+        r2 = self._generic()
+        r3 = self._generic()
+        self.assertNotEqual(r1, r2)
+        self.assertNotEqual(r2, r3)
+
+    def test_generic_rotation_deterministic(self):
+        """Same sequence produces same generic responses."""
+        r1 = ConversationResponder()
+        r2 = ConversationResponder()
+        seq1, seq2 = [], []
+        for _ in range(5):
+            o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="tell me about quantum physics")
+            h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "tell me about quantum physics")
+            seq1.append(r1.generate("tell me about quantum physics", o, h))
+            seq2.append(r2.generate("tell me about quantum physics", o, h))
+        self.assertEqual(seq1, seq2)
+
+    def test_generic_exhausts_and_wraps(self):
+        """Generic responses wrap around after exhausting pool."""
+        results = set()
+        for _ in range(10):
+            results.add(self._generic())
+        self.assertGreaterEqual(len(results), 3)
+
+    def test_concise_generic_rotates(self):
+        """Concise tone generic rotates through variants."""
+        self.responder.set_tone(ConversationTone.CONCISE)
+        r1 = self._generic()
+        r2 = self._generic()
+        self.assertNotEqual(r1, r2)
+
+
+class TestKnowledgeBaseVariants(unittest.TestCase):
+    """Knowledge-base variant rotation tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def test_kb_what_is_kio_rotates(self):
+        """'what is kio' rotates through variants."""
+        o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what is kio")
+        h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what is kio")
+        r1 = self.responder.generate("what is kio", o, h)
+        o2 = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what is kio")
+        h2 = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what is kio")
+        r2 = self.responder.generate("what is kio", o2, h2)
+        self.assertNotEqual(r1, r2)
+
+    def test_kb_what_can_you_do_rotates(self):
+        """'what can you do' rotates through variants."""
+        o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what can you do")
+        h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what can you do")
+        r1 = self.responder.generate("what can you do", o, h)
+        r2 = self.responder.generate("what can you do", o, h)
+        self.assertNotEqual(r1, r2)
+
+    def test_kb_who_is_joel_static(self):
+        """'who is joel' stays static (no variant pool)."""
+        o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="who is joel")
+        h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "who is joel")
+        r1 = self.responder.generate("who is joel", o, h)
+        r2 = self.responder.generate("who is joel", o, h)
+        self.assertEqual(r1, r2)
+
+    def test_kb_deterministic_reproducible(self):
+        """Same KB sequence produces same output across fresh responders."""
+        r1 = ConversationResponder()
+        r2 = ConversationResponder()
+        seq1, seq2 = [], []
+        for _ in range(4):
+            o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what is kio")
+            h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what is kio")
+            seq1.append(r1.generate("what is kio", o, h))
+            seq2.append(r2.generate("what is kio", o, h))
+        self.assertEqual(seq1, seq2)
+
+    def test_kb_variant_target_present(self):
+        """KB variants still contain core information."""
+        o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what is kio")
+        h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what is kio")
+        response = self.responder.generate("what is kio", o, h)
+        self.assertIn("KIO", response)
+        self.assertIn("assistant", response.lower())
+
+
+class TestRepeatedResponseVariants(unittest.TestCase):
+    """Repeated-input response pool tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _send(self, text: str):
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+        return self.responder.generate(text, orch, result)
+
+    def test_repeated_second_call_acknowledges(self):
+        """Second same greeting returns repeated response."""
+        self._send("hello")
+        r2 = self._send("hello")
+        self.assertIn("again", r2.lower())
+
+    def test_repeated_third_call_acknowledges(self):
+        """Third same greeting acknowledges repetition."""
+        self._send("hello")
+        self._send("hello")
+        r3 = self._send("hello")
+        self.assertIn("greeting", r3.lower())
+
+    def test_repeated_rotates_across_calls(self):
+        """Repeated responses use rotation within pools."""
+        self._send("hello")
+        r2_first = self._send("hello")
+        # Reset with fresh responder to test rotation at repeat count
+        r2 = ConversationResponder()
+        r2.generate("hello", _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello"), _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello"))
+        r2_second = r2.generate("hello", _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello"), _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello"))
+        # Both fresh responders start at same rotation counter -> same result
+        self.assertEqual(r2_first, r2_second)
+
+    def test_repeated_hi_counts_independently(self):
+        """'hi' and 'hello' have independent repeat counters."""
+        self._send("hello")
+        self._send("hi")
+        r2_hello = self._send("hello")
+        self.assertIn("again", r2_hello.lower())
+
+    def test_repeated_for_non_hello_category(self):
+        """Repeated detection works for non-hello categories like 'thanks'."""
+        self._send("thanks")
+        r2 = self._send("thanks")
+        self.assertIn("again", r2.lower())
+
+
+class TestNormalization(unittest.TestCase):
+    """Deterministic input normalization tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _send(self, text: str):
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+        return self.responder.generate(text, orch, result)
+
+    def test_contraction_whats_kio(self):
+        """'what's kio' normalizes and resolves KB entry."""
+        response = self._send("what's kio")
+        self.assertIn("KIO", response)
+        self.assertNotEqual(response, "what's kio")
+
+    def test_contraction_whats_kio_no_apostrophe(self):
+        """'whats kio' (no apostrophe) normalizes and resolves."""
+        response = self._send("whats kio")
+        self.assertIn("KIO", response)
+
+    def test_typo_helo(self):
+        """'helo' normalizes to 'hello' greeting."""
+        response = self._send("helo")
+        self.assertIn("Hello", response)
+
+    def test_typo_hellp(self):
+        """'hellp' normalizes to 'hello' greeting."""
+        response = self._send("hellp")
+        self.assertIn("Hello", response)
+
+    def test_alias_thx(self):
+        """'thx' normalizes to 'thanks' acknowledgment."""
+        response = self._send("thx")
+        self.assertIn("welcome", response.lower())
+
+    def test_alias_ok_to_okay(self):
+        """'ok' normalizes to 'okay' acknowledgment."""
+        response = self._send("ok")
+        self.assertIn("Got it", response)
+
+    def test_normalization_deterministic(self):
+        """Normalized matching is deterministic across fresh responders."""
+        r1 = ConversationResponder()
+        r2 = ConversationResponder()
+        o = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="what's kio")
+        h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what's kio")
+        resp1 = r1.generate("what's kio", o, h)
+        resp2 = r2.generate("what's kio", o, h)
+        self.assertEqual(resp1, resp2)
+
+    def test_whos_joel_normalizes(self):
+        """'whos joel' normalizes to 'who is joel' KB entry."""
+        response = self._send("whos joel")
+        self.assertIn("Joel", response)
+
+    def test_normalization_preserves_known_kb(self):
+        """Existing KB queries still work unchanged."""
+        response = self._send("who created you")
+        self.assertIn("Joel", response)
+
+
+class TestSynthesisCoherence(unittest.TestCase):
+    """Lightweight response synthesis and transition coherence."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def test_execution_summary_closing_appears(self):
+        """Execution summary optionally includes closing after rotation."""
+        from mini_kio.llm.conversation_responder import _EXECUTION_CLOSINGS
+        open_closings = _EXECUTION_CLOSINGS.get("open", [""])
+        # Should have at least one non-empty closing
+        has_closing = any(c for c in open_closings)
+        self.assertTrue(has_closing)
+
+    def test_synthesize_header_only(self):
+        """_synthesize with header only returns header."""
+        from mini_kio.llm.conversation_responder import _synthesize
+        result = _synthesize("test header")
+        self.assertEqual(result, "test header")
+
+    def test_synthesize_with_detail(self):
+        """_synthesize with detail appends detail."""
+        from mini_kio.llm.conversation_responder import _synthesize
+        result = _synthesize("header", detail="detail")
+        self.assertEqual(result, "header detail")
+
+    def test_synthesize_with_closing(self):
+        """_synthesize with closing appends closing."""
+        from mini_kio.llm.conversation_responder import _synthesize
+        result = _synthesize("header", closing="done.")
+        self.assertEqual(result, "header done.")
+
+    def test_synthesize_all_parts(self):
+        """_synthesize with all parts assembles correctly."""
+        from mini_kio.llm.conversation_responder import _synthesize
+        result = _synthesize("header", detail="middle", closing="end.")
+        self.assertEqual(result, "header middle end.")
+
+    def test_synthesize_empty_parts_omitted(self):
+        """_synthesize omits empty detail and closing."""
+        from mini_kio.llm.conversation_responder import _synthesize
+        result = _synthesize("header", detail="", closing="")
+        self.assertEqual(result, "header")
+
+    def test_execution_summary_bounded_with_closing(self):
+        """Execution summary with closing stays under max length."""
+        long_target = "x" * 2000
+        orch = _mock_orchestration(OrchestrationState.EXECUTABLE_READY, IntentType.EXECUTABLE)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
+                                      f"Opened {long_target}", success=True)
+        response = self.responder.generate(f"open {long_target}", orch, result)
+        self.assertLessEqual(len(response), 600)
+
+
+class TestMultiStepNarration(unittest.TestCase):
+    """Deterministic multi-step summary tests via _summarize_steps."""
+
+    def setUp(self):
+        from mini_kio.core.command_router import _summarize_steps
+        self._summarize = _summarize_steps
+
+    def test_all_succeeded_two_steps(self):
+        """Two successful steps collapse repeated verb."""
+        steps = [{"action": "open_app", "target": "chrome"},
+                 {"action": "open_app", "target": "calculator"}]
+        results = [{"success": True}, {"success": True}]
+        msg = self._summarize(steps, results)
+        self.assertEqual(msg, "done - opened chrome and calculator")
+
+    def test_all_succeeded_three_steps(self):
+        """Three successful steps produce list with oxford comma."""
+        steps = [{"action": "open_app", "target": "chrome"},
+                 {"action": "open_app", "target": "calculator"},
+                 {"action": "search_web", "target": "python"}]
+        results = [{"success": True}, {"success": True}, {"success": True}]
+        msg = self._summarize(steps, results)
+        self.assertIn("opened chrome", msg)
+        self.assertIn("calculator", msg)
+        self.assertIn("searched python", msg)
+        self.assertTrue(msg.startswith("done -"))
+
+    def test_one_succeeded_one_blocked(self):
+        """Mixed success/blocked produces partial summary."""
+        steps = [{"action": "open_app", "target": "chrome"},
+                 {"action": "close_app", "target": "notepad"}]
+        results = [{"success": True}, {"blocked": True}]
+        msg = self._summarize(steps, results)
+        self.assertIn("done", msg.lower())
+        self.assertIn("blocked", msg.lower())
+
+    def test_all_blocked(self):
+        """All steps blocked produces 'all blocked' message."""
+        steps = [{"action": "close_app", "target": "notepad"}]
+        results = [{"blocked": True}]
+        msg = self._summarize(steps, results)
+        self.assertEqual(msg, "all blocked - closed notepad")
+
+    def test_single_step_succeeded(self):
+        """Single successful step produces clean summary."""
+        steps = [{"action": "open_app", "target": "chrome"}]
+        results = [{"success": True}]
+        msg = self._summarize(steps, results)
+        self.assertEqual(msg, "done - opened chrome")
+
+    def test_empty_steps(self):
+        """Empty steps produce minimal summary."""
+        msg = self._summarize([], [])
+        self.assertEqual(msg, "done")
 
 
 if __name__ == "__main__":
