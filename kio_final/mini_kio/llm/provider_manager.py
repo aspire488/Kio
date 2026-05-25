@@ -18,35 +18,57 @@ class ProviderManager:
         self._metrics: Dict[str, ProviderMetrics] = {}
         self._providers: List[str] = []
 
-    def register_provider(self, name: str):
-        if name not in self._metrics:
+    def register_provider(self, name: str, replace: bool = False):
+        """
+        Register a provider with validated name.
+        Default (replace=False): raises ValueError on duplicate.
+        replace=True: silently replaces and resets metrics to clean state.
+        """
+        if not name or not name.strip():
+            raise ValueError(f"Invalid provider name: '{name}'")
+        name = name.strip()
+        if name in self._metrics:
+            if not replace:
+                raise ValueError(f"Provider '{name}' already registered")
             self._metrics[name] = ProviderMetrics()
-            self._providers.append(name)
+            return
+        self._metrics[name] = ProviderMetrics()
+        self._providers.append(name)
 
     def select_provider(self, requested: Optional[str] = None) -> Optional[str]:
-        """Selects a healthy provider, favoring the requested one if healthy."""
+        """
+        Selects a healthy provider.
+        Ordering: requested (if healthy) -> registration order.
+        Stable across calls — determined solely by registration order.
+        """
         current_time = time.time()
-        
-        # 1. Try requested provider
+
         if requested and self._is_healthy(requested, current_time):
             return requested
 
-        # 2. Try default (first) or others
         for name in self._providers:
             if self._is_healthy(name, current_time):
                 return name
-        
+
         return None
 
     def record_success(self, name: str):
-        if name not in self._metrics: return
+        """Record a successful provider call. Silent no-op on missing provider."""
+        if not name or not name.strip():
+            raise ValueError(f"Invalid provider name: '{name}'")
+        if name not in self._metrics:
+            return
         m = self._metrics[name]
         m.total_requests += 1
         m.consecutive_failures = 0
         m.last_success_timestamp = time.time()
 
     def record_failure(self, name: str, status: LLMStatus):
-        if name not in self._metrics: return
+        """Record a failed provider call. Silent no-op on missing provider."""
+        if not name or not name.strip():
+            raise ValueError(f"Invalid provider name: '{name}'")
+        if name not in self._metrics:
+            return
         m = self._metrics[name]
         m.total_requests += 1
         m.consecutive_failures += 1
@@ -57,30 +79,47 @@ class ProviderManager:
         elif status == LLMStatus.MALFORMED:
             m.malformed_count += 1
 
-        # Check circuit breaker
-        if (m.consecutive_failures >= self.FAILURE_THRESHOLD or 
-            m.timeout_count >= self.TIMEOUT_THRESHOLD or 
+        if (m.consecutive_failures >= self.FAILURE_THRESHOLD or
+            m.timeout_count >= self.TIMEOUT_THRESHOLD or
             m.malformed_count >= self.MALFORMED_THRESHOLD):
             self._enter_cooldown(name, m)
 
     def get_health_status(self, name: str) -> ProviderHealthStatus:
-        if name not in self._metrics: return ProviderHealthStatus.DOWN
+        """Determine health status for a provider. Unregistered returns DOWN."""
+        if not name or not name.strip():
+            raise ValueError(f"Invalid provider name: '{name}'")
+        if name not in self._metrics:
+            return ProviderHealthStatus.DOWN
         m = self._metrics[name]
         current_time = time.time()
-        
+
         if m.cooldown_until > current_time:
             return ProviderHealthStatus.COOLDOWN
         if m.consecutive_failures > 0:
             return ProviderHealthStatus.UNSTABLE
         return ProviderHealthStatus.HEALTHY
 
+    def expire_cooldown(self, name: str):
+        """
+        Explicitly expire cooldown for deterministic test transitions.
+        After expiry, provider returns to UNSTABLE (if failures) or HEALTHY.
+        Raises ValueError if provider not registered.
+        """
+        if not name or not name.strip():
+            raise ValueError(f"Invalid provider name: '{name}'")
+        if name not in self._metrics:
+            raise ValueError(f"Provider '{name}' not registered")
+        m = self._metrics[name]
+        if m.cooldown_until <= time.time():
+            return
+        m.cooldown_until = time.time()
+
     def _is_healthy(self, name: str, current_time: float) -> bool:
-        if name not in self._metrics: return False
+        if name not in self._metrics:
+            return False
         m = self._metrics[name]
         return m.cooldown_until <= current_time
 
     def _enter_cooldown(self, name: str, metrics: ProviderMetrics):
         metrics.cooldown_until = time.time() + self.COOLDOWN_DURATION_S
-        # We don't reset counters here, allowing the cooldown to expire naturally
-        # but we could reset consecutive_failures if we wanted to allow immediate retry after cooldown
-        metrics.consecutive_failures = 0 
+        metrics.consecutive_failures = 0
