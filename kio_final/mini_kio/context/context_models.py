@@ -112,3 +112,15 @@ class ProfileSummary:
 class ScoredEntry:
     entry: ContextEntry
     score: float
+
+
+@dataclass(frozen=True)
+class ContextDiagnostics:
+    total_entries: int
+    total_size: int
+    conversational_entries: int
+    imported_entries: int
+    system_entries: int
+    temporary_entries: int
+    profile_categories: int
+    integrity_healthy: bool

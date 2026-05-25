@@ -7,6 +7,7 @@ import base64
 from mini_kio.context.context_models import (
     ContextType, ContextEntry, ContextSnapshot, ImportEntry, IngestResult,
     ContextPartition, AssembledContext, ProfileSummary, ScoredEntry,
+    ContextDiagnostics,
     CONTEXT_TYPE_TO_PARTITION, PROFILE_CATEGORIES,
     MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
 )
@@ -1884,6 +1885,98 @@ class TestContextSearch(unittest.TestCase):
         mgr = ContextManager()
         results = mgr.search_imported(["Python"])
         self.assertEqual(results, [])
+
+
+class TestContextDiagnostics(unittest.TestCase):
+    """Operational introspection — Gate 4E."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def _populate(self):
+        self.mgr.add_entry("Hello", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("World", ContextType.CONVERSATIONAL)
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "Imported data", "source": "test"},
+        ])
+        self.mgr.add_entry("System msg", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.add_entry("Temp data", ContextType.TEMPORARY)
+
+    def test_diagnostics_counts_correct(self):
+        self._populate()
+        d = self.mgr.get_diagnostics()
+        self.assertEqual(d.conversational_entries, 2)
+        self.assertEqual(d.imported_entries, 1)
+        self.assertEqual(d.system_entries, 1)
+        self.assertEqual(d.temporary_entries, 1)
+        self.assertEqual(d.total_entries, 5)
+
+    def test_diagnostics_sizes_correct(self):
+        self._populate()
+        d = self.mgr.get_diagnostics()
+        expected = len("Hello") + len("World") + len("Imported data") + len("System msg") + len("Temp data")
+        self.assertEqual(d.total_size, expected)
+
+    def test_diagnostics_profile_categories(self):
+        self.mgr.set_profile("preferences", "language", "Python")
+        self.mgr.set_profile("identity", "name", "Kio")
+        d = self.mgr.get_diagnostics()
+        self.assertEqual(d.profile_categories, 2)
+
+    def test_diagnostics_profile_categories_empty(self):
+        d = self.mgr.get_diagnostics()
+        self.assertEqual(d.profile_categories, 0)
+
+    def test_integrity_passes_clean_state(self):
+        self._populate()
+        warnings = self.mgr.validate_integrity()
+        self.assertEqual(warnings, [])
+
+    def test_integrity_detects_desync(self):
+        self._populate()
+        self.mgr._total_size = 99999
+        warnings = self.mgr.validate_integrity()
+        self.assertGreater(len(warnings), 0)
+        self.assertTrue(any("conversational" in w for w in warnings))
+
+    def test_integrity_healthy_flag(self):
+        self._populate()
+        d = self.mgr.get_diagnostics()
+        self.assertTrue(d.integrity_healthy)
+        self.mgr._total_size = 99999
+        d2 = self.mgr.get_diagnostics()
+        self.assertFalse(d2.integrity_healthy)
+
+    def test_deterministic_across_calls(self):
+        self._populate()
+        d1 = self.mgr.get_diagnostics()
+        d2 = self.mgr.get_diagnostics()
+        self.assertEqual(d1, d2)
+
+    def test_side_effect_free(self):
+        self._populate()
+        before_entries = list(self.mgr._entries)
+        before_imported = list(self.mgr._imported_entries)
+        before_system = list(self.mgr._system_entries)
+        before_temp = list(self.mgr._temporary_entries)
+        self.mgr.get_diagnostics()
+        self.mgr.validate_integrity()
+        self.assertEqual(before_entries, list(self.mgr._entries))
+        self.assertEqual(before_imported, list(self.mgr._imported_entries))
+        self.assertEqual(before_system, list(self.mgr._system_entries))
+        self.assertEqual(before_temp, list(self.mgr._temporary_entries))
+
+    def test_no_execution_attributes(self):
+        self._populate()
+        for attr in ["execute", "dispatch", "run", "launch", "route"]:
+            self.assertFalse(hasattr(self.mgr.get_diagnostics, attr))
+            self.assertFalse(hasattr(self.mgr.validate_integrity, attr))
+
+    def test_no_mutation_during_validation(self):
+        self._populate()
+        before_total = self.mgr._total_size
+        self.mgr.validate_integrity()
+        self.assertEqual(self.mgr._total_size, before_total)
 
 
 if __name__ == "__main__":

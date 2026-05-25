@@ -4,7 +4,7 @@ import os
 from typing import List, Optional, Dict, Any, Tuple
 from .context_models import (
     ContextType, ContextPartition, ContextEntry, ContextSnapshot,
-    AssembledContext, ProfileSummary, ScoredEntry,
+    AssembledContext, ProfileSummary, ScoredEntry, ContextDiagnostics,
     CONTEXT_TYPE_TO_PARTITION, PARTITION_PRECEDENCE,
     PARTITION_NAMES, PROFILE_CATEGORIES,
     MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
@@ -815,6 +815,39 @@ class ContextManager:
             )
         except (ValueError, TypeError, KeyError):
             return None
+
+    # ── Operational introspection ────────────────────────────────────────
+
+    def validate_integrity(self) -> List[str]:
+        warnings: List[str] = []
+        for part in ContextPartition:
+            entries = list(self._entries_for(part))
+            computed = sum(e.size for e in entries)
+            stored = self._total_size_for(part)
+            if computed != stored:
+                warnings.append(
+                    f"Partition '{part.value}' size mismatch: stored={stored}, computed={computed}"
+                )
+        return warnings
+
+    def get_diagnostics(self) -> ContextDiagnostics:
+        conv = len(self._entries_for(ContextPartition.CONVERSATIONAL))
+        imp = len(self._entries_for(ContextPartition.IMPORTED))
+        sys = len(self._entries_for(ContextPartition.SYSTEM))
+        tmp = len(self._entries_for(ContextPartition.TEMPORARY))
+        total_size = sum(self._total_size_for(p) for p in ContextPartition)
+        profile_cats = sum(1 for v in self._profile.values() if v)
+        warnings = self.validate_integrity()
+        return ContextDiagnostics(
+            total_entries=conv + imp + sys + tmp,
+            total_size=total_size,
+            conversational_entries=conv,
+            imported_entries=imp,
+            system_entries=sys,
+            temporary_entries=tmp,
+            profile_categories=profile_cats,
+            integrity_healthy=len(warnings) == 0,
+        )
 
     # ── Legacy boundary enforcement (delegates to partition enforcement) ─
 
