@@ -10,9 +10,9 @@ HARD CONTAINMENT:
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Dict
 from mini_kio.runtime.runtime_contracts import ExecutionClassification, RuntimeHandoffResult
-from mini_kio.llm.conversation_models import OrchestrationResponse, OrchestrationState
+from mini_kio.llm.conversation_models import OrchestrationResponse, OrchestrationState, ConversationTone
 from mini_kio.llm.intent_models import IntentType
 
 logger = logging.getLogger(__name__)
@@ -74,31 +74,98 @@ _KNOWLEDGE_BASE: dict[str, str] = {
         "controls to ensure safe operation.",
 }
 
-_GREETING_RESPONSES: dict[str, str] = {
-    "hello": "Hello! How can I help you today?",
-    "hi": "Hi there! What can I do for you?",
-    "hey": "Hey! How can I assist?",
-    "yo": "Hey! I'm KIO. How can I help?",
-    "wassup": "Not much! Ready to help. What do you need?",
-    "what's up": "I'm here and ready. What can I do for you?",
-    "whats up": "I'm here and ready. What can I do for you?",
-    "how are you": "I'm functioning within normal parameters. How can I help?",
-    "how are you doing": "Doing well! What can I assist you with?",
-    "bye": "Goodbye! Feel free to come back anytime.",
-    "bue": "Goodbye!",
-    "goodbye": "Goodbye!",
-    "thanks": "You're welcome!",
-    "thank you": "You're welcome!",
-    "okay": "Got it. Let me know if you need anything else.",
-    "ok": "Got it.",
-    "cool": "Thanks! Is there anything else I can help with?",
-    "nice": "Glad you think so! What would you like to do?",
-    "good": "Great! What's next?",
-    "yes": "Okay. What would you like me to do?",
-    "no": "Alright. Let me know if you change your mind.",
-    "do it": "I'm ready when you are. What should I do?",
-    "help": "I can open apps, search the web, play media, and more. Try 'open chrome' or 'search python tutorials'.",
-    "ping": "KIO online.",
+_GREETING_CATEGORY: dict[str, str] = {
+    "hello": "hello",
+    "hi": "hello",
+    "hey": "hello",
+    "yo": "hello",
+    "wassup": "hello",
+    "what's up": "hello",
+    "whats up": "hello",
+    "how are you": "how_are_you",
+    "how are you doing": "how_are_you",
+    "bye": "goodbye",
+    "bue": "goodbye",
+    "goodbye": "goodbye",
+    "thanks": "thanks",
+    "thank you": "thanks",
+    "okay": "okay",
+    "ok": "okay",
+    "cool": "positive",
+    "nice": "positive",
+    "good": "positive",
+    "yes": "yes",
+    "no": "no",
+    "do it": "yes",
+    "help": "help",
+    "ping": "ping",
+}
+
+_GREETING_VARIANTS: dict[str, list[str]] = {
+    "hello": [
+        "Hello! How can I help you today?",
+        "Hi there! What can I do for you?",
+        "Hey! How can I assist?",
+        "Hello!",
+        "Hi!",
+    ],
+    "how_are_you": [
+        "I'm functioning within normal parameters. How can I help?",
+        "Doing well! What can I assist you with?",
+        "All systems good. What do you need?",
+        "Running smoothly. How can I help you?",
+    ],
+    "thanks": [
+        "You're welcome!",
+        "Happy to help!",
+        "Anytime!",
+        "Glad I could help!",
+    ],
+    "goodbye": [
+        "Goodbye! Feel free to come back anytime.",
+        "Goodbye!",
+        "See you later!",
+        "Take care!",
+    ],
+    "okay": [
+        "Got it. Let me know if you need anything else.",
+        "Got it.",
+        "Noted.",
+        "Understood.",
+    ],
+    "positive": [
+        "Thanks! Is there anything else I can help with?",
+        "Glad you think so! What would you like to do?",
+        "Great! What's next?",
+        "Awesome! Let me know what you need.",
+    ],
+    "yes": [
+        "Okay. What would you like me to do?",
+        "Alright. What do you need?",
+    ],
+    "no": [
+        "Alright. Let me know if you change your mind.",
+        "No problem. I'll be here if you need me.",
+    ],
+    "help": [
+        "I can open apps, search the web, play media, and more. Try 'open chrome' or 'search python tutorials'.",
+        "Ask me to open apps, search Google, play YouTube videos, or run multi-step commands.",
+    ],
+    "ping": [
+        "KIO online.",
+        "KIO online. All systems operational.",
+    ],
+}
+
+_REPEATED_RESPONSES: dict[int, str] = {
+    2: "Hello again!",
+    3: "You're greeting me a lot. How can I help?",
+}
+
+_TONE_GENERIC: dict[str, str] = {
+    ConversationTone.NEUTRAL.value: "I understand. Is there anything else I can help you with?",
+    ConversationTone.CONCISE.value: "Got it.",
+    ConversationTone.HELPFUL.value: "Sure! Is there anything else I can help you with?",
 }
 
 
@@ -112,6 +179,17 @@ class ConversationResponder:
     - No prompt leakage, no raw exception leakage
     """
 
+    def __init__(self):
+        self._rotation_counters: Dict[str, int] = {}
+        self._input_counters: Dict[str, int] = {}
+        self._tone: ConversationTone = ConversationTone.NEUTRAL
+
+    def set_tone(self, tone: ConversationTone):
+        self._tone = tone
+
+    def get_tone(self) -> ConversationTone:
+        return self._tone
+
     def generate(
         self,
         original_text: str,
@@ -123,53 +201,73 @@ class ConversationResponder:
         text_lower = (original_text or "").strip().lower()
 
         if isinstance(classification, ExecutionClassification):
-            # Conversational — generate friendly reply
             if classification in (
                 ExecutionClassification.CONVERSATIONAL_ONLY,
                 ExecutionClassification.INFORMATIONAL_ONLY,
             ):
                 return self._conversational_reply(text_lower, orchestration)
 
-            # Confirmation required — generate confirmation prompt
             if classification == ExecutionClassification.EXECUTABLE_REQUIRES_CONFIRMATION:
                 return self._confirmation_prompt(orchestration)
 
-            # Refused — use handoff message, wrap gracefully
             if classification == ExecutionClassification.EXECUTABLE_BLOCKED:
                 return self._refusal_reply(text_lower, handoff_result, orchestration)
 
-            # Executed — keep execution result from handoff
             if classification == ExecutionClassification.EXECUTABLE_VALIDATED:
                 return self._execution_summary(handoff_result)
 
-            # Degraded — safe fallback
             if classification == ExecutionClassification.DEGRADED_BLOCK:
                 return _SAFE_DEGRADED_FALLBACK
 
-            # Malformed — clarification
             if classification == ExecutionClassification.MALFORMED_PAYLOAD:
                 return self._clarification_prompt()
 
         return "I'm not sure how to respond to that."
 
     def _conversational_reply(self, text_lower: str, orchestration: OrchestrationResponse) -> str:
-        """Generate a conversational reply — not an echo."""
-        # Greeting/known interaction lookup (exact match only)
-        for key, response in _GREETING_RESPONSES.items():
-            if text_lower == key or text_lower == key.strip(".") or text_lower == key + "?":
-                return response
+        """Generate a conversational reply with rotation and repeated-input handling."""
+        category = self._resolve_greeting_category(text_lower)
+        if category:
+            return self._greeting_reply(category, text_lower)
 
-        # Knowledge base lookup — longest keys first to avoid substring shadowing
         sorted_keys = sorted(_KNOWLEDGE_BASE.keys(), key=len, reverse=True)
         for key in sorted_keys:
             if key in text_lower:
                 return _KNOWLEDGE_BASE[key][: _MAX_RESPONSE_LENGTH]
 
-        # Generic friendly response
-        return "I understand. Is there anything else I can help you with?"
+        return self._generic_response()
+
+    def _resolve_greeting_category(self, text_lower: str) -> Optional[str]:
+        """Check if input matches a greeting category."""
+        for key, category in _GREETING_CATEGORY.items():
+            if text_lower == key or text_lower == key.strip(".") or text_lower == key + "?":
+                return category
+        return None
+
+    def _greeting_reply(self, category: str, text_lower: str) -> str:
+        """Generate a greeting response with rotation and repeated-input handling."""
+        repeat_count = self._input_counters.get(text_lower, 0)
+        self._input_counters[text_lower] = repeat_count + 1
+
+        if repeat_count >= 1:
+            repeated = _REPEATED_RESPONSES.get(repeat_count + 1)
+            if repeated:
+                return repeated
+
+        variants = _GREETING_VARIANTS.get(category)
+        if not variants:
+            return self._generic_response()
+
+        idx = self._rotation_counters.get(category, 0) % len(variants)
+        self._rotation_counters[category] = idx + 1
+        return variants[idx]
+
+    def _generic_response(self) -> str:
+        """Return tone-adjusted generic response."""
+        return _TONE_GENERIC.get(self._tone.value, _TONE_GENERIC[ConversationTone.NEUTRAL.value])
 
     def _confirmation_prompt(self, orchestration: OrchestrationResponse) -> str:
-        """Generate a safe confirmation prompt."""
+        """Generate a safe confirmation prompt (non-variant, safety-critical)."""
         pending = orchestration.pending_action
         if pending:
             action = pending.action
@@ -189,9 +287,8 @@ class ConversationResponder:
         handoff_result: RuntimeHandoffResult,
         orchestration: OrchestrationResponse,
     ) -> str:
-        """Wrap a refusal message safely."""
+        """Wrap a refusal message safely (non-variant, safety-critical)."""
         base = handoff_result.message or "That action was refused for safety reasons."
-        # Don't expose raw veto details that could leak runtime internals
         if "Runtime Veto" in base:
             return "That action is blocked by runtime safety controls."
         return base[: _MAX_RESPONSE_LENGTH]
@@ -202,5 +299,5 @@ class ConversationResponder:
         return msg[: _MAX_RESPONSE_LENGTH]
 
     def _clarification_prompt(self) -> str:
-        """Generate a safe clarification prompt."""
+        """Generate a safe clarification prompt (non-variant, safety-critical)."""
         return "I didn't quite understand that. Could you rephrase or try 'help' for examples?"

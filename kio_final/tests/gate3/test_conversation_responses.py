@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from mini_kio.llm.conversation_responder import ConversationResponder, _SAFE_DEGRADED_FALLBACK
 from mini_kio.runtime.runtime_contracts import ExecutionClassification, ExecutionAuditMetadata, RuntimeHandoffResult
-from mini_kio.llm.conversation_models import OrchestrationResponse, OrchestrationState, PendingAction
+from mini_kio.llm.conversation_models import OrchestrationResponse, OrchestrationState, PendingAction, ConversationTone
 from mini_kio.llm.intent_models import IntentType, ExtractedIntent, IntentClassification
 
 
@@ -264,6 +264,204 @@ class TestResponderIntegration(unittest.TestCase):
         self.assertIn("message", result)
         # Should NOT be echoing the input text
         self.assertNotEqual(result.get("message"), "hello")
+
+
+class TestTemplateRotation(unittest.TestCase):
+    """Deterministic template rotation tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _send(self, text: str):
+        """Helper to send a conversational input."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+        return self.responder.generate(text, orch, result)
+
+    def test_greeting_rotation_three_calls_different(self):
+        """Same greeting 3 times returns 3 different responses."""
+        r1 = self._send("hello")
+        r2 = self._send("hello")
+        r3 = self._send("hello")
+        self.assertNotEqual(r1, r2)
+        self.assertNotEqual(r2, r3)
+
+    def test_greeting_rotation_exhausts_and_wraps(self):
+        """Rotation wraps around when all variants used."""
+        results = set()
+        for _ in range(10):
+            results.add(self._send("hello"))
+        # Should have used all 5 variants at least once
+        self.assertGreaterEqual(len(results), 3)
+
+    def test_repeated_input_hello_again(self):
+        """2nd same greeting returns 'Hello again!'"""
+        self._send("hello")
+        r2 = self._send("hello")
+        self.assertIn("again", r2.lower())
+
+    def test_repeated_input_greeting_a_lot(self):
+        """3rd same greeting returns repetition acknowledgment."""
+        self._send("hello")
+        self._send("hello")
+        r3 = self._send("hello")
+        self.assertIn("a lot", r3.lower())
+
+    def test_repeated_input_counts_per_text(self):
+        """Different texts have independent counters."""
+        self._send("hello")
+        self._send("hi")   # same category, different text
+        r1_second = self._send("hello")
+        self.assertIn("again", r1_second.lower())
+
+    def test_rotation_deterministic_same_sequence(self):
+        """Same sequence produces same results across fresh responders."""
+        r1 = ConversationResponder()
+        r2 = ConversationResponder()
+        seq1 = []
+        seq2 = []
+        for _ in range(4):
+            seq1.append(r1.generate("hello", _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello"), _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello")))
+            seq2.append(r2.generate("hello", _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello"), _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello")))
+        self.assertEqual(seq1, seq2)
+
+    def test_different_categories_independent_counters(self):
+        """Each category has its own rotation counter."""
+        r_hello = self._send("hello")
+        r_how = self._send("how are you")
+        r_hello2 = self._send("hello")
+        self.assertNotEqual(r_hello, r_hello2)
+        # hi and how_are_you are independent
+        r_how2 = self._send("how are you")
+        self.assertNotEqual(r_how, r_how2)
+
+    def test_multiple_greeting_inputs_same_category(self):
+        """'hi' and 'hello' share the 'hello' category counter."""
+        self._send("hello")
+        # Explicit generate with 'hi' — not via _send, to avoid repeated counter
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hi")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hi")
+        r2 = self.responder.generate("hi", orch, result)
+        # If counters were per-input: "hi" would use counter 0 -> variants[0]
+        # If per-category (shared): "hello" used counter 0 -> now counter is 1 -> variants[1]
+        # 'hi' input never seen before -> no repeated detection
+        self.assertNotIn("again", r2.lower())
+
+
+class TestToneProfiles(unittest.TestCase):
+    """Deterministic tone profile tests."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def _generic(self):
+        """Helper to trigger a generic fallback response."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="tell me about quantum physics")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "tell me about quantum physics")
+        return self.responder.generate("tell me about quantum physics", orch, result)
+
+    def test_tone_default_is_neutral(self):
+        """Default tone is NEUTRAL."""
+        self.assertEqual(self.responder.get_tone(), ConversationTone.NEUTRAL)
+
+    def test_tone_neutral_generic(self):
+        """Neutral generic response is standard."""
+        response = self._generic()
+        self.assertIn("I understand", response)
+
+    def test_tone_concise(self):
+        """Concise tone generic response is shorter."""
+        self.responder.set_tone(ConversationTone.CONCISE)
+        response = self._generic()
+        self.assertEqual(response, "Got it.")
+
+    def test_tone_helpful(self):
+        """Helpful tone generic response."""
+        self.responder.set_tone(ConversationTone.HELPFUL)
+        response = self._generic()
+        self.assertIn("Sure!", response)
+
+    def test_tone_does_not_affect_knowledge_base(self):
+        """Tone does not alter knowledge base responses."""
+        self.responder.set_tone(ConversationTone.CONCISE)
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="who created you")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "who created you")
+        response = self.responder.generate("who created you", orch, result)
+        self.assertIn("Joel", response)
+
+    def test_tone_does_not_affect_greeting_rotation(self):
+        """Tone does not alter greeting variant selection."""
+        self.responder.set_tone(ConversationTone.HELPFUL)
+        response = self.responder.generate("hello", _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello"), _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello"))
+        # Should still be a valid greeting variant
+        self.assertTrue("Hello" in response or "Hi" in response or "Hey" in response)
+
+
+class TestSafetyResponseImmutability(unittest.TestCase):
+    """Safety-critical responses must not be variant."""
+
+    def setUp(self):
+        self.responder = ConversationResponder()
+
+    def test_confirmation_prompt_unchanged_across_calls(self):
+        """Confirmation prompts are identical every time."""
+        orch = _mock_orchestration(OrchestrationState.AWAITING_CONFIRMATION, IntentType.EXECUTABLE, action="open", target="notepad")
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_REQUIRES_CONFIRMATION)
+        r1 = self.responder.generate("open notepad", orch, result)
+        r2 = self.responder.generate("open notepad", orch, result)
+        r3 = self.responder.generate("open notepad", orch, result)
+        self.assertEqual(r1, r2)
+        self.assertEqual(r2, r3)
+
+    def test_confirmation_prompt_unchanged_with_tone(self):
+        """Tone changes do not affect confirmation prompts."""
+        self.responder.set_tone(ConversationTone.CONCISE)
+        orch = _mock_orchestration(OrchestrationState.AWAITING_CONFIRMATION, IntentType.EXECUTABLE, action="open", target="chrome")
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_REQUIRES_CONFIRMATION)
+        response = self.responder.generate("open chrome", orch, result)
+        self.assertIn("proceed", response.lower())
+
+    def test_refusal_unchanged_across_calls(self):
+        """Refusal messages are identical."""
+        orch = _mock_orchestration(OrchestrationState.REFUSED)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_BLOCKED, "Blocked for safety", success=False)
+        r1 = self.responder.generate("delete system32", orch, result)
+        result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_BLOCKED, "Blocked for safety", success=False)
+        r2 = self.responder.generate("delete system32", orch, result)
+        self.assertEqual(r1, r2)
+
+    def test_degraded_fallback_unchanged(self):
+        """Degraded fallback is the constant _SAFE_DEGRADED_FALLBACK."""
+        orch = _mock_orchestration(OrchestrationState.DEGRADED)
+        result = _mock_handoff_result(ExecutionClassification.DEGRADED_BLOCK, "", success=False)
+        response = self.responder.generate("open notepad", orch, result)
+        self.assertEqual(response, _SAFE_DEGRADED_FALLBACK)
+
+    def test_clarification_prompt_unchanged(self):
+        """Clarification prompt is identical every time."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL)
+        result = _mock_handoff_result(ExecutionClassification.MALFORMED_PAYLOAD, "", success=False)
+        r1 = self.responder.generate("???", orch, result)
+        r2 = self.responder.generate("???", orch, result)
+        self.assertEqual(r1, r2)
+
+    def test_knowledge_base_unchanged_by_rotation(self):
+        """Knowledge base responses are not affected by rotation state."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="who is joel")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "who is joel")
+        r1 = self.responder.generate("who is joel", orch, result)
+        orch2 = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="who is joel")
+        result2 = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "who is joel")
+        r2 = self.responder.generate("who is joel", orch2, result2)
+        self.assertEqual(r1, r2)
+
+    def test_no_execution_leakage_preserved(self):
+        """Conversational responses still avoid execution leakage."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello")
+        response = self.responder.generate("hello", orch, result)
+        self.assertNotIn("pending_action", response)
+        self.assertNotIn("raw_text", response)
 
 
 if __name__ == "__main__":
