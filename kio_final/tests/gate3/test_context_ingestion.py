@@ -4,7 +4,10 @@ import tempfile
 import os
 import json
 import base64
-from mini_kio.context.context_models import ContextType, ContextEntry, ContextSnapshot, ImportEntry, IngestResult
+from mini_kio.context.context_models import (
+    ContextType, ContextEntry, ContextSnapshot, ImportEntry, IngestResult,
+    ContextPartition, AssembledContext, CONTEXT_TYPE_TO_PARTITION,
+)
 from mini_kio.context.context_manager import ContextManager
 from mini_kio.context.context_sanitizer import ContextSanitizer
 from mini_kio.context.export_parser import load_import, extract_entries, normalize_entries
@@ -745,6 +748,422 @@ class TestContextOldestFirstEviction(unittest.TestCase):
         self.assertEqual(snapshot.count, 2)
         self.assertEqual(snapshot.entries[0].content, "batch 9")
         self.assertEqual(snapshot.entries[1].content, "batch 8")
+
+
+class TestContextPartitionManagement(unittest.TestCase):
+    """Memory partitioning — independent partitions with bounded limits."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+
+    def test_add_entry_routes_to_correct_partition(self):
+        self.mgr.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("system", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.add_entry("temp", ContextType.TEMPORARY)
+        conv = self.mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        sys = self.mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        temp = self.mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(conv.count, 1)
+        self.assertEqual(sys.count, 1)
+        self.assertEqual(temp.count, 1)
+
+    def test_session_clear_does_not_affect_system(self):
+        self.mgr.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("sys msg", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.clear_session()
+        sys = self.mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        self.assertEqual(sys.count, 1)
+
+    def test_session_clear_affects_temporary(self):
+        self.mgr.add_temporary_entry("temp note")
+        self.mgr.clear_session()
+        temp = self.mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(temp.count, 0)
+
+    def test_clear_imported_does_not_affect_conversational(self):
+        self.mgr.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "imported", "source": "test"},
+        ])
+        self.mgr.clear_imported()
+        conv = self.mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        self.assertEqual(conv.count, 1)
+
+    def test_system_partition_immutable_by_imports(self):
+        self.mgr.add_entry("system info", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "imported data", "source": "test"},
+        ])
+        sys = self.mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        self.assertEqual(sys.count, 1)
+        self.assertEqual(sys.entries[0].content, "system info")
+
+    def test_temporary_prunes_on_access(self):
+        mgr = ContextManager()
+        mgr.TEMP_TTL_S = 0.05
+        mgr.add_temporary_entry("will expire")
+        time.sleep(0.06)
+        temp = mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(temp.count, 0)
+
+    def test_temporary_eviction(self):
+        self.mgr.MAX_TEMP_ENTRIES = 3
+        for i in range(5):
+            self.mgr.add_temporary_entry(f"temp {i}")
+        temp = self.mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(temp.count, 3)
+        contents = [e.content for e in temp.entries]
+        self.assertIn("temp 4", contents)
+        self.assertIn("temp 3", contents)
+        self.assertIn("temp 2", contents)
+
+    def test_add_temporary_entry_method(self):
+        self.mgr.add_temporary_entry("quick note", tags=["urgent"])
+        temp = self.mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=10)
+        self.assertEqual(temp.count, 1)
+        self.assertEqual(temp.entries[0].content, "quick note")
+        self.assertIn("urgent", temp.entries[0].tags)
+
+    def test_partition_isolation_independent_bounds(self):
+        mgr = ContextManager()
+        mgr.MAX_ENTRIES = 3
+        mgr.MAX_TEMP_ENTRIES = 3
+        mgr.MAX_SYSTEM_ENTRIES = 3
+        for i in range(10):
+            mgr.add_entry(f"convo {i}", ContextType.CONVERSATIONAL)
+            mgr.add_entry(f"sys {i}", ContextType.SYSTEM_FEEDBACK)
+            mgr.add_temporary_entry(f"temp {i}")
+        self.assertEqual(mgr.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=20).count, 3)
+        self.assertEqual(mgr.get_partition_snapshot(ContextPartition.SYSTEM, limit=20).count, 3)
+        self.assertEqual(mgr.get_partition_snapshot(ContextPartition.TEMPORARY, limit=20).count, 3)
+
+    def test_partition_precedence_constant(self):
+        from mini_kio.context.context_models import PARTITION_PRECEDENCE
+        self.assertLess(PARTITION_PRECEDENCE[ContextPartition.SYSTEM], PARTITION_PRECEDENCE[ContextPartition.CONVERSATIONAL])
+        self.assertLess(PARTITION_PRECEDENCE[ContextPartition.CONVERSATIONAL], PARTITION_PRECEDENCE[ContextPartition.IMPORTED])
+        self.assertLess(PARTITION_PRECEDENCE[ContextPartition.IMPORTED], PARTITION_PRECEDENCE[ContextPartition.TEMPORARY])
+
+
+class TestAssembleContextWindow(unittest.TestCase):
+    """Retrieval shaping — assemble_context_window with budgeting and formatting."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.mgr.add_entry("hello world", ContextType.CONVERSATIONAL)
+        time.sleep(0.01)
+        self.mgr.add_entry("how are you", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("system boot", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.add_temporary_entry("temp note")
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "past message", "source": "test"},
+        ])
+
+    def test_returns_assembled_context(self):
+        result = self.mgr.assemble_context_window()
+        self.assertIsInstance(result, AssembledContext)
+        self.assertIsInstance(result.text, str)
+
+    def test_partition_order_in_output(self):
+        result = self.mgr.assemble_context_window(limit=20)
+        self.assertIn("[system]", result.text)
+        self.assertIn("[conversational]", result.text)
+        self.assertIn("[imported]", result.text)
+        self.assertIn("[temporary]", result.text)
+
+    def test_limit_enforced(self):
+        result = self.mgr.assemble_context_window(limit=2)
+        lines = result.text.strip().split("\n")
+        self.assertLessEqual(len(lines), 2)
+
+    def test_max_total_chars_enforced(self):
+        result = self.mgr.assemble_context_window(limit=20, max_total_chars=10)
+        self.assertLessEqual(result.total_chars, 10)
+
+    def test_truncated_flag(self):
+        tiny = self.mgr.assemble_context_window(limit=20, max_total_chars=5)
+        self.assertTrue(tiny.truncated)
+        large = self.mgr.assemble_context_window(limit=20, max_total_chars=100000)
+        self.assertFalse(large.truncated)
+
+    def test_deterministic_across_calls(self):
+        r1 = self.mgr.assemble_context_window()
+        r2 = self.mgr.assemble_context_window()
+        self.assertEqual(r1.text, r2.text)
+        self.assertEqual(r1.entry_count, r2.entry_count)
+
+    def test_system_appears_first(self):
+        result = self.mgr.assemble_context_window(limit=20)
+        lines = result.text.strip().split("\n")
+        self.assertTrue(lines[0].startswith("[system]"))
+
+    def test_temporary_appears_last(self):
+        result = self.mgr.assemble_context_window(limit=20)
+        lines = result.text.strip().split("\n")
+        last_line = lines[-1]
+        self.assertTrue(last_line.startswith("[temporary]"))
+
+    def test_empty_context(self):
+        mgr = ContextManager()
+        result = mgr.assemble_context_window()
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.entry_count, 0)
+        self.assertFalse(result.truncated)
+
+    def test_custom_partition_selection(self):
+        result = self.mgr.assemble_context_window(partitions=["conversational", "imported"])
+        self.assertIn("[conversational]", result.text)
+        self.assertIn("[imported]", result.text)
+        self.assertNotIn("[system]", result.text)
+        self.assertNotIn("[temporary]", result.text)
+
+    def test_timestamp_formatting(self):
+        result = self.mgr.assemble_context_window(include_timestamps=True, limit=1)
+        self.assertRegex(result.text, r"\[\w+\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}: ")
+
+    def test_no_markdown_execution_in_output(self):
+        result = self.mgr.assemble_context_window()
+        self.assertNotIn("```", result.text)
+
+    def test_entry_count_tracks_selected(self):
+        result = self.mgr.assemble_context_window(limit=3)
+        self.assertEqual(result.entry_count, 3)
+        self.assertLessEqual(len(result.text.strip().split("\n")), 3)
+
+    def test_budget_clipping_consistency(self):
+        r1 = self.mgr.assemble_context_window(limit=20, max_total_chars=50)
+        r2 = self.mgr.assemble_context_window(limit=20, max_total_chars=50)
+        self.assertEqual(r1.text, r2.text)
+
+    def test_repeated_retrieval_stability(self):
+        for _ in range(5):
+            r = self.mgr.assemble_context_window()
+            self.assertGreater(len(r.text), 0)
+
+    def test_source_labels_preserved(self):
+        result = self.mgr.assemble_context_window()
+        for label in ["[system]", "[conversational]", "[imported]", "[temporary]"]:
+            if label in result.text:
+                self.assertIn(label, result.text)
+
+
+class TestContextPersistencePartitions(unittest.TestCase):
+    """Partition-safe persistence — v2 save/load, backward compat, malformed rejection."""
+
+    def setUp(self):
+        self.manager = ContextManager()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _path(self, name):
+        return os.path.join(self.tmpdir, name)
+
+    def test_v2_save_and_load_roundtrip(self):
+        self.manager.add_entry("convo", ContextType.CONVERSATIONAL)
+        self.manager.add_entry("sys", ContextType.SYSTEM_FEEDBACK)
+        self.manager.add_temporary_entry("temp")
+        self.manager.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "import", "source": "test"},
+        ])
+        path = self._path("v2.json")
+        self.manager.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        for p in ContextPartition:
+            orig = self.manager.get_partition_snapshot(p, limit=100)
+            loaded = fresh.get_partition_snapshot(p, limit=100)
+            self.assertEqual(orig.count, loaded.count, f"Mismatch for partition {p}")
+
+    def test_v2_preserves_entry_content_per_partition(self):
+        self.manager.add_entry("convo msg", ContextType.CONVERSATIONAL, tags=["tag1"])
+        self.manager.add_entry("sys msg", ContextType.SYSTEM_FEEDBACK, metadata={"key": "val"})
+        path = self._path("v2_content.json")
+        self.manager.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        conv = fresh.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        self.assertEqual(conv.entries[0].content, "convo msg")
+        self.assertEqual(conv.entries[0].tags, ["tag1"])
+        sys = fresh.get_partition_snapshot(ContextPartition.SYSTEM, limit=10)
+        self.assertEqual(sys.entries[0].content, "sys msg")
+        self.assertEqual(sys.entries[0].metadata, {"key": "val"})
+
+    def test_v1_backward_compat(self):
+        path = self._path("v1.json")
+        v1_data = {
+            "version": 1,
+            "entries": [{"content": "old convo", "entry_type": "conversational", "timestamp": time.time(), "sequence": 1}],
+            "imported_entries": [{"content": "old import", "entry_type": "imported_history", "timestamp": 100.0, "sequence": 1, "tags": ["user", "test"], "metadata": {"role": "user", "source": "test"}}],
+            "count": 1,
+            "imported_count": 1,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(v1_data, f)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        self.assertEqual(
+            fresh.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10).count, 1
+        )
+        self.assertEqual(
+            fresh.get_partition_snapshot(ContextPartition.IMPORTED, limit=10).count, 1
+        )
+
+    def test_unknown_partition_rejected(self):
+        path = self._path("bad_part.json")
+        data = {
+            "version": 2,
+            "partitions": {
+                "conversational": [],
+                "unknown_partition": [{"content": "x", "entry_type": "conversational", "timestamp": 1.0, "sequence": 1}],
+            },
+            "counts": {"conversational": 0, "unknown_partition": 1},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        fresh = ContextManager()
+        with self.assertRaises(ValueError) as ctx:
+            fresh.load_context_snapshot(path)
+        self.assertIn("unknown partition", str(ctx.exception).lower())
+
+    def test_malformed_partition_data_rejected(self):
+        path = self._path("bad_part_data.json")
+        data = {
+            "version": 2,
+            "partitions": {
+                "conversational": "not a list",
+            },
+            "counts": {"conversational": 0},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        fresh = ContextManager()
+        with self.assertRaises(ValueError) as ctx:
+            fresh.load_context_snapshot(path)
+        self.assertIn("must be a list", str(ctx.exception).lower())
+
+    def test_empty_v2_save_load(self):
+        path = self._path("empty_v2.json")
+        self.manager.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        for p in ContextPartition:
+            snap = fresh.get_partition_snapshot(p, limit=10)
+            self.assertEqual(snap.count, 0)
+
+    def test_repeated_v2_save_load_stability(self):
+        self.manager.add_entry("stable", ContextType.CONVERSATIONAL)
+        path = self._path("stable_v2.json")
+        for _ in range(3):
+            self.manager.save_context_snapshot(path)
+            fresh = ContextManager()
+            fresh.load_context_snapshot(path)
+        snap = fresh.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        self.assertEqual(snap.count, 1)
+        self.assertEqual(snap.entries[0].content, "stable")
+
+    def test_v2_missing_partitions_rejected(self):
+        path = self._path("no_parts.json")
+        data = {"version": 2, "counts": {}}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        fresh = ContextManager()
+        with self.assertRaises(ValueError) as ctx:
+            fresh.load_context_snapshot(path)
+        self.assertIn("partitions", str(ctx.exception).lower())
+
+    def test_v2_deterministic_ordering_after_reload(self):
+        self.manager.add_entry("a", ContextType.CONVERSATIONAL)
+        self.manager.add_entry("b", ContextType.CONVERSATIONAL)
+        self.manager.add_entry("c", ContextType.CONVERSATIONAL)
+        path = self._path("order_v2.json")
+        self.manager.save_context_snapshot(path)
+        fresh = ContextManager()
+        fresh.load_context_snapshot(path)
+        snap = fresh.get_partition_snapshot(ContextPartition.CONVERSATIONAL, limit=10)
+        contents = [e.content for e in snap.entries]
+        self.assertEqual(contents, ["c", "b", "a"])
+
+
+class TestContextRetrievalBudgeting(unittest.TestCase):
+    """Retrieval budgeting — deterministic truncation and clipping."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        for i in range(20):
+            self.mgr.add_entry(f"entry number {i}", ContextType.CONVERSATIONAL)
+
+    def test_max_entries_returned_clips(self):
+        result = self.mgr.assemble_context_window(limit=5)
+        self.assertEqual(result.entry_count, 5)
+        lines = result.text.strip().split("\n")
+        self.assertEqual(len(lines), 5)
+
+    def test_max_total_chars_clips_newest_first(self):
+        result = self.mgr.assemble_context_window(limit=20, max_total_chars=200)
+        self.assertLessEqual(result.total_chars, 200)
+        self.assertTrue(result.truncated or result.entry_count <= 20)
+
+    def test_both_limits_combined(self):
+        result = self.mgr.assemble_context_window(limit=3, max_total_chars=50)
+        self.assertLessEqual(result.entry_count, 3)
+        self.assertLessEqual(result.total_chars, 50)
+
+    def test_no_unnecessary_truncation(self):
+        result = self.mgr.assemble_context_window(limit=20, max_total_chars=100000)
+        self.assertFalse(result.truncated)
+
+    def test_zero_limit_returns_empty(self):
+        result = self.mgr.assemble_context_window(limit=0)
+        self.assertEqual(result.entry_count, 0)
+
+    def test_safe_clipping_no_random_ordering(self):
+        results = []
+        for _ in range(3):
+            r = self.mgr.assemble_context_window(limit=5, max_total_chars=100)
+            results.append(r.text)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[1], results[2])
+
+    def test_clipping_newest_entries_preserved(self):
+        result = self.mgr.assemble_context_window(limit=3)
+        self.assertIn("entry number 19", result.text)
+        self.assertIn("entry number 18", result.text)
+        self.assertIn("entry number 17", result.text)
+
+
+class TestContextPartitionOrdering(unittest.TestCase):
+    """Deterministic cross-partition merge ordering."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.mgr.add_entry("convo msg", ContextType.CONVERSATIONAL)
+        self.mgr.add_entry("sys msg", ContextType.SYSTEM_FEEDBACK)
+        self.mgr.add_temporary_entry("temp msg")
+
+    def test_system_before_conversational(self):
+        result = self.mgr.assemble_context_window()
+        lines = result.text.strip().split("\n")
+        sys_idx = next(i for i, l in enumerate(lines) if l.startswith("[system]"))
+        convo_idx = next(i for i, l in enumerate(lines) if l.startswith("[conversational]"))
+        self.assertLess(sys_idx, convo_idx)
+
+    def test_conversational_before_temporary(self):
+        result = self.mgr.assemble_context_window()
+        lines = result.text.strip().split("\n")
+        convo_idx = next(i for i, l in enumerate(lines) if l.startswith("[conversational]"))
+        temp_idx = next(i for i, l in enumerate(lines) if l.startswith("[temporary]"))
+        self.assertLess(convo_idx, temp_idx)
+
+    def test_deterministic_merge_across_calls(self):
+        r1 = self.mgr.assemble_context_window()
+        r2 = self.mgr.assemble_context_window()
+        self.assertEqual(r1.text, r2.text)
+
+    def test_partitions_used_tracks_input(self):
+        result = self.mgr.assemble_context_window(partitions=["system", "temporary"])
+        self.assertEqual(result.partitions_used, ["system", "temporary"])
 
 
 if __name__ == "__main__":
