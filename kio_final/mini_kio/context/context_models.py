@@ -106,3 +106,9 @@ class ProfileSummary:
     entries_count: int
     total_chars: int
     truncated: bool
+
+
+@dataclass(frozen=True)
+class ScoredEntry:
+    entry: ContextEntry
+    score: float

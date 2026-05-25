@@ -6,7 +6,7 @@ import json
 import base64
 from mini_kio.context.context_models import (
     ContextType, ContextEntry, ContextSnapshot, ImportEntry, IngestResult,
-    ContextPartition, AssembledContext, ProfileSummary,
+    ContextPartition, AssembledContext, ProfileSummary, ScoredEntry,
     CONTEXT_TYPE_TO_PARTITION, PROFILE_CATEGORIES,
     MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
 )
@@ -1784,6 +1784,106 @@ class TestProfileSummaryEntryCount(unittest.TestCase):
         mgr.set_profile("identity", "name", "Bob")
         result = mgr.assemble_profile_summary()
         self.assertEqual(result.entries_count, 1)
+
+
+class TestContextSearch(unittest.TestCase):
+    """Deterministic scored retrieval — Gate 4D."""
+
+    def setUp(self):
+        self.mgr = ContextManager()
+        self.mgr.ingest_imported_history([
+            {"timestamp": 100, "role": "user", "text": "I love Python Python programming", "source": "test"},
+            {"timestamp": 200, "role": "user", "text": "JavaScript is also fun", "source": "test"},
+            {"timestamp": 300, "role": "assistant", "text": "Python Python Python for data science", "source": "test"},
+            {"timestamp": 400, "role": "user", "text": "I like Java and Python both", "source": "test"},
+        ])
+
+    def test_single_keyword(self):
+        results = self.mgr.search_imported(["Python"])
+        self.assertEqual(len(results), 3)
+
+    def test_returns_scored_entry(self):
+        results = self.mgr.search_imported(["Python"])
+        self.assertIsInstance(results[0], ScoredEntry)
+        self.assertIsInstance(results[0].entry, ContextEntry)
+        self.assertIsInstance(results[0].score, float)
+
+    def test_and_intersection(self):
+        results = self.mgr.search_imported(["Python", "Java"])
+        self.assertEqual(len(results), 1)
+        self.assertIn("Java", results[0].entry.content)
+
+    def test_and_intersection_no_match(self):
+        results = self.mgr.search_imported(["Python", "Rust"])
+        self.assertEqual(len(results), 0)
+
+    def test_empty_keyword_list(self):
+        results = self.mgr.search_imported([])
+        self.assertEqual(results, [])
+
+    def test_whitespace_keywords_ignored(self):
+        results = self.mgr.search_imported(["  ", "Python"])
+        self.assertEqual(len(results), 3)
+
+    def test_all_whitespace_returns_empty(self):
+        results = self.mgr.search_imported(["   ", ""])
+        self.assertEqual(results, [])
+
+    def test_density_ordering(self):
+        results = self.mgr.search_imported(["Python"])
+        # Entry 3 has "Python Python Python" (3 occurrences), should rank first
+        self.assertIn("data science", results[0].entry.content)
+        # Entry 1 has "Python Python" (2 occurrences), should rank second
+        self.assertIn("programming", results[1].entry.content)
+
+    def test_deterministic_across_calls(self):
+        r1 = self.mgr.search_imported(["Python"])
+        r2 = self.mgr.search_imported(["Python"])
+        self.assertEqual([(s.entry.content, s.score) for s in r1],
+                         [(s.entry.content, s.score) for s in r2])
+
+    def test_limit_enforced(self):
+        results = self.mgr.search_imported(["Python"], limit=1)
+        self.assertEqual(len(results), 1)
+
+    def test_no_match_returns_empty(self):
+        results = self.mgr.search_imported(["Ruby"])
+        self.assertEqual(results, [])
+
+    def test_no_execution_attributes(self):
+        results = self.mgr.search_imported(["Python"])
+        for attr in ["execute", "dispatch", "run", "launch", "route"]:
+            self.assertFalse(hasattr(self.mgr.search_imported, attr))
+        for s in results:
+            self.assertFalse(hasattr(s, "execute"))
+            self.assertFalse(hasattr(s, "dispatch"))
+
+    def test_existing_retrieval_unchanged(self):
+        self.mgr.search_imported(["Python"])
+        snap = self.mgr.get_imported_snapshot(limit=10)
+        self.assertEqual(snap.count, 4)
+        self.assertEqual(self.mgr._imported_entries[0].content, "I love Python Python programming")
+
+    def test_no_side_effects_on_store(self):
+        before = list(self.mgr._imported_entries)
+        self.mgr.search_imported(["Python"])
+        after = list(self.mgr._imported_entries)
+        self.assertEqual(before, after)
+
+    def test_case_insensitive(self):
+        results_lower = self.mgr.search_imported(["python"])
+        results_upper = self.mgr.search_imported(["PYTHON"])
+        self.assertEqual(len(results_lower), len(results_upper))
+        self.assertEqual(results_lower[0].score, results_upper[0].score)
+
+    def test_non_string_keyword_ignored(self):
+        results = self.mgr.search_imported(["Python", 42])
+        self.assertEqual(len(results), 3)
+
+    def test_zero_entries_imported(self):
+        mgr = ContextManager()
+        results = mgr.search_imported(["Python"])
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import os
 from typing import List, Optional, Dict, Any, Tuple
 from .context_models import (
     ContextType, ContextPartition, ContextEntry, ContextSnapshot,
-    AssembledContext, ProfileSummary,
+    AssembledContext, ProfileSummary, ScoredEntry,
     CONTEXT_TYPE_TO_PARTITION, PARTITION_PRECEDENCE,
     PARTITION_NAMES, PROFILE_CATEGORIES,
     MAX_PROFILE_ENTRIES_PER_CATEGORY, MAX_PROFILE_VALUE_LENGTH,
@@ -412,6 +412,33 @@ class ContextManager:
             total_size=total_size,
             count=len(snapshot_entries)
         )
+
+    # ── Scored retrieval ─────────────────────────────────────────────────
+
+    def search_imported(
+        self,
+        keywords: List[str],
+        limit: int = 10,
+    ) -> List[ScoredEntry]:
+        self._prune_partition_expired(ContextPartition.IMPORTED)
+
+        valid_keywords = [kw for kw in keywords if isinstance(kw, str) and kw.strip()]
+        if not valid_keywords:
+            return []
+
+        kw_lower = [kw.lower() for kw in valid_keywords]
+
+        scored: List[ScoredEntry] = []
+        for entry in self._imported_entries:
+            content_lower = entry.content.lower()
+            if not all(kw in content_lower for kw in kw_lower):
+                continue
+            count = sum(content_lower.count(kw) for kw in kw_lower)
+            score = count / max(1, len(entry.content))
+            scored.append(ScoredEntry(entry=entry, score=score))
+
+        scored.sort(key=lambda s: (-s.score, -s.entry.timestamp, -s.entry.sequence))
+        return scored[:limit]
 
     def assemble_context_window(
         self,
