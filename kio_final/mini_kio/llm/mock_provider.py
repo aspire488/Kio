@@ -47,6 +47,18 @@ class MockLLMProvider(LLMProvider):
         if self.mode == "fail":
             raise Exception("Simulated provider failure")
 
+        if self.mode == "non_retryable":
+            return LLMResponse(
+                False, LLMStatus.ERROR, "",
+                error_code="GEMINI_QUOTA_EXCEEDED", provider=self.provider_name
+            )
+
+        if self.mode == "invalid_key":
+            return LLMResponse(
+                False, LLMStatus.ERROR, "",
+                error_code="INVALID_API_KEY", provider=self.provider_name
+            )
+
         if self.mode == "empty":
             return LLMResponse(True, LLMStatus.SUCCESS, "", provider=self.provider_name)
 

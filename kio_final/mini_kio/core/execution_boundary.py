@@ -13,6 +13,7 @@ HARDENED EXECUTION BOUNDARY CONTRACT:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Callable
 
@@ -339,6 +340,9 @@ def _resolve_registry_key(name: str) -> str | None:
 
 
 def _resolve_live_registration_pid(name: str, fallback_pid: int | None) -> int | None:
+    """Verify fallback_pid is alive.  No psutil-wide scanning — only confirm
+    the PID returned at launch time.  Returns None if unverifiable.
+    """
     if fallback_pid is not None:
         try:
             import psutil
@@ -348,41 +352,7 @@ def _resolve_live_registration_pid(name: str, fallback_pid: int | None) -> int |
                 return int(fallback_pid)
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
             pass
-
-    registry_key = _resolve_registry_key(name)
-    info = APP_REGISTRY.get(registry_key or "")
-    if not info:
-        return fallback_pid
-
-    process_names: set[str] = set()
-    proc_name = str(info.get("process") or "").lower()
-    if proc_name:
-        process_names.add(proc_name if proc_name.endswith(".exe") else f"{proc_name}.exe")
-    for package_name in info.get("uwp_packages", []):
-        normalized = str(package_name).lower()
-        if normalized:
-            process_names.add(normalized if normalized.endswith(".exe") else f"{normalized}.exe")
-    if not process_names:
-        return fallback_pid
-
-    try:
-        import psutil
-
-        matches: list[tuple[float, int]] = []
-        for proc in psutil.process_iter(['pid', 'name', 'create_time']):
-            try:
-                proc_name = (proc.info.get("name") or "").lower()
-                if proc_name not in process_names:
-                    continue
-                matches.append((float(proc.info.get("create_time") or 0.0), int(proc.info["pid"])))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-                continue
-        if not matches:
-            return fallback_pid
-        matches.sort()
-        return matches[-1][1]
-    except Exception:
-        return fallback_pid
+    return None
 
 
 def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
@@ -541,6 +511,15 @@ def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
         return True, ""
 
     return True, ""
+
+
+_TEST_MODE = None
+
+def _in_test_mode() -> bool:
+    global _TEST_MODE
+    if _TEST_MODE is None:
+        _TEST_MODE = os.environ.get("KIO_TEST_MODE") == "1"
+    return _TEST_MODE
 
 
 def execute_action(action: str, target: str = "") -> dict[str, Any]:
@@ -727,6 +706,20 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             },
         )
         return _apply_verification(blocked_result)
+
+    if _in_test_mode():
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return _apply_verification({
+            "success": True,
+            "action": action,
+            "target": target,
+            "category": category,
+            "message": f"[TEST MODE] {action} blocked during testing",
+            "blocked": True,
+            "elapsed_ms": elapsed_ms,
+            "test_mode": True,
+            "execution_id": execution_id,
+        })
 
     try:
         handler_name = f"{handler.__module__}.{handler.__name__}"

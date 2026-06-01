@@ -19,6 +19,21 @@ class ProviderHealthStatus(Enum):
     COOLDOWN = "cooldown"
 
 
+class ProviderState(Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    COOLDOWN = "cooldown"
+    DEAD = "dead"
+
+
+@dataclass
+class DiagnosticEvent:
+    event: str
+    provider: str
+    detail: str = ""
+    timestamp: float = 0.0
+
+
 @dataclass
 class ProviderMetrics:
     total_requests: int = 0

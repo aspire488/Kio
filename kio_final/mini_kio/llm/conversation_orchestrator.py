@@ -44,13 +44,32 @@ class ConversationOrchestrator:
                 errors=primary.validation_errors
             )
 
+        # Gate 5: Preserve educational state and prevent downgrade
+        intent_type = primary.intent_type
+        if classification.educational_state_preserved and intent_type == IntentType.CONVERSATIONAL:
+            # This is a potential downgrade. In Gate 5, we keep it as educational
+            # if we are in an active lesson and the input is conversational.
+            # However, IntentClassifier already did its job.
+            # We just ensure the response layer knows about it.
+            pass
+
         # 3. Routing based on intent type
-        if primary.intent_type == IntentType.CONVERSATIONAL or primary.intent_type == IntentType.INFORMATIONAL:
+        if intent_type == IntentType.CONVERSATIONAL or intent_type == IntentType.INFORMATIONAL or intent_type == IntentType.EDUCATIONAL:
             self._reset_state()
             return OrchestrationResponse(
                 state=OrchestrationState.CONVERSATIONAL,
                 response_text=primary.raw_text, # In real impl, this would be the LLM's conversational output
-                intent_type=primary.intent_type
+                intent_type=intent_type,
+                metadata={
+                    "educational_state_preserved": classification.educational_state_preserved,
+                    "continuity_resume_used": classification.continuity_resume_used,
+                    "authority_override_used": classification.authority_override_used,
+                    "sanitize_applied": classification.sanitize_applied,
+                    "emoji_sanitize_applied": classification.emoji_sanitize_applied,
+                    "typo_normalization_applied": classification.typo_normalization_applied,
+                    "intent_downgrade_blocked": classification.intent_downgrade_blocked,
+                    "browser_canonicalization_used": classification.browser_canonicalization_used
+                }
             )
 
         if primary.intent_type == IntentType.EXECUTABLE:

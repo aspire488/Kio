@@ -27,12 +27,23 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(name)s: %(message)s",
-)
+_DIAGNOSTICS_INITIALIZED = False
+
+def init_diagnostics():
+    global _DIAGNOSTICS_INITIALIZED
+    if not _DIAGNOSTICS_INITIALIZED:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="[%(asctime)s] %(name)s: %(message)s",
+        )
+        _DIAGNOSTICS_INITIALIZED = True
+
 logger = logging.getLogger(__name__)
+
+def log_diagnostic(event: str, data: Any = None) -> None:
+    """Log a diagnostic event for Gate 5 consolidation."""
+    payload = {"event": event, "timestamp": time.time(), "data": data}
+    logger.info(f"[DIAGNOSTIC] {json.dumps(payload, default=str)}")
 
 # Platform detection
 _IS_WINDOWS = platform.system() == "Windows"
@@ -262,6 +273,7 @@ def _test_command_parsing() -> dict:
 
 def run_diagnostics() -> dict:
     """Run the full diagnostic suite."""
+    init_diagnostics()
     print("=" * 60)
     print("KIO DIAGNOSTICS")
     print("=" * 60)
@@ -368,4 +380,5 @@ def _write_results_log(results: list) -> None:
 
 
 if __name__ == "__main__":
+    init_diagnostics()
     run_diagnostics()

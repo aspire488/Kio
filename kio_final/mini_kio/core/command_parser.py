@@ -242,11 +242,11 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
                     }
                     url = urls.get(webapp)
                     if url:
-                        return {"action": "execute_capability", "target": f"{browser}::open_url::{url}"}
+                        return {"action": "execute_capability", "target": f"{browser}::open_url::{url}::{webapp}"}
 
                 normalized_url = _normalize_browser_web_target(webapp)
                 if normalized_url and browser in known_browsers:
-                    return {"action": "execute_capability", "target": f"{browser}::open_url::{normalized_url}"}
+                    return {"action": "execute_capability", "target": f"{browser}::open_url::{normalized_url}::{webapp}"}
 
         if action == "open":
             # Check if target contains folder keywords

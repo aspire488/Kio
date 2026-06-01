@@ -119,7 +119,7 @@ def _normalize_explicit_web_target(target: str) -> str | None:
 def _resolve_contextual_references(command: str) -> str:
     """
     Surgical short-context resolver.
-    Handles 'it' (last target), 'that' (last target), 'again' (last action).
+    Handles 'it' (last target), 'that' (last target), 'this' (last target), 'again' (last action).
     """
     from mini_kio.core.runtime import get_last_successful_interaction
 
@@ -142,13 +142,21 @@ def _resolve_contextual_references(command: str) -> str:
             _log_route("context_resolve", original=command, resolved=resolved)
             return resolved
 
-    # Handle "it" and "that"
-    if re.search(r"\b(it|that)\b", lower):
+    # Handle "it", "that", "this"
+    if re.search(r"\b(it|that|this)\b", lower):
+        # Gate 5.1: Resolve capability registry FIRST for browser sessions
+        from mini_kio.core.routing_utils import get_latest_capability
+        cap = get_latest_capability()
+        if cap and cap.get("active"):
+            target = cap["canonical_target"]
+            resolved = re.sub(r"\b(it|that|this)\b", target, command, flags=re.IGNORECASE)
+            _log_route("context_resolve", original=command, resolved=resolved, source="capability")
+            return resolved.strip()
         last = get_last_successful_interaction(must_have_target=True)
         if last:
             target = str(last.get("target", ""))
-            resolved = re.sub(r"\b(it|that)\b", target, command, flags=re.IGNORECASE)
-            _log_route("context_resolve", original=command, resolved=resolved)
+            resolved = re.sub(r"\b(it|that|this)\b", target, command, flags=re.IGNORECASE)
+            _log_route("context_resolve", original=command, resolved=resolved, source="runtime")
             return resolved.strip()
 
     return command
@@ -165,6 +173,13 @@ def handle_command(command: str) -> dict:
     """
     command = command.strip()
 
+    if not command:
+        return {"success": True, "message": ""}
+
+    # Gate 5: Emoji sanitization before any parsing
+    from mini_kio.llm.input_normalizer import InputNormalizer
+    command = InputNormalizer.strip_emoji(command)
+
     # Phase 1: Contextual Resolution
     command = _resolve_contextual_references(command)
 
@@ -172,10 +187,8 @@ def handle_command(command: str) -> dict:
     command = _apply_aliases(command)
     logger.info(f"[KIO] handle_command: {command!r}")
 
-    if not command:
-        return {"success": False, "message": "Empty command"}
-
     lower = command.lower()
+    lower_clean = lower.strip(".,!?;:")
     lower = _normalize_connectors(lower)
 
     # Canonicalize browser prepositions before deterministic browser routing.
@@ -195,41 +208,55 @@ def handle_command(command: str) -> dict:
         return {"success": False, "message": "Error: Forbidden system target blocked by security policy."}
 
     # ── GREETINGS ─────────────────────────────────────────────────────────
-    if lower == "hello":
-        return {"success": True, "message": "Hello!"}
-    if lower in ("hi", "hey"):
-        return {"success": True, "message": "Hey!"}
-    if lower in ("yo", "wassup", "what's up", "whats up"):
-        return {"success": True, "message": "KIO here. Ask me anything."}
-    if lower in ("how are you", "how are you doing"):
-        return {"success": True, "message": "Doing good! What can I do?"}
-    if lower in ("bye", "bue"):
-        return {"success": True, "message": "See you!"}
-    if lower == "okay":
-        return {"success": True, "message": "Got it."}
-    if lower == "bruh":
+    if lower_clean == "hello":
+        return {"success": True, "message": "Hello."}
+    if lower_clean in ("hi", "hey"):
+        return {"success": True, "message": "Hi there."}
+    if lower_clean in ("yo", "wassup", "what's up", "whats up"):
+        return {"success": True, "message": "KIO here."}
+    if lower_clean in ("how are you", "how are you doing"):
+        return {"success": True, "message": "Operational."}
+    if lower_clean in ("bye", "bue"):
+        return {"success": True, "message": "Later."}
+    if lower_clean == "okay":
+        return {"success": True, "message": "Ok."}
+    if lower_clean == "bruh":
         return {"success": True, "message": "..."}
 
-    # ── DETERMINISTIC RESPONSES ───────────────────────────────────────────
-    if lower in ("who are you", "what are you", "what is kio"):
-        return {"success": True, "message": "I am KIO, a lightweight local AI assistant created by Joel."}
+    # ── DETERMINISTIC RESPONSES (Identity BUG 1) ─────────────────────────
+    if lower_clean in ("who are you", "what are you", "what exactly are you", "identify yourself", "introduce yourself", "what is kio"):
+        return {"success": True, "message": "I am KIO — Kernel for Intelligent Orchestration. A personal operating companion created by Joel."}
     
-    if lower in ("who made you", "who created you", "who is your creator", "who built you", "who created kio", "who made u", "who built u"):
-        return {"success": True, "message": "I was created by Joel."}
+    if lower_clean in ("who made you", "who created you", "who is your creator", "who built you", "who created kio", "who made u", "who built u"):
+        return {"success": True, "message": "Joel built KIO."}
 
-    if lower in ("who is joel", "who's joel"):
+    if lower_clean == "why were you created":
+        return {"success": True, "message": "KIO was built as a personal operating companion focused on automation, orchestration and assistance."}
+
+    if lower_clean in ("who is joel", "who's joel"):
         return {"success": True, "message": "Joel is the creator of KIO."}
 
-    if lower in ("what can you do", "what are your features", "what can u do"):
+    if lower_clean in ("what can you do", "what are your features", "what can u do"):
         return {
             "success": True,
             "message": (
-                "KIO can: open/close apps, search the web, play YouTube, "
-                "manage files, and execute multi-step automation commands."
+                "I can open and close applications, search Google and YouTube, "
+                "play media, open folders, and execute multi-step commands."
+            )
+        }
+
+    if lower_clean in ("what are your limitations", "what are u limited to"):
+        return {
+            "success": True,
+            "message": (
+                "I operate within the capabilities available to the current runtime.\n\n"
+                "I cannot access systems, accounts or information "
+                "that have not been made available to me."
             )
         }
 
     try:
+
         # ── MULTI-STEP ────────────────────────────────────────────────────────
         if is_multi_step(lower):
             _log_route("route", intent="multi_step", text_len=len(command))
@@ -258,6 +285,15 @@ def handle_command(command: str) -> dict:
         # ── SEARCH ────────────────────────────────────────────────────────────
         if lower.startswith("search "):
             query = command[7:].strip()
+            # Strip leading "for " — handles "search for X" → "X"
+            if query.lower().startswith("for "):
+                query = query[4:].strip()
+            # Handle "search google for X" → search_web with X
+            google_for_match = re.match(r"^google\s+for\s+(.+)$", query, re.IGNORECASE)
+            if google_for_match:
+                clean_query = google_for_match.group(1).strip()
+                _log_route("route", intent="search", query=clean_query)
+                return execute_action("search_web", clean_query)
             for sep in [" in ", " on ", " using "]:
                 if sep in query:
                     parts = query.rsplit(sep, 1)
@@ -269,6 +305,9 @@ def handle_command(command: str) -> dict:
                     if target_app in ("chrome", "edge", "firefox", "brave", "comet"):
                         _log_route("route", intent="capability", app=target_app, cap="search")
                         return execute_action("execute_capability", f"{target_app}::search::{clean_query}")
+                    if target_app == "google":
+                        _log_route("route", intent="search", query=clean_query)
+                        return execute_action("search_web", clean_query)
             
             # Handle "search youtube X" swallow fix
             if query.lower().startswith("youtube "):
@@ -290,7 +329,7 @@ def handle_command(command: str) -> dict:
             # Browser normalization failures must never fall through into native execution.
             if normalized_url is not None:
                 _log_route("route", intent="capability", app=browser, cap="open_url", target=normalized_url, route_type="explicit_domain_or_path")
-                return execute_action("execute_capability", f"{browser}::open_url::{normalized_url}")
+                return execute_action("execute_capability", f"{browser}::open_url::{normalized_url}::{webapp}")
             return {"success": False, "message": "Invalid browser web target."}
 
         # ── OPEN ──────────────────────────────────────────────────────────────
@@ -306,12 +345,40 @@ def handle_command(command: str) -> dict:
                 _log_route("route", intent="open_folder", target=folder)
                 return execute_action("open_folder", folder)
 
-            _log_route("route", intent="open_app", target=target)
-            return execute_action("open_app", target)
+            # Centralized Native/Browser Routing
+            from mini_kio.core.routing_utils import get_browser_routing
+            route_info = get_browser_routing(target)
+            
+            _log_route("route", intent=route_info["route_type"], target=target, action=route_info["action"])
+            
+            if route_info["route_type"] == "native":
+                from mini_kio.core.kio_diagnostics import log_diagnostic
+                log_diagnostic("native_app_route_used", {"target": target})
+            elif route_info["route_type"] == "browser_fallback":
+                from mini_kio.core.kio_diagnostics import log_diagnostic
+                log_diagnostic("browser_fallback_used", {"target": target, "browser": route_info.get("browser")})
+
+            return execute_action(route_info["action"], route_info["target"])
 
         # ── CLOSE ─────────────────────────────────────────────────────────────
         if lower.startswith("close "):
             target = command[6:].strip()
+            # Gate 5.1: Check capability registry FIRST for browser session close
+            from mini_kio.core.routing_utils import resolve_capability_for_close, deactivate_capability, close_browser_capability
+            cap_info = resolve_capability_for_close(target)
+            if cap_info and cap_info.get("active"):
+                close_browser_capability(cap_info)
+                deactivate_capability(target)
+                capability_name = cap_info.get("canonical_target", target).capitalize()
+                _log_route("route", intent="close_capability", target=target, capability_id=cap_info.get("capability_id"))
+                return {
+                    "success": True,
+                    "message": f"Closed the {capability_name} session.",
+                    "action": "close_app",
+                    "target": target,
+                    "capability_closed": True,
+                    "capability_name": capability_name,
+                }
             _log_route("route", intent="close_app", target=target)
             return execute_action("close_app", target)
 
@@ -359,6 +426,31 @@ def handle_command(command: str) -> dict:
         # ── UTILITY ───────────────────────────────────────────────────────────
         if lower == "ping":
             return {"success": True, "message": "Here."}
+
+        # ── TELEMETRY ROUTING ────────────────────────────────────────────────
+        if any(x in lower for x in ("uptime", "how long have you been running")):
+            from mini_kio.core.runtime import get_runtime_snapshot
+            snap = get_runtime_snapshot()
+            uptime_s = snap.get("uptime_ms", 0) // 1000
+            if uptime_s > 3600:
+                h = uptime_s // 3600
+                m = (uptime_s % 3600) // 60
+                msg = f"Uptime: {h}h {m}m."
+            elif uptime_s > 60:
+                m = uptime_s // 60
+                msg = f"Uptime: {m}m."
+            else:
+                msg = f"Uptime: {uptime_s}s."
+            return {"success": True, "message": msg}
+
+        if any(x in lower for x in ("ram usage", "memory usage", "how much ram")):
+            from mini_kio.core.runtime import get_runtime_snapshot
+            snap = get_runtime_snapshot()
+            ram = snap.get("ram_usage_mb", 0)
+            return {"success": True, "message": f"Current RAM usage: {ram}MB."}
+
+        if any(x in lower for x in ("cpu", "processor")):
+            return {"success": True, "message": "CPU metrics are currently unavailable."}
 
         if lower == "status":
             from mini_kio.core.runtime import get_runtime, get_runtime_snapshot, get_runtime_health_score, get_runtime_integrity_snapshot
@@ -520,16 +612,7 @@ def route(text: str, user_id: int = 0) -> str:
 # AI / Knowledge fallback
 # ---------------------------------------------------------------------------
 
-# BUG-04 FIX: Added "what are your features" to knowledge base.
 _KNOWLEDGE_BASE: dict[str, str] = {
-    "who created you":          "I am KIO, a lightweight AI assistant created by Joel.",
-    "what are you":             "I am KIO, a lightweight AI assistant created by Joel.",
-    "what is kio":              "KIO is a lightweight desktop AI assistant that can open apps, search the web, play YouTube videos, and more.",
-    "what are your features":   (
-        "KIO can: open/close applications, search Google, play YouTube videos, "
-        "open folders, perform multi-step commands (e.g. 'open chrome and search python'), "
-        "and answer general questions via AI fallback."
-    ),
     "who is monkey d luffy":    "Monkey D. Luffy is the main protagonist of the One Piece manga/anime by Eiichiro Oda.",
     "what is one piece":        "One Piece is a popular Japanese manga and anime series created by Eiichiro Oda.",
     "explain c programming":    "C is a general-purpose, low-level programming language widely used for systems programming, embedded systems, and performance-critical applications.",
@@ -563,8 +646,8 @@ def _ai_fallback(query: str) -> dict:
     return {
         "success": False,
         "message": (
-            f"I'm not sure how to '{query}'. "
-            "I can open apps, search the web, or play media. Try 'help' for examples."
+            f"Cannot process '{query}'. "
+            "I can open apps, search the web, or play media."
         ),
         "_gate3_eligible": True,
     }

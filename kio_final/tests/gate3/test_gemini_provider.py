@@ -168,12 +168,12 @@ class TestIntentClassifierBroadened:
         result = c.classify("can u control my computer")
         assert result.primary_intent.intent_type in (IntentType.INFORMATIONAL, IntentType.CONVERSATIONAL)
 
-    def test_explain_is_informational(self):
+    def test_explain_is_educational(self):
         from mini_kio.llm.intent_classifier import IntentClassifier
         from mini_kio.llm.intent_models import IntentType
         c = IntentClassifier()
         result = c.classify("explain quantum physics")
-        assert result.primary_intent.intent_type == IntentType.INFORMATIONAL
+        assert result.primary_intent.intent_type == IntentType.EDUCATIONAL
 
     def test_what_do_you_think_is_informational(self):
         from mini_kio.llm.intent_classifier import IntentClassifier
@@ -217,12 +217,12 @@ class TestIntentClassifierBroadened:
         result = c.classify("search python")
         assert result.primary_intent.intent_type == IntentType.EXECUTABLE
 
-    def test_how_is_informational(self):
+    def test_how_is_educational(self):
         from mini_kio.llm.intent_classifier import IntentClassifier
         from mini_kio.llm.intent_models import IntentType
         c = IntentClassifier()
         result = c.classify("how does rust work")
-        assert result.primary_intent.intent_type == IntentType.INFORMATIONAL
+        assert result.primary_intent.intent_type == IntentType.EDUCATIONAL
 
     def test_meaning_of_is_informational(self):
         from mini_kio.llm.intent_classifier import IntentClassifier
@@ -250,26 +250,15 @@ class TestGeminiAsyncSafe:
 
     def test_sanitization_still_applied_on_mocked_success(self, monkeypatch):
         """Even with mocked success, sanitization strips claims."""
-        # Reset the singleton for the test
-        import mini_kio.core.llm_router
-        monkeypatch.setattr(mini_kio.core.llm_router, "_GATEWAY", None)
-
         monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
-        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr("mini_kio.core.config.FREELLMAPI_ENABLED", False)
 
-        mock_resp = LLMResponse(
-            success=True,
-            content="I opened the file for you. That's a great question!",
-            status=LLMStatus.SUCCESS,
-            provider="gemini"
-        )
-
-        async def mock_generate(*args, **kwargs):
-            return mock_resp
+        async def mock_ask_llm(*args, **kwargs):
+            return "I opened the file for you. That's a great question!"
 
         monkeypatch.setattr(
-            "mini_kio.llm.gemini_provider.GeminiProvider.generate",
-            mock_generate,
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
         )
         result = _ask_gemini("test")
         assert result is not None
@@ -278,53 +267,30 @@ class TestGeminiAsyncSafe:
 
     def test_empty_response_from_gemini_falls_back(self, monkeypatch):
         """Gemini returning empty content triggers deterministic fallback."""
-        # Reset the singleton for the test
-        import mini_kio.core.llm_router
-        monkeypatch.setattr(mini_kio.core.llm_router, "_GATEWAY", None)
-
         monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
-        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr("mini_kio.core.config.FREELLMAPI_ENABLED", False)
 
-        mock_resp = LLMResponse(
-            success=True,
-            content="",
-            status=LLMStatus.SUCCESS,
-            provider="gemini"
-        )
-
-        async def mock_generate(*args, **kwargs):
-            return mock_resp
+        async def mock_ask_llm(*args, **kwargs):
+            return ""
 
         monkeypatch.setattr(
-            "mini_kio.llm.gemini_provider.GeminiProvider.generate",
-            mock_generate,
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
         )
         result = _ask_gemini("test")
         assert result is None
 
     def test_failed_response_from_gemini_falls_back(self, monkeypatch):
         """Gemini returning failed response triggers deterministic fallback."""
-        # Reset the singleton for the test
-        import mini_kio.core.llm_router
-        monkeypatch.setattr(mini_kio.core.llm_router, "_GATEWAY", None)
-
         monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
-        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+        monkeypatch.setattr("mini_kio.core.config.FREELLMAPI_ENABLED", False)
 
-        mock_resp = LLMResponse(
-            success=False,
-            content="",
-            status=LLMStatus.ERROR,
-            provider="gemini",
-            error_code="MOCKED_FAILURE"
-        )
-
-        async def mock_generate(*args, **kwargs):
-            return mock_resp
+        async def mock_ask_llm(*args, **kwargs):
+            return None
 
         monkeypatch.setattr(
-            "mini_kio.llm.gemini_provider.GeminiProvider.generate",
-            mock_generate,
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
         )
         result = _ask_gemini("test")
         assert result is None
@@ -450,13 +416,165 @@ class TestGeminiExecutableGovernance:
         assert "Shall I proceed" in response or "Shall I" in response
 
 
+class TestLLMResponseContract:
+    """Gate 5D.1 — LLMResponse contract: propagation, validation, error classes."""
+
+    def test_valid_response_propagates_through_gateway(self):
+        """Valid LLMResponse with content passes gateway validation."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=True, status=LLMStatus.SUCCESS,
+            content="Hello from Gemini", provider="gemini",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.SUCCESS
+        assert err is None
+
+    def test_empty_content_downgraded_by_gateway(self):
+        """LLMResponse with empty content but success=True is downgraded."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=True, status=LLMStatus.SUCCESS,
+            content="", provider="gemini",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.MALFORMED
+        assert err == "EMPTY_RESPONSE"
+
+    def test_whitespace_only_downgraded_by_gateway(self):
+        """LLMResponse with whitespace-only content is downgraded."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=True, status=LLMStatus.SUCCESS,
+            content="   ", provider="gemini",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.MALFORMED
+
+    def test_failed_response_rejected_by_gateway(self):
+        """LLMResponse with success=False is rejected by gateway."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=False, status=LLMStatus.ERROR,
+            content="", provider="gemini", error_code="SOME_ERROR",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.ERROR
+        assert err == "SOME_ERROR"
+
+    def test_timeout_response_rejected_by_gateway(self):
+        """Timeout LLMResponse is rejected by gateway."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=False, status=LLMStatus.TIMEOUT,
+            content="", provider="gemini", error_code="GEMINI_TIMEOUT",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.ERROR
+
+    def test_malformed_response_rejected_by_gateway(self):
+        """MALFORMED LLMResponse is rejected by gateway."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = LLMResponse(
+            success=False, status=LLMStatus.MALFORMED,
+            content="", provider="gemini", error_code="GEMINI_EMPTY_RESPONSE",
+        )
+        status, err = gw._validate_response(resp)
+        assert status == LLMStatus.ERROR
+
+    def test_provider_returns_valid_llmresponse_always(self):
+        """GeminiProvider.generate always returns a valid LLMResponse object."""
+        provider = GeminiProvider(api_key="", timeout_s=5, max_tokens=50)
+        import asyncio
+        from mini_kio.llm.models import LLMRequest
+        for prompt in ["hello", "", "   ", "test" * 100]:
+            request = LLMRequest(prompt=prompt, provider="gemini")
+            result = asyncio.run(provider.generate(request))
+            assert isinstance(result, LLMResponse)
+            assert hasattr(result, "success")
+            assert hasattr(result, "status")
+            assert hasattr(result, "content")
+            assert hasattr(result, "provider")
+
+    def test_non_llmresponse_rejected_by_gateway(self):
+        """Gateway validation rejects non-LLMResponse objects."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        status, err = gw._validate_response("not a response")
+        assert status == LLMStatus.ERROR
+        assert err == "NOT_LLM_RESPONSE"
+
+    def test_degraded_response_structure(self):
+        """Degraded response has deterministic format."""
+        from mini_kio.llm.llm_gateway import LLMGateway
+        gw = LLMGateway()
+        resp = gw._deterministic_fallback("TEST_ERROR")
+        assert isinstance(resp, LLMResponse)
+        assert resp.success is False
+        assert resp.status == LLMStatus.DEGRADED
+        assert "unable to connect" in resp.content.lower()
+        assert resp.error_code == "TEST_ERROR"
+
+    def test_ask_gemini_receives_valid_content(self, monkeypatch):
+        """_ask_gemini receives and returns content through full ask_llm path."""
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+
+        async def mock_ask_llm(query, **kwargs):
+            return "That is an interesting question about quantum physics!"
+
+        monkeypatch.setattr(
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
+        )
+        result = _ask_gemini("tell me about quantum physics")
+        assert result is not None
+        assert "interesting question" in result
+
+    def test_ask_gemini_empty_content_falls_back(self, monkeypatch):
+        """_ask_gemini returns None when ask_llm returns empty content."""
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+
+        async def mock_ask_llm(query, **kwargs):
+            return ""
+
+        monkeypatch.setattr(
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
+        )
+        result = _ask_gemini("test")
+        assert result is None
+
+    def test_ask_gemini_malformed_response_falls_back(self, monkeypatch):
+        """_ask_gemini returns None when ask_llm returns None (provider failure)."""
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
+        monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
+
+        async def mock_ask_llm(query, **kwargs):
+            return None
+
+        monkeypatch.setattr(
+            "mini_kio.core.llm_router.ask_llm",
+            mock_ask_llm,
+        )
+        result = _ask_gemini("test")
+        assert result is None
+
+
 class TestGeminiModelConfig:
     """Gate 5D.1 — configurable model name, graceful fallback on invalid model."""
 
     def test_default_model_name(self):
-        """Provider uses default gemini-2.0-flash when no model specified."""
+        """Provider uses default gemini-1.5-flash when no model specified."""
         provider = GeminiProvider(api_key="fake-key", timeout_s=5, max_tokens=50)
-        assert provider._model_name == "gemini-2.0-flash"
+        assert provider._model_name == "gemini-1.5-flash"
 
     def test_custom_model_name(self):
         """Provider accepts custom model name."""
@@ -470,41 +588,27 @@ class TestGeminiModelConfig:
         from mini_kio.core.config import GEMINI_MODEL
         assert GEMINI_MODEL == "gemini-2.0-flash-lite"
 
-    def test_ask_gemini_passes_model_name(self, monkeypatch):
-        """_ask_gemini passes GEMINI_MODEL to GeminiProvider constructor."""
-        captured = {}
+    def test_ask_gemini_routes_through_llm_router(self, monkeypatch):
+        """_ask_gemini routes through llm_router.ask_llm (not direct provider call)."""
+        captured = {"called": False}
 
-        # Reset the singleton for the test
-        import mini_kio.core.llm_router
-        monkeypatch.setattr(mini_kio.core.llm_router, "_GATEWAY", None)
+        async def tracking_ask_llm(query, **kwargs):
+            captured["called"] = True
+            captured["query"] = query
+            return "response"
 
-        original_init = GeminiProvider.__init__
-
-        def tracking_init(self, api_key, timeout_s=15.0, max_tokens=200, model_name="gemini-2.0-flash"):
-            captured["model_name"] = model_name
-            original_init(self, api_key, timeout_s, max_tokens, model_name)
-
-        monkeypatch.setattr("mini_kio.llm.gemini_provider.GeminiProvider.__init__", tracking_init)
+        monkeypatch.setattr(
+            "mini_kio.core.llm_router.ask_llm",
+            tracking_ask_llm,
+        )
         monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)
         monkeypatch.setattr("mini_kio.core.config.GEMINI_API_KEY", "fake-key")
         monkeypatch.setattr("mini_kio.core.config.GEMINI_MODEL", "gemini-2.0-flash")
 
-        class MockSuccessResponse:
-            success = True
-            content = "hello"
-
-        async def mock_generate(*args, **kwargs):
-            return MockSuccessResponse()
-
-        monkeypatch.setattr(
-            "mini_kio.llm.gemini_provider.GeminiProvider.generate",
-            mock_generate,
-        )
-
         from mini_kio.llm.conversation_responder import _ask_gemini as ask
         result = ask("hi")
         assert result is not None
-        assert captured.get("model_name") == "gemini-2.0-flash"
+        assert captured["called"] is True
 
     def test_invalid_model_graceful_fallback_no_key(self):
         """Provider with no API key gracefully fails regardless of model."""

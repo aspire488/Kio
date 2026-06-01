@@ -1,21 +1,20 @@
 """
 kio_bot.py — KIO Telegram Bot
-================================
-Fixes applied in this revision
---------------------------------
-BUG-08  handle_message() could raise AttributeError if route() ever returned
-        a dict instead of a str.  The isinstance guard from the spec is now
-        applied correctly: dict → .get("message"), str → use directly,
-        other → str().  Bot NEVER crashes from this path.
-BUG-09  Removed bare `except Exception` without re-raise in the run_bot()
-        polling section — PTB's run_polling() handles its own errors; the
-        outer try/except was swallowing network timeouts silently.
+===============================
+Gate 5.7: Direct Provider Migration + FreeLLM Decommission
+- dotenv loaded ONCE at bootstrap
+- FreeLLM is optional experimental backend (ENABLE_FREELLM=true)
+- Direct provider orchestration: Gemini → Groq → OpenRouter → Together → Cerebras
+- KIO boots without freellm server or npm dependency
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from telegram import Update
 from telegram.ext import (
@@ -57,6 +56,20 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from mini_kio.core.command_router import _show_help
     result = _show_help()
     await update.message.reply_text(result.get("message", "KIO help unavailable."))
+
+
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle unrecognized /commands — prevents silent drop."""
+    if not update.effective_user or not update.message:
+        return
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text("Unauthorized.")
+        return
+    command = update.message.text or ""
+    await update.message.reply_text(
+        f"Unknown command: {command}\nUse /help to see available commands."
+    )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -147,6 +160,8 @@ def run_bot(runtime=None) -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
+    # Catch-all for unrecognized /commands — prevents silent drop
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(handle_error)
 

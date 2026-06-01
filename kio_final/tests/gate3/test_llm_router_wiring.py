@@ -9,14 +9,16 @@ class TestLLMRouterWiring(unittest.IsolatedAsyncioTestCase):
         # Reset singleton
         mini_kio.core.llm_router._GATEWAY = None
 
-    @patch('mini_kio.core.config.GEMINI_MODEL', 'test-model-2.0')
     @patch('mini_kio.core.config.GEMINI_API_KEY', 'test-key')
+    @patch('mini_kio.core.config.GEMINI_MODEL', 'test-model-2.0')
     async def test_ask_llm_uses_configured_model(self):
-        """Verify that ask_llm initializes the provider with the correct model."""
+        """Verify that ask_llm initializes the primary provider with the correct model."""
         with patch('mini_kio.core.llm_router.GeminiProvider') as MockProvider:
+            mock_instance = MagicMock()
+            mock_instance.provider_name = "gemini"
+            MockProvider.return_value = mock_instance
             await ask_llm("test query")
             
-            # Check if GeminiProvider was initialized with the patched GEMINI_MODEL
             MockProvider.assert_called_once()
             args, kwargs = MockProvider.call_args
             self.assertEqual(kwargs.get('model_name'), 'test-model-2.0')

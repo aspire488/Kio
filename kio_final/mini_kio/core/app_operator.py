@@ -65,66 +65,6 @@ _RESTRICTED_CANONICAL_TARGETS = {
 # Internal Normalization Helpers
 # ---------------------------------------------------------------------------
 
-def _find_active_process(info: Dict) -> Optional[int]:
-    """Surgical 1s bounded lookup for a uniquely matching active process."""
-    if not _IS_WINDOWS: return None
-    try:
-        import psutil
-        proc_name = info.get("process", "").lower()
-        if not proc_name: return None
-        
-        uwp_packages = info.get("uwp_packages", [])
-        targets = {proc_name}
-        for u in uwp_packages: targets.add(u.lower())
-        normalized = {t if t.endswith(".exe") else t + ".exe" for t in targets}
-        
-        # Bounded lookup
-        matches = []
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                if proc.info['name'] and proc.info['name'].lower() in normalized:
-                    matches.append(proc.info['pid'])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        
-        # Only return if unique to prevent accidental mass kills
-        if len(matches) == 1:
-            return matches[0]
-    except Exception:
-        pass
-    return None
-
-
-def _find_active_process_matches(info: Dict) -> list[int]:
-    """Return exact process-name matches only for deterministic ambiguity checks."""
-    if not _IS_WINDOWS:
-        return []
-    try:
-        import psutil
-
-        proc_name = info.get("process", "").lower()
-        if not proc_name:
-            return []
-
-        uwp_packages = info.get("uwp_packages", [])
-        targets = {proc_name}
-        for package_name in uwp_packages:
-            targets.add(package_name.lower())
-        normalized = {t if t.endswith(".exe") else t + ".exe" for t in targets}
-
-        matches: list[int] = []
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                current_name = (proc.info.get('name') or "").lower()
-                if current_name in normalized:
-                    matches.append(int(proc.info['pid']))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-                continue
-        return matches
-    except Exception:
-        return []
-
-
 def _graceful_uwp_close(pid: int, name: str):
     """Attempt graceful WM_CLOSE on Calculator window specifically (after core termination)."""
     if not _IS_WINDOWS: return
@@ -665,10 +605,28 @@ def launch_app(name: str) -> dict:
 def close_app(name: str, pid: Optional[int] = None) -> dict:
     """Kill an application.  Returns {"success": bool, "message": str}."""
     key = name.lower().strip()
+    # Gate 5: Strip capability compound suffix for browser canonical matching
+    if "::" in key:
+        key = key.split("::")[0]
     start_time = time.time()
     logger.info(f"[APP] close_app: {key!r} (pid override: {pid})")
 
     info = _find_in_registry(key)
+    # Gate 5.1: Capability safety net — check capability registry FIRST for browser/web sessions
+    from mini_kio.core.routing_utils import resolve_capability_for_close, deactivate_capability, close_browser_capability
+    cap_info = resolve_capability_for_close(key)
+    if cap_info and cap_info.get("active"):
+        close_browser_capability(cap_info)
+        deactivate_capability(key)
+        cap_name = cap_info.get("canonical_target", key).capitalize()
+        logger.info(f"[APP] close_app: deactivated capability session '{cap_name}' (tab remains open)")
+        return {
+            "success": True,
+            "message": f"Closed the {cap_name} session.",
+            "capability_closed": True,
+            "capability_name": cap_name,
+        }
+
     canonical = key
     if info:
         for registry_key, registry_info in APP_REGISTRY.items():
@@ -708,6 +666,16 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             if termination.get("verified_terminated"):
                 _cleanup_chrome_temp_profile(pid)
                 _graceful_uwp_close(pid, name)
+            
+            # Prune from runtime registry
+            try:
+                from mini_kio.core.runtime import get_runtime
+                rt = get_runtime()
+                if rt:
+                    rt.unregister_tracked_process(canonical, pid=pid)
+            except Exception:
+                pass
+                
             return _normalize_public_result("close", key, termination, start_time)
 
         except subprocess.TimeoutExpired:
@@ -716,67 +684,41 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             logger.error(f"[APP] Error closing pid {pid}: {exc}")
             return _normalize_public_result("close", key, {"success": False, "message": f"Error closing {name}: {exc}", "pid": pid}, start_time)
 
+    # Phase 2: STRICT Ownership lookup via Runtime Registry
     # No wildcard fallback (/IM) for non-system apps to respect ownership isolation.
-    # Recovery Phase: if app not tracked, attempt ONE bounded recovery lookup.
-    if info:
-        exact_matches = _find_active_process_matches(info)
-        if len(exact_matches) > 1:
-            return _normalize_public_result(
-                "close",
-                canonical,
-                {
-                    "success": False,
-                    "message": f"Cannot close {name}: multiple ambiguous process matches found.",
-                    "failure_class": "ambiguous_target",
-                    "pid": None,
-                },
-                start_time,
-            )
-        found_pid = _find_active_process(info)
-        if found_pid:
-            logger.info(f"[APP] recovery found unique pid {found_pid} for {key}")
-            # Adopt and close
-            return close_app(name, pid=found_pid)
+    # No recovery lookup using psutil.process_iter — only close what KIO opened.
+    try:
+        from mini_kio.core.runtime import get_runtime
+        rt = get_runtime()
+        if rt:
+            tracked = rt.get_tracked_process(canonical)
+            if tracked and isinstance(tracked.get("pid"), int):
+                tracked_pid = int(tracked["pid"])
+                logger.info(f"[APP] close_app using tracked pid {tracked_pid} for {key}")
+                return close_app(name, pid=tracked_pid)
+    except Exception:
+        pass
 
-        # Fall back to runtime tracked ownership if exact active process enumeration fails.
-        try:
-            from mini_kio.core.runtime import get_runtime
-            rt = get_runtime()
-            if rt:
-                tracked = rt.get_tracked_process(canonical)
-                if tracked and isinstance(tracked.get("pid"), int):
-                    tracked_pid = int(tracked["pid"])
-                    logger.info(f"[APP] close_app using tracked pid {tracked_pid} for {key}")
-                    return close_app(name, pid=tracked_pid)
-        except Exception:
-            pass
-
-        return _normalize_public_result("close", key, {"success": False, "message": f"Cannot close {name}: No tracked process found for this session.", "failure_class": "not_found"}, start_time)
-
-    if key in WEB_URLS or key in WEB_DOMAIN_ALIASES:
-        return _normalize_public_result(
-            "close",
-            key,
-            {
-                "success": False,
-                "message": f"Cannot close {name}: browser URL launches are non-trackable in current runtime mode.",
-                "pid": None,
-                "failure_class": "non_trackable",
-            },
-            start_time,
-        )
-
+    # No ownership found -> Refuse to close arbitrary processes
+    logger.info("[APP] close_refused target=%s reason=not_tracked", key)
     return _normalize_public_result(
         "close",
         key,
         {
             "success": False,
-            "message": f"Cannot close {name}: application not registered or no tracked process found.",
+            "message": f"I didn't open {name}, so I can't close it for you.",
             "pid": None,
-            "failure_class": "not_found",
+            "failure_class": "not_tracked",
         },
         start_time,
     )
+
+
+def _safe_webbrowser_open(url: str) -> bool:
+    if os.environ.get("KIO_TEST_MODE") == "1":
+        logger.info("[TEST MODE] Blocked webbrowser.open(%s)", url)
+        return True
+    return webbrowser.open(url)
 
 
 def search_web(query: str) -> dict:
@@ -787,7 +729,7 @@ def search_web(query: str) -> dict:
     encoded = urllib.parse.quote_plus(query)
     url = f"https://www.google.com/search?q={encoded}"
     try:
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         logger.info(f"[APP] search: {query!r}")
         return _normalize_public_result("search", query, {"success": True, "message": f"Searched: {query}"}, start_time)
     except Exception as exc:
@@ -809,7 +751,7 @@ def _find_in_registry(key: str) -> Optional[Dict]:
 
 def _open_url(url: str, label: str) -> dict:
     try:
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         # Use "Launched" for URIs without PID tracking; request noop verification
         return {"success": True, "message": f"Launched {label} in browser.", "verification_mode": "noop"}
     except Exception as exc:
@@ -1754,24 +1696,26 @@ APP_CAPABILITIES = {
 
 def execute_capability(target: str) -> dict:
     start_time = time.time()
-    parts = target.split("::", 2)
+    parts = target.split("::", 3)
     if len(parts) < 2:
         return _normalize_public_result("execute_capability", target, {"success": False, "message": "Invalid capability routing format."}, start_time)
     
     app_name, cap = parts[0], parts[1]
-    args = parts[2] if len(parts) == 3 else ""
+    args = parts[2] if len(parts) >= 3 else ""
+    friendly_name = parts[3] if len(parts) == 4 else args
     
     caps = APP_CAPABILITIES.get(app_name, [])
     if cap not in caps:
         return _normalize_public_result("execute_capability", target, {"success": False, "message": f"{app_name} does not support '{cap}'."}, start_time)
         
-    logger.info(f"[CAPABILITY] Routing {cap} to {app_name} with args: {args}")
+    logger.info(f"[CAPABILITY] Routing {cap} to {app_name} with args: {args} (friendly: {friendly_name})")
 
     from mini_kio.core.runtime import get_runtime
     rt = get_runtime()
     
     if cap == "play" and app_name == "spotify":
         query = urllib.parse.quote(args)
+        target_url = f"spotify:search:{args}"
         # Try URI first
         try:
             info = _find_in_registry("spotify")
@@ -1786,21 +1730,24 @@ def execute_capability(target: str) -> dict:
                             prior_pids.add(proc.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied): continue
 
-            proc = subprocess.Popen(["cmd", "/c", "start", f"spotify:search:{query}"], shell=False)
+            proc = subprocess.Popen(["cmd", "/c", "start", target_url], shell=False)
             
             # Attempt Bounded Ownership Registration
             if _IS_WINDOWS and info:
                 time.sleep(1.0) # Wait for URI to trigger
                 final_pid = _refine_pid_windows(proc.pid, info.get("process", "Spotify.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="electron")
                 if final_pid and rt:
-                    rt.register_tracked_process(final_pid, "spotify", f"spotify:search:{args}")
-                    return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Playing {args} on Spotify.", "pid": final_pid, "canonical_name": "spotify"}, start_time)
+                    rt.register_tracked_process(final_pid, app_name, target_url)
+                    from mini_kio.core.routing_utils import register_browser_capability
+                    register_browser_capability(friendly_name, app_name, target_url, browser_pid=final_pid)
+                    return _normalize_public_result("execute_capability", f"spotify::{friendly_name}", {"success": True, "message": f"Playing {friendly_name} on Spotify.", "pid": final_pid, "canonical_name": "spotify", "capability_name": friendly_name.capitalize()}, start_time)
 
-                return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Launched Spotify search for {args}."}, start_time)
+            return _normalize_public_result("execute_capability", f"spotify::{friendly_name}", {"success": True, "message": f"Launched Spotify search for {friendly_name}.", "capability_name": friendly_name.capitalize()}, start_time)
+
         except Exception:
             # Fallback to web
-                webbrowser.open(f"https://open.spotify.com/search/{query}")
-                return _normalize_public_result("execute_capability", f"spotify::{args}", {"success": True, "message": f"Launched {args} search on Spotify Web."}, start_time)
+                _safe_webbrowser_open(f"https://open.spotify.com/search/{query}")
+                return _normalize_public_result("execute_capability", f"spotify::{friendly_name}", {"success": True, "message": f"Launched {friendly_name} search on Spotify Web.", "capability_name": friendly_name.capitalize()}, start_time)
 
     if cap in ("search", "open_url", "youtube") or (cap == "play" and app_name == "youtube"):
         if cap == "search":
@@ -1848,19 +1795,23 @@ def execute_capability(target: str) -> dict:
                 final_pid = _refine_pid_windows(proc.pid, info.get("process", "chrome.exe"), prior_pids=prior_pids, launch_start=launch_start, lifecycle="browser")
                 if final_pid and rt:
                     rt.register_tracked_process(final_pid, app_name, url)
-                    return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop"}, start_time)
+                    from mini_kio.core.routing_utils import register_browser_capability
+                    register_browser_capability(friendly_name, app_name, url, browser_pid=final_pid)
+                    return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
 
                 try:
                     import psutil
                     if rt and psutil.pid_exists(proc.pid):
                         rt.register_tracked_process(proc.pid, app_name, url)
-                        return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Routed {cap} to {app_name}.", "pid": proc.pid, "canonical_name": app_name, "verification_mode": "noop"}, start_time)
+                        from mini_kio.core.routing_utils import register_browser_capability
+                        register_browser_capability(friendly_name, app_name, url, browser_pid=proc.pid)
+                        return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": proc.pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
                 except Exception:
                     pass
 
-            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": True, "message": f"Launched {cap} in {app_name}.", "pid": proc.pid, "verification_mode": "noop"}, start_time)
+            return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": proc.pid, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
         except Exception as e:
-            return _normalize_public_result("execute_capability", f"{app_name}::{cap}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
+            return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
             
     # For now, just mock media capabilities since KIO is lightweight and doesn't hook into Windows Media APIs
     if cap in ("play", "pause", "next", "previous", "open_project", "open_file", "send_message"):

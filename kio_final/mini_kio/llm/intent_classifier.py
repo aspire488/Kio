@@ -41,6 +41,27 @@ class IntentClassifier:
             "give me",
             "what is the",
         ]
+        self.achievement_keywords = [
+            "fixed the bug",
+            "now passes",
+            "got it working",
+            "finished the migration",
+            "tests pass now",
+            "finally working",
+            "it works now",
+            "got it running",
+        ]
+        self.educational_keywords = [
+            "teach me",
+            "explain",
+            "syntax",
+            "basics",
+            "tutorial",
+            "beginner guide",
+            "learn ",
+            "how does",
+            "how do i",
+        ]
 
     def classify(self, raw_llm_output: str) -> IntentClassification:
         """
@@ -112,6 +133,18 @@ class IntentClassifier:
                 target = match.group(1).strip()
                 confidence = 0.7
                 break
+
+        # Check for educational (before informational/conversational)
+        if intent_type == IntentType.CONVERSATIONAL:
+            if any(kw in text_lower for kw in self.educational_keywords):
+                intent_type = IntentType.EDUCATIONAL
+                confidence = 0.8
+
+        # Check for achievement
+        if intent_type == IntentType.CONVERSATIONAL:
+            if any(kw in text_lower for kw in self.achievement_keywords):
+                # Achievement is handled as conversational with specific variants
+                confidence = 0.9
 
         # Check for informational
         if intent_type == IntentType.CONVERSATIONAL:

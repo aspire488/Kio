@@ -18,12 +18,20 @@ from __future__ import annotations
 import logging
 import time
 import urllib.parse
+import os
 import webbrowser
 from typing import Any, Dict
 
 from mini_kio.core.operator_protocol import OperatorDescriptor
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_webbrowser_open(url: str) -> bool:
+    if os.environ.get("KIO_TEST_MODE") == "1":
+        logger.info("[TEST MODE] Blocked webbrowser.open(%s)", url)
+        return True
+    return webbrowser.open(url)
 
 # ---------------------------------------------------------------------------
 # Operator Descriptor
@@ -127,15 +135,20 @@ def open_url(url: str) -> Dict[str, Any]:
     try:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] opened: {url}")
-        return _normalize_public_result("open_url", url, {"success": True, "message": f"Opened {url}"}, start_time)
+        
+        # Friendly name extraction to avoid URL leakage (BUG 4)
+        from mini_kio.core.runtime_response_formatter import _extract_url_name
+        friendly_name = _extract_url_name(url)
+        
+        return _normalize_public_result("open_url", url, {"success": True, "message": f"Opened {friendly_name}"}, start_time)
     except Exception as exc:
         logger.error(f"[BROWSER] open_url failed: {exc}")
         return _normalize_public_result(
             "open_url",
             url,
-            {"success": False, "message": f"Failed to open {url}: {str(exc)[:80]}"},
+            {"success": False, "message": f"Failed to open the requested page: {str(exc)[:40]}"},
             start_time,
         )
 
@@ -152,7 +165,7 @@ def search_google(query: str) -> Dict[str, Any]:
         )
     try:
         url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] Google search: {query!r}")
         return _normalize_public_result(
             "search",
@@ -181,7 +194,7 @@ def search_youtube(query: str) -> Dict[str, Any]:
         )
     try:
         url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] YouTube search: {query!r}")
         return _normalize_public_result(
             "search_youtube",
@@ -216,7 +229,7 @@ def play_youtube(query: str) -> Dict[str, Any]:
         encoded = urllib.parse.quote_plus(query)
         # Filter: Videos Only (EgIQAQ%253D%253D) + Search
         url = f"https://www.youtube.com/results?search_query={encoded}&sp=EgIQAQ%253D%253D"
-        webbrowser.open(url)
+        _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] YouTube play: {query!r}")
         return _normalize_public_result(
             "youtube_play",

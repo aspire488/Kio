@@ -14,6 +14,7 @@ import logging
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -294,10 +295,11 @@ class KioRuntime:
         self.transition_to(RuntimeState.STOPPED, reason="runtime_stop")
         logger.info("Runtime stopped")
 
-    def register_tracked_process(self, pid: int, name: str, target: str) -> None:
+    def register_tracked_process(self, pid: int, name: str, target: str, launch_id: str = "") -> None:
         """Register a new tracked process with a FIFO 16-entry limit."""
-        emit_runtime_trace("DEBUG_runtime_register_start", pid=pid, name=name, target=target)
         import psutil
+        lid = launch_id or str(uuid.uuid4())
+        emit_runtime_trace("DEBUG_runtime_register_start", lid=lid, pid=pid, name=name, target=target)
         try:
             p = psutil.Process(pid)
             create_time = p.create_time()
@@ -305,45 +307,33 @@ class KioRuntime:
             create_time = 0.0
 
         entry = {
+            "launch_id": lid,
             "pid": pid,
             "name": name,
             "target": target,
             "launched_at": time.monotonic(),
             "create_time": create_time,
             "status": "active",
+            "ownership_scope": "kio",
         }
-        self.tracked_processes = [
-            existing for existing in self.tracked_processes
-            if existing.get("name") != name
-        ]
+        
         # FIFO eviction
         while len(self.tracked_processes) >= 16:
             oldest = self.tracked_processes.pop(0)
-            emit_runtime_trace("runtime_process_evicted", pid=oldest["pid"], name=oldest["name"])
+            emit_runtime_trace("runtime_process_evicted", lid=oldest.get("launch_id"), pid=oldest["pid"], name=oldest["name"])
 
         self.tracked_processes.append(entry)
-        emit_runtime_trace("runtime_process_registered", pid=pid, name=name, target=target)
-        emit_runtime_trace("DEBUG_runtime_registry_size", size=len(self.tracked_processes), contents=[(e["pid"], e["name"]) for e in self.tracked_processes])
-
-    def refresh_tracked_process(self, pid: int, name: str, target: str) -> None:
-        """Refresh or replace an existing tracked process entry for a canonical family."""
-        emit_runtime_trace("DEBUG_runtime_refresh_start", pid=pid, name=name, target=target)
-        self.unregister_tracked_process(name)
-        self.register_tracked_process(pid=pid, name=name, target=target)
+        emit_runtime_trace("runtime_process_registered", lid=lid, pid=pid, name=name, target=target)
 
     def get_tracked_process(self, name: str) -> dict[str, object] | None:
-        """Find a tracked process by its canonical name."""
-        emit_runtime_trace("DEBUG_runtime_lookup_start", lookup_name=name, registry_size=len(self.tracked_processes))
+        """Find the latest tracked process by its canonical name."""
         for entry in reversed(self.tracked_processes):
             if entry["name"] == name:
-                emit_runtime_trace("DEBUG_runtime_lookup_hit", pid=entry["pid"], name=name)
                 return entry
-        emit_runtime_trace("DEBUG_runtime_lookup_miss", lookup_name=name)
         return None
 
     def unregister_tracked_process(self, name: str, pid: int | None = None) -> None:
         """Remove tracked process entries by canonical family and optional pid."""
-        emit_runtime_trace("DEBUG_runtime_unregister_start", name=name, pid=pid)
         retained: list[dict[str, object]] = []
         for entry in self.tracked_processes:
             same_name = entry.get("name") == name
@@ -351,14 +341,13 @@ class KioRuntime:
             if same_name and same_pid:
                 emit_runtime_trace(
                     "runtime_process_unregistered",
+                    lid=entry.get("launch_id"),
                     pid=entry.get("pid"),
                     name=entry.get("name"),
-                    reason="verified_close",
                 )
                 continue
             retained.append(entry)
         self.tracked_processes = retained
-        emit_runtime_trace("DEBUG_runtime_unregister_end", name=name, pid=pid, count=len(self.tracked_processes))
 
     def prune_tracked_processes(self) -> None:
         """Remove dead processes from the registry (piggybacked on command dispatch)."""
@@ -879,7 +868,8 @@ def _route_via_orchestration(text: str) -> dict[str, object]:
     """
     Gate 3 orchestration pipeline for non-deterministic input.
 
-    Pipeline: intent_classifier -> intent_validator -> conversation_orchestrator -> runtime_handoff
+    Pipeline: input_normalizer -> intent_classifier -> intent_validator -> 
+              conversation_orchestrator -> runtime_handoff
     """
     runtime = _CURRENT_RUNTIME
     if runtime is None:
@@ -891,27 +881,132 @@ def _route_via_orchestration(text: str) -> dict[str, object]:
         from mini_kio.llm.intent_validator import IntentValidator
         from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
         from mini_kio.runtime.runtime_handoff import RuntimeHandoff
+        from mini_kio.llm.input_normalizer import InputNormalizer
+        from mini_kio.llm.conversation_responder import ConversationResponder
         runtime._gate3_pipeline = {
             'classifier': IntentClassifier(),
             'validator': IntentValidator(),
             'orchestrator': ConversationOrchestrator(),
             'handoff': RuntimeHandoff(),
+            'normalizer': InputNormalizer(),
+            'responder': ConversationResponder(),
         }
 
     pipe = runtime._gate3_pipeline
+    normalizer = pipe['normalizer']
+    responder = pipe['responder']
+    normalizer.reset_diag()
 
-    emit_runtime_trace("intent_classification", text_len=len(text))
-    classification = pipe['classifier'].classify(text)
+    # Gate 5.1: Use pre-normalized text from earliest entrypoint if available
+    pre_normalized = getattr(runtime, '_gate5_normalized_text', None)
+    if isinstance(pre_normalized, str) and pre_normalized in text:
+        sanitized_text = pre_normalized
+        # Still run through normalizer for typo corrections on pre-normalized
+        normalized_text = normalizer.normalize_typos(sanitized_text)
+        normalizer._diag["emoji_sanitize_applied"] = True
+    else:
+        # 1. EARLY SANITIZATION
+        sanitized_text = normalizer.sanitize(text)
+        # 2. PRE-CLASSIFICATION NORMALIZATION (Typos)
+        normalized_text = normalizer.normalize_typos(sanitized_text)
 
-    emit_runtime_trace("validator_result",
-                       is_safe=classification.is_safe,
-                       intent_type=str(classification.primary_intent.intent_type)
-                       if classification.primary_intent else "none")
-    validated = pipe['validator'].validate(classification)
+    # 3. HARD AUTHORITY OVERRIDES
+    authority_reply = normalizer.check_authority_override(normalized_text)
+    
+    # 4. CONTINUITY-FIRST ROUTING
+    is_continuity = normalizer.is_continuity_request(normalized_text)
+    
+    # Educational continuity check (deterministically local)
+    context = responder._context
+    mode, step = context.get_lesson_state()
+    active_lesson = mode and step >= 0
+    
+    # Capture browser diagnostics from routing_utils (global registry)
+    from mini_kio.core.routing_utils import get_browser_registry
+    browser_diag = get_browser_registry().get_diagnostics()
 
-    emit_runtime_trace("orchestration_state",
-                       state=str(pipe['orchestrator'].get_state()))
-    orchestration = pipe['orchestrator'].orchestrate(validated)
+    if authority_reply:
+        from mini_kio.llm.intent_models import IntentType, ExtractedIntent, IntentClassification
+        primary = ExtractedIntent(
+            raw_text=text,
+            normalized_text=normalized_text,
+            confidence=1.0,
+            intent_type=IntentType.CONVERSATIONAL
+        )
+        diag = normalizer.get_diag()
+        classification = IntentClassification(
+            primary_intent=primary,
+            is_safe=True,
+            authority_override_used=True,
+            sanitize_applied=diag["sanitize_applied"],
+            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
+            typo_normalization_applied=diag["typo_normalization_applied"]
+        )
+        # Bypassing classifier and validator for authority override
+        validated = classification 
+        orchestration = pipe['orchestrator'].orchestrate(validated)
+    elif is_continuity and active_lesson:
+        from mini_kio.llm.intent_models import IntentType, ExtractedIntent, IntentClassification
+        normalizer.mark_continuity_used()
+        primary = ExtractedIntent(
+            raw_text=text,
+            normalized_text=normalized_text,
+            confidence=1.0,
+            intent_type=IntentType.EDUCATIONAL
+        )
+        diag = normalizer.get_diag()
+        classification = IntentClassification(
+            primary_intent=primary,
+            is_safe=True,
+            continuity_resume_used=True,
+            educational_state_preserved=True,
+            sanitize_applied=diag["sanitize_applied"],
+            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
+            typo_normalization_applied=diag["typo_normalization_applied"]
+        )
+        # Bypassing classifier and validator for continuity
+        validated = classification
+        orchestration = pipe['orchestrator'].orchestrate(validated)
+    else:
+        from mini_kio.llm.intent_models import IntentType, IntentClassification
+        # Standard pipeline
+        emit_runtime_trace("intent_classification", text_len=len(normalized_text))
+        classification = pipe['classifier'].classify(normalized_text)
+        
+        # Educational state preservation check
+        educational_preserved = False
+        if active_lesson:
+            from mini_kio.llm.intent_models import IntentType
+            if classification.primary_intent.intent_type == IntentType.EDUCATIONAL:
+                educational_preserved = True
+
+        # Update classification with diag
+        diag = normalizer.get_diag()
+        classification = IntentClassification(
+            primary_intent=classification.primary_intent,
+            alternatives=classification.alternatives,
+            is_safe=classification.is_safe,
+            sanitize_applied=diag["sanitize_applied"],
+            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
+            typo_normalization_applied=diag["typo_normalization_applied"],
+            educational_state_preserved=educational_preserved,
+            browser_canonicalization_used=browser_diag.get("browser_canonicalization_used", 0) > 0
+        )
+
+        emit_runtime_trace("validator_result",
+                           is_safe=classification.is_safe,
+                           intent_type=str(classification.primary_intent.intent_type)
+                           if classification.primary_intent else "none")
+        validated = pipe['validator'].validate(classification)
+        
+        # Prevent Intent Downgrade (educational -> conversational)
+        if active_lesson and validated.primary_intent.intent_type == IntentType.CONVERSATIONAL:
+            # Check if it should have been educational (handled by responder usually, but let's flag it)
+            pass
+
+        emit_runtime_trace("orchestration_state",
+                           state=str(pipe['orchestrator'].get_state()))
+        orchestration = pipe['orchestrator'].orchestrate(validated)
 
     handoff_state = str(orchestration.state.value) if hasattr(orchestration.state, 'value') else str(orchestration.state)
     emit_runtime_trace("handoff_result",
@@ -924,14 +1019,17 @@ def _route_via_orchestration(text: str) -> dict[str, object]:
         return {"success": False, "message": "Orchestration handoff failed."}
 
     # Gate 3: Generate response through safe text-only responder
-    from mini_kio.llm.conversation_responder import ConversationResponder
-    responder = ConversationResponder()
+    responder = pipe['responder']
     try:
-        response_text = responder.generate(
-            original_text=text,
-            orchestration=orchestration,
-            handoff_result=handoff_result,
-        )
+        # For authority override, use the direct reply if possible
+        if authority_reply:
+            response_text = authority_reply
+        else:
+            response_text = responder.generate(
+                original_text=text,
+                orchestration=orchestration,
+                handoff_result=handoff_result,
+            )
         emit_runtime_trace("conversation_response_generated",
                            classification=str(handoff_result.classification.value)
                            if hasattr(handoff_result.classification, 'value')
@@ -991,19 +1089,24 @@ def dispatch_channel_input(
 
     runtime.prune_tracked_processes()
 
-    command = (text or "").strip()
-    if not command:
+    command_raw = (text or "").strip()
+    if not command_raw:
         return {
             "success": False,
             "message": "Empty command.",
             "channel": channel,
         }
-    if len(command) > _CHANNEL_INPUT_MAX_LEN:
+    if len(command_raw) > _CHANNEL_INPUT_MAX_LEN:
         return {
             "success": False,
             "message": f"Input too long (max {_CHANNEL_INPUT_MAX_LEN} characters).",
             "channel": channel,
         }
+
+    # Gate 5.1: Global normalization at earliest entrypoint
+    from mini_kio.llm.input_normalizer import InputNormalizer
+    command = InputNormalizer.strip_emoji(command_raw)
+    runtime._gate5_normalized_text = command
 
     emit_runtime_trace(
         "orchestration_entry",
@@ -1012,6 +1115,23 @@ def dispatch_channel_input(
         text_len=len(command),
         runtime=get_runtime_snapshot(),
     )
+
+    # ── Gate 5.1: Continuity Pre-Routing ────────────────────────────────
+    # Must happen BEFORE command_router + classifier + ai_fallback
+    continuity_reply = None
+    if hasattr(runtime, '_gate3_pipeline'):
+        from mini_kio.llm.conversation_responder import _handle_continuity_pre_route
+        responder = runtime._gate3_pipeline['responder']
+        continuity_reply = _handle_continuity_pre_route(
+            command_raw, command, responder._context, responder._response_governor
+        )
+    if continuity_reply:
+        emit_runtime_trace("continuity_pre_route_used", normalized=command)
+        return {
+            "success": True,
+            "message": continuity_reply,
+            "channel": channel,
+        }
 
     # ── Gate 3: Deterministic fast-path ────────────────────────────────
     try:
@@ -1036,6 +1156,14 @@ def dispatch_channel_input(
 
     if not isinstance(result, dict):
         result = {"success": False, "message": str(result)}
+
+    # Gate 5.1: Runtime response formatting (hide internal routing)
+    from mini_kio.core.runtime_response_formatter import format_result
+    raw_message = str(result.get("message", ""))
+    action = str(result.get("action", ""))
+    target = str(result.get("target", ""))
+    formatted = format_result(action, target, bool(result.get("success")), result)
+    result["message"] = formatted
 
     remember_runtime_context(
         "channel_input",
@@ -1130,11 +1258,21 @@ def get_runtime_snapshot() -> dict[str, object]:
 
     _prune_runtime_context(runtime)
     uptime_ms = int((time.monotonic() - runtime.started_at) * 1000)
+
+    import psutil
+    import os
+    try:
+        process = psutil.Process(os.getpid())
+        ram_mb = process.memory_info().rss / 1024 / 1024
+    except Exception:
+        ram_mb = 0.0
+
     return {
         "state": runtime.state,
         "safety_state": runtime.safety_state,
         "channels": list(runtime.channels),
         "uptime_ms": uptime_ms,
+        "ram_usage_mb": round(ram_mb, 1),
         "last_error": runtime.last_error,
         "context_size": len(runtime.context_items),
         "observer_count": len(runtime.observers),
