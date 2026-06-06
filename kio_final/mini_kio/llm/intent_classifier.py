@@ -15,11 +15,11 @@ class IntentClassifier:
     def __init__(self):
         # Patterns that suggest an executable intent
         self.exec_patterns = [
-            r"(?:open|launch)\s+([a-zA-Z0-9\s\.\-_]+)",
-            r"(?:search|find)\s+(?:for\s+)?(.+)",
-            r"(?:type|write)\s+(.+)",
-            r"(?:click|press)\s+(.+)",
-            r"(?:close|kill|exit)\s+([a-zA-Z0-9\s\.\-_]+)"
+            r"^(?:open|launch)\s+([a-zA-Z0-9\s\.\-_]+)",
+            r"^(?:search|find)\s+(?:for\s+)?(.+)",
+            r"^(?:type|write)\s+(.+)",
+            r"^(?:click|press)\s+(.+)",
+            r"^(?:close|kill|exit)\s+([a-zA-Z0-9\s\.\-_]+)"
         ]
         # Broad conversational/informational keywords — checked after exec patterns
         # Each keyword is a substring match against normalized lower text.

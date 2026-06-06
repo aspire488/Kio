@@ -28,6 +28,7 @@ from mini_kio.core import config
 from mini_kio.llm.llm_gateway import LLMGateway
 from mini_kio.llm.gemini_provider import GeminiProvider
 from mini_kio.llm.direct_providers import DirectHTTPProvider
+from mini_kio.llm.huggingface_provider import HuggingFaceProvider
 from mini_kio.llm.models import LLMRequest
 from mini_kio.llm.provider_registry import ProviderPriority
 
@@ -81,7 +82,21 @@ def _register_providers(gateway: LLMGateway) -> None:
             f"model={config.GROQ_MODEL}"
         )
 
-    # Priority 2: OpenRouter (multi-model gateway)
+    # Priority 2: Hugging Face (via OpenAI-compatible endpoint)
+    if config.HUGGINGFACE_ENABLED:
+        provider = HuggingFaceProvider(
+            api_key=config.HUGGINGFACE_API_KEY,
+            timeout_s=config.HUGGINGFACE_TIMEOUT_S,
+            max_tokens=config.HUGGINGFACE_MAX_TOKENS,
+            model_name=config.HUGGINGFACE_MODEL,
+        )
+        gateway.register_provider(provider, priority=ProviderPriority.HUGGINGFACE.value)
+        logger.info(
+            f"Registered Hugging Face provider (priority {ProviderPriority.HUGGINGFACE.value}): "
+            f"model={config.HUGGINGFACE_MODEL}"
+        )
+
+    # Priority 3: OpenRouter (multi-model gateway)
     if config.OPENROUTER_ENABLED:
         provider = DirectHTTPProvider(
             name="openrouter",
@@ -97,7 +112,7 @@ def _register_providers(gateway: LLMGateway) -> None:
             f"model={config.OPENROUTER_MODEL}"
         )
 
-    # Priority 3: Together AI
+    # Priority 4: Together AI
     if config.TOGETHER_AI_ENABLED:
         provider = DirectHTTPProvider(
             name="together_ai",
@@ -113,7 +128,7 @@ def _register_providers(gateway: LLMGateway) -> None:
             f"model={config.TOGETHER_AI_MODEL}"
         )
 
-    # Priority 4: Cerebras
+    # Priority 5: Cerebras
     if config.CEREBRAS_ENABLED:
         provider = DirectHTTPProvider(
             name="cerebras",

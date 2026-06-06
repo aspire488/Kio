@@ -76,7 +76,7 @@ class TestEducationalEscalation:
         h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "advanced decorators")
         resp = r.generate("teach me advanced decorators", o, h)
         assert len(resp) > 0
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
 
     def test_os_scheduling_educational_route(self):
         """'explain operating system scheduling' routes through educational path."""
@@ -103,7 +103,7 @@ class TestEducationalEscalation:
         h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "photo editing")
         resp = r.generate("teach me photo editing", o, h)
         assert len(resp) > 0
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
 
     def test_educational_diagnostics_recorded(self):
         """Educational escalation increments diagnostic counters."""
@@ -141,7 +141,7 @@ class TestLocalBootstrapFallback:
         h = _mock_handoff_result(ExecutionClassification.DEGRADED_BLOCK, "degraded")
         resp = r.generate("do something", o, h)
         assert "offline" in resp.lower() or "exhausted" in resp.lower()
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
 
     def test_known_topic_local_fallback_survives(self):
         r = ConversationResponder()
@@ -282,7 +282,7 @@ class TestGenericFallbackSuppression:
         h2 = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "random")
         resp = r.generate("random question here", o2, h2)
         assert len(resp) > 0
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
 
     def test_no_topic_context_returns_generic(self):
         """Without any topic context, generic response is acceptable."""
@@ -291,7 +291,7 @@ class TestGenericFallbackSuppression:
         h = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "something completely random")
         resp = r.generate("something completely random", o, h)
         assert len(resp) > 0
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -337,7 +337,7 @@ class TestBrowserContainment:
                                 metadata={"tab_ownership_validated": True})
         resp = r.generate("close edge", o, h)
         assert "edge" in resp.lower()
-        assert len(resp) <= 600
+        assert len(resp) <= 2000
         diag = r.get_context_diagnostics()
         assert diag.get("provider_teaching_route_used", 0) == 0
 

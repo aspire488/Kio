@@ -574,7 +574,7 @@ class TestGeminiModelConfig:
     def test_default_model_name(self):
         """Provider uses default gemini-1.5-flash when no model specified."""
         provider = GeminiProvider(api_key="fake-key", timeout_s=5, max_tokens=50)
-        assert provider._model_name == "gemini-1.5-flash"
+        assert provider._model_name == "gemini-2.5-flash"
 
     def test_custom_model_name(self):
         """Provider accepts custom model name."""

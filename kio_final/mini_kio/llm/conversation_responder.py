@@ -19,12 +19,33 @@ from mini_kio.llm.intent_models import IntentType
 from mini_kio.llm.conversation_governor import ConversationGovernor
 from mini_kio.llm.conversation_context import ConversationContext
 from mini_kio.llm.response_governor import ResponseGovernor
+import mini_kio.knowledge.knowledge_router as _knowledge_router_mod
 from mini_kio.knowledge.knowledge_router import KnowledgeRouter
 from mini_kio.llm.identity_dataset import resolve as identity_resolve
 
 logger = logging.getLogger(__name__)
 
-_MAX_RESPONSE_LENGTH = 600
+_MAX_RESPONSE_LENGTH = 4000
+
+_SENTENCE_ENDS = (". ", "? ", "! ", ".\n", "?\n", "!\n")
+
+
+def _truncate_safe(text: str, max_len: int = _MAX_RESPONSE_LENGTH) -> str:
+    if not text or len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    for sep in _SENTENCE_ENDS:
+        idx = truncated.rfind(sep)
+        if idx > max_len * 0.3:
+            return truncated[:idx + 1].strip()
+    idx = truncated.rfind(".")
+    if idx > max_len * 0.3:
+        return truncated[:idx + 1].strip()
+    idx = truncated.rfind(" ")
+    if idx > max_len * 0.3:
+        return truncated[:idx].strip() + "..."
+    return truncated.strip()
+
 
 _SAFE_DEGRADED_FALLBACK = (
     "KIO's LLM layer is offline. Some features are unavailable until it reconnects."
@@ -98,6 +119,18 @@ def _resolve_comparison(text: str) -> Optional[str]:
     return None
 
 
+_GREETING_QUALIFIERS = frozenset({
+    "kio", "bro", "dude", "buddy", "mate", "man", "there",
+})
+
+
+def _strip_greeting_qualifiers(text: str) -> str:
+    """Remove KIO address terms for greeting matching only."""
+    words = text.split()
+    filtered = [w for w in words if w not in _GREETING_QUALIFIERS]
+    return " ".join(filtered)
+
+
 _GREETING_CATEGORY: dict[str, str] = {
     "hello": "hello",
     "hi": "hello",
@@ -106,6 +139,7 @@ _GREETING_CATEGORY: dict[str, str] = {
     "wassup": "hello",
     "what's up": "hello",
     "whats up": "hello",
+    "what is up": "hello",
     "how are you": "how_are_you",
     "how are you doing": "how_are_you",
     "bye": "goodbye",
@@ -139,63 +173,56 @@ _GREETING_CATEGORY: dict[str, str] = {
     "everything works": "achievement",
     "it passes now": "achievement",
     "finally solved it": "achievement",
+    # ── Thanks ─────────────────────────────────────────────────────────
+    "thanks": "thanks",
+    "thank you": "thanks",
+    "appreciate it": "thanks",
+    "that helped": "thanks",
+    "that was useful": "thanks",
+    # ── Farewell ───────────────────────────────────────────────────────
+    "bye": "farewell",
+    "goodbye": "farewell",
+    "see you": "farewell",
+    "see you later": "farewell",
+    "catch you later": "farewell",
+    "talk to you later": "farewell",
+    "talk later": "farewell",
+    "good night": "farewell",
+    "goodnight": "farewell",
+    # ── Positive Feedback ──────────────────────────────────────────────
+    "good job": "positive_feedback",
+    "nice work": "positive_feedback",
+    "well done": "positive_feedback",
+    "awesome": "positive_feedback",
+    "great work": "positive_feedback",
+    "excellent": "positive_feedback",
 }
 
+_JOKE_TRIGGERS = frozenset({"joke", "joke around", "can you joke", "tell me a joke", "tell us a joke"})
+
+_JOKE_VARIANTS: list[str] = [
+    "Why don't scientists trust atoms? Because they make up everything.",
+    "What do you call a fake noodle? An impasta.",
+    "Why did the developer go broke? Because he used up all his cache.",
+    "What's the best thing about Switzerland? I don't know, but the flag is a big plus.",
+    "Why do programmers prefer dark mode? Because light attracts bugs.",
+]
+
 _GREETING_VARIANTS: dict[str, list[str]] = {
-    "hello": [
-        "Hello.",
-        "Hi there.",
-        "I'm here.",
-        "Hey.",
-    ],
-    "achievement": [
-        "Nice. That's progress.",
-        "Good. That closes the issue.",
-        "Clean result.",
-        "Noted. System verified.",
-        "Solid. Moving forward.",
-    ],
-    "how_are_you": [
-        "Operational.",
-        "Running.",
-        "System nominal.",
-    ],
-    "thanks": [
-        "np",
-        "sure",
-        "done",
-    ],
-    "goodbye": [
-        "Later.",
-        "Goodbye.",
-    ],
-    "okay": [
-        "Ok.",
-        "Got it.",
-        "Heard.",
-    ],
-    "positive": [
-        "I'm on it.",
-        "Ok.",
-    ],
-    "yes": [
-        "I'm on it.",
-        "Ok.",
-    ],
-    "no": [
-        "Understood.",
-    ],
-    "help": [
-        "I can open apps, search the web, and play media.",
-        "Open, search, play — tell me what you need.",
-        "Available commands: open, close, search, play, shutdown.",
-    ],
-    "ping": [
-        "I'm here.",
-        "KIO present.",
-        "Present.",
-        "Here.",
-    ],
+    "hello": ["Hello.", "Hi there.", "I'm here.", "Hey."],
+    "achievement": ["Nice. That's progress.", "Good. That closes the issue.", "Clean result.", "Noted. System verified.", "Solid. Moving forward."],
+    "how_are_you": ["Operational.", "Running.", "System nominal."],
+    "thanks": ["You're welcome.", "No problem.", "Happy to help.", "Anytime."],
+    "farewell": ["See you later.", "Goodbye.", "Catch you later.", "Later."],
+    "positive_feedback": ["Appreciate it.", "Glad it helped.", "Thanks.", "Noted."],
+    "goodbye": ["Later.", "Goodbye."],
+    "okay": ["Ok.", "Got it.", "Heard."],
+    "positive": ["I'm on it.", "Ok."],
+    "yes": ["I'm on it.", "Ok."],
+    "no": ["Understood."],
+    "help": ["I can open apps, search the web, and play media.", "Open, search, play — tell me what you need.", "Available commands: open, close, search, play, shutdown."],
+    "ping": ["I'm here.", "KIO present.", "Present.", "Here."],
+    "joke": _JOKE_VARIANTS,
 }
 
 _REPEATED_RESPONSES: dict[int, list[str]] = {
@@ -285,6 +312,28 @@ _NORMALIZATION_ALIAS: dict[str, str] = {
     "cos": "because",
     "cuz": "because",
     "bc": "because",
+    "urs": "yours",
+    "r": "are",
+    "im": "i am",
+    "idk": "i do not know",
+    "ik": "i know",
+    "imo": "in my opinion",
+    "tbh": "to be honest",
+    "wbt": "what about",
+    "abt": "about",
+    "pls": "please",
+    "ty": "thank you",
+    "rn": "right now",
+    "tmrw": "tomorrow",
+    "tdy": "today",
+    "wdym": "what do you mean",
+    "wyd": "what are you doing",
+    "gonna": "going to",
+    "wanna": "want to",
+    "yh": "yeah",
+    "ye": "yeah",
+    "yup": "yeah",
+    "nah": "no",
 }
 
 
@@ -376,15 +425,23 @@ def _format_lesson_response(step: int, content: str, has_next: bool = False) -> 
 
 
 def _build_educational_prompt(user_text: str, topic: str, lesson_step: int, context_summary: str = "") -> str:
-    """Build a structured educational prompt without lesson framing."""
+    """Build a structured educational prompt for teaching mode."""
     return (
         "Provide a concise educational explanation suitable for a beginner.\n\n"
-        f"User: {user_text}\nKIO:"
+        f"Topic: {topic}\n"
+        f"Subject: {user_text}"
     )
 
 
 def _sanitize_gemini_output(text: str) -> str:
-    """Remove execution claims and authority hallucinations from Gemini output."""
+    """Remove execution claims, authority hallucinations, and reasoning blocks from Gemini output."""
+    # Remove KIO: prefix if it leaked through
+    if text.startswith("KIO:"):
+        text = text[4:].strip()
+
+    # Gate 5: Remove <think>...</think> reasoning blocks (R1/O1 variants)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+
     text = _EXECUTION_CLAIM_RE.sub("", text)
     text = _AUTHORITY_CLAIM_RE.sub("", text)
     text = text.strip().strip('"').strip("'")
@@ -402,19 +459,29 @@ def _ask_gemini(user_text: str, system_prompt: Optional[str] = None) -> Optional
         return None
     try:
         from mini_kio.core.llm_router import ask_llm
-        
-        prompt = f"{system_prompt or _ASYSTEM_PROMPT}\n\nUser: {user_text}\nKIO:"
+
+        # Build prompt once with conversational markers
+        if system_prompt:
+            prompt = f"{system_prompt}\n\nUser: {user_text}\nKIO:"
+        else:
+            prompt = f"{_ASYSTEM_PROMPT}\n\nUser: {user_text}\nKIO:"
 
         try:
             loop = asyncio.get_running_loop()
             future = asyncio.run_coroutine_threadsafe(
-                ask_llm(prompt, timeout=GEMINI_TIMEOUT_S, max_tokens=GEMINI_MAX_TOKENS), 
+                ask_llm(prompt, timeout=GEMINI_TIMEOUT_S, max_tokens=GEMINI_MAX_TOKENS),
                 loop
             )
             content = future.result(timeout=GEMINI_TIMEOUT_S + 5.0)
         except RuntimeError:
-            content = asyncio.run(ask_llm(prompt, timeout=GEMINI_TIMEOUT_S, max_tokens=GEMINI_MAX_TOKENS))
-
+            try:
+                content = asyncio.run(ask_llm(prompt, timeout=GEMINI_TIMEOUT_S, max_tokens=GEMINI_MAX_TOKENS))
+            except BaseException:
+                logger.exception("Gemini provider crashed in fallback asyncio.run")
+                content = None
+        except BaseException:
+            logger.exception("Gemini provider crashed in coroutine_threadsafe path")
+            content = None
         if content:
             raw_len = len(content)
             sanitized = _sanitize_gemini_output(content)
@@ -423,7 +490,7 @@ def _ask_gemini(user_text: str, system_prompt: Optional[str] = None) -> Optional
             if sanitized:
                 # Minimal bounded diagnostics
                 logger.info(f"Gemini response preserved: raw={raw_len}, san={san_len}")
-                return sanitized[: _MAX_RESPONSE_LENGTH]
+                return _truncate_safe(sanitized)
             else:
                 logger.warning(f"Gemini response discarded (fully unsafe/empty after sanitize): raw={raw_len}")
         else:
@@ -566,7 +633,12 @@ class ConversationResponder:
         prefer_provider: bool,
         topic_hint: str = "",
     ) -> str:
-        if prefer_provider:
+        # Gate 5: Detect freshness keywords to force KnowledgeRouter (Tier 2/3)
+        freshness_keywords = {"latest", "news", "recent", "today", "current", "recently"}
+        text_lower = text.lower()
+        is_freshness_query = any(kw in text_lower for kw in freshness_keywords)
+
+        if prefer_provider and not is_freshness_query:
             prompt = None
             if topic_hint:
                 prompt = _build_educational_prompt(text, topic_hint, 0)
@@ -575,18 +647,31 @@ class ConversationResponder:
                 governed = self._governor.govern(text, provider_reply, self._context)
                 if governed and not self._response_governor.is_idle_response(governed):
                     self._diag["provider_knowledge_route_used"] += 1
-                    return governed[: _MAX_RESPONSE_LENGTH]
+                    return _truncate_safe(governed)
 
+        # Delegate all search and knowledge retrieval to the KnowledgeRouter (Tier 2-3)
         wiki = self._knowledge_router.route(text)
         if wiki:
             self._diag["provider_knowledge_route_used"] += 1
-            return wiki[: _MAX_RESPONSE_LENGTH]
+            # If it was a freshness query and we have results, we can optionally
+            # pass them to the provider for summarization, but for now we follow
+            # the established deterministic path.
+            return _truncate_safe(wiki)
+
+        # If it was a freshness query and KnowledgeRouter failed, fallback to provider as last resort
+        if is_freshness_query and prefer_provider:
+            provider_reply = _ask_gemini(text)
+            if provider_reply:
+                governed = self._governor.govern(text, provider_reply, self._context)
+                if governed and not self._response_governor.is_idle_response(governed):
+                    self._diag["provider_knowledge_route_used"] += 1
+                    return _truncate_safe(governed)
 
         offline = self._response_governor._knowledge_fallback.get_fallback(text)
         if offline:
             self._diag["educational_route_used"] += 1
             self._diag["semantic_fallback_used"] += 1
-            return offline[: _MAX_RESPONSE_LENGTH]
+            return _truncate_safe(offline)
 
         self._diag["educational_route_rejected"] += 1
         return self._response_governor._knowledge_fallback.get_knowledge_failure(text)
@@ -783,12 +868,12 @@ class ConversationResponder:
                     pool = _DEGRADED_TOPIC_VARIANTS
                     idx = self._rotation_counters.get("degraded_topic", 0) % len(pool)
                     self._rotation_counters["degraded_topic"] = idx + 1
-                    degraded = pool[idx].format(topic=topic)[: _MAX_RESPONSE_LENGTH]
+                    degraded = _truncate_safe(pool[idx].format(topic=topic))
                 else:
                     pool = _DEGRADED_NO_TOPIC_VARIANTS
                     idx = self._rotation_counters.get("degraded_no_topic", 0) % len(pool)
                     self._rotation_counters["degraded_no_topic"] = idx + 1
-                    degraded = pool[idx][: _MAX_RESPONSE_LENGTH]
+                    degraded = _truncate_safe(pool[idx])
                 return self._response_governor.govern(
                     degraded, original_text or "", is_fallback=True
                 )
@@ -815,9 +900,9 @@ class ConversationResponder:
         """Generate degraded fallback with topic continuity preservation."""
         topic = self._context.recent_topic()
         if topic and topic.lower() not in text_lower.lower():
-            return (
+            return _truncate_safe(
                 f"Topic is {topic} — ask about that?"
-            )[: _MAX_RESPONSE_LENGTH]
+            )
         return self._conversational_reply(text_lower, orchestration)
 
     def get_context_diagnostics(self) -> dict:
@@ -850,10 +935,19 @@ class ConversationResponder:
         return self._generic_response()
 
     def _resolve_greeting_category(self, text_lower: str) -> Optional[str]:
-        """Check if input matches a greeting category."""
+        """Check if input matches a greeting or joke category."""
         for key, category in _GREETING_CATEGORY.items():
             if text_lower == key or text_lower == key.strip(".") or text_lower == key + "?":
                 return category
+        # Try with greeting qualifiers stripped ("hello kio" -> "hello")
+        stripped = _strip_greeting_qualifiers(text_lower)
+        if stripped != text_lower:
+            for key, category in _GREETING_CATEGORY.items():
+                if stripped == key or stripped == key.strip(".") or stripped == key + "?":
+                    return category
+        for trigger in _JOKE_TRIGGERS:
+            if trigger in text_lower:
+                return "joke"
         return None
 
     def _greeting_reply(self, category: str, text_lower: str) -> str:
@@ -909,7 +1003,7 @@ class ConversationResponder:
         base = handoff_result.message or "That action was refused for safety reasons."
         if "Runtime Veto" in base:
             return "That action is blocked by runtime safety controls."
-        return base[: _MAX_RESPONSE_LENGTH]
+        return _truncate_safe(base)
 
     def _execution_summary(self, handoff_result: RuntimeHandoffResult) -> str:
         """Summarize execution result with deterministic variant."""
@@ -924,8 +1018,8 @@ class ConversationResponder:
                 closings = _EXECUTION_CLOSINGS.get(action_type, [""])
                 closing_idx = self._rotation_counters.get(f"closing_{action_type}", 0) % len(closings)
                 self._rotation_counters[f"closing_{action_type}"] = closing_idx + 1
-                return _synthesize(header, closing=closings[closing_idx])[: _MAX_RESPONSE_LENGTH]
-        return msg[: _MAX_RESPONSE_LENGTH]
+                return _truncate_safe(_synthesize(header, closing=closings[closing_idx]))
+        return _truncate_safe(msg)
 
     @staticmethod
     def _classify_execution_message(message: str) -> tuple[Optional[str], Optional[str]]:

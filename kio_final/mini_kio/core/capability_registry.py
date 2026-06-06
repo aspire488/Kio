@@ -26,6 +26,7 @@ class CapabilityEntry:
     process_ref: Optional[str] = None
     browser_pid: Optional[int] = None
     ownership_scope: str = "kio"
+    temp_profile_dir: Optional[str] = None
 
 
 class CapabilityRegistry:
@@ -39,7 +40,7 @@ class CapabilityRegistry:
             "capability_lookup_failed": 0,
         }
 
-    def register(self, canonical_target: str, browser: str, url: str, browser_pid: Optional[int] = None) -> str:
+    def register(self, canonical_target: str, browser: str, url: str, browser_pid: Optional[int] = None, temp_profile_dir: Optional[str] = None) -> str:
         self._counter += 1
         cap_id = f"cap_{int(time.time())}_{self._counter:04d}"
         entry = CapabilityEntry(
@@ -51,6 +52,7 @@ class CapabilityRegistry:
             last_used=time.time(),
             active=True,
             browser_pid=browser_pid,
+            temp_profile_dir=temp_profile_dir,
         )
         self._sessions[cap_id] = entry
         # Enforce limit by evicting oldest inactive sessions

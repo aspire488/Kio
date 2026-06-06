@@ -40,10 +40,8 @@ DIAG_CHAIN_EXHAUSTED = "provider_chain_exhausted"
 DIAG_PROVIDER_RECOVERED = "provider_recovered"
 DIAG_PROVIDER_DEAD = "provider_dead"
 DIAG_PROVIDER_CHAIN_EMPTY = "provider_chain_empty"
-DIAG_PROVIDER_REGISTRY_CORRUPTION = "provider_registry_corruption"
 DIAG_PROVIDER_RECOVERY_ATTEMPTED = "provider_recovery_attempted"
 DIAG_PROVIDER_HEALTH_TRANSITION = "provider_health_transition"
-DIAG_PROVIDER_MARKED_UNAVAILABLE = "provider_marked_unavailable"
 
 
 @dataclass
@@ -57,14 +55,16 @@ class DiagnosticRecord:
 class ProviderPriority(int, Enum):
     GEMINI = 0
     GROQ = 1
-    OPENROUTER = 2
-    TOGETHER_AI = 3
-    CEREBRAS = 4
+    HUGGINGFACE = 2
+    OPENROUTER = 3
+    TOGETHER_AI = 4
+    CEREBRAS = 5
 
 
 _PERMANENT_ERROR_PATTERNS = (
     "INVALID_API_KEY", "AUTH_FAILED", "PERMISSION_DENIED",
-    "GEMINI_AUTH_ERROR", "GEMINI_NOT_CONFIGURED",
+    "GEMINI_AUTH_ERROR", "GEMINI_NOT_CONFIGURED", "GEMINI_MODEL_NOT_FOUND",
+    "HUGGINGFACE_AUTH_ERROR", "HUGGINGFACE_MODEL_NOT_FOUND", "HUGGINGFACE_NOT_CONFIGURED",
     "API_KEY_INVALID", "UNAUTHORIZED", "FORBIDDEN",
     "404", "NOT_FOUND", "INVALID_MODEL",
 )
@@ -104,6 +104,8 @@ class ProviderFailoverRegistry:
         self._priority_map: Dict[str, int] = {}
         self._states: Dict[str, ProviderState] = {}
         self._failures: Dict[str, int] = {}
+        self._last_error: Dict[str, str] = {}
+        self._last_error_time: Dict[str, float] = {}
         self._cooldown_until: Dict[str, float] = {}
         self._diagnostics: List[DiagnosticRecord] = []
 
@@ -116,6 +118,8 @@ class ProviderFailoverRegistry:
         self._providers.sort(key=lambda n: self._priority_map.get(n, 99))
         self._states[name] = ProviderState.HEALTHY
         self._failures[name] = 0
+        self._last_error[name] = ""
+        self._last_error_time[name] = 0.0
         self._cooldown_until[name] = 0.0
         logger.info(f"ProviderRegistry: registered '{name}' at priority {priority}")
 
@@ -134,6 +138,8 @@ class ProviderFailoverRegistry:
                 if self._cooldown_until.get(name, 0) <= now:
                     self._states[name] = ProviderState.HEALTHY
                     self._failures[name] = 0
+                    self._last_error[name] = ""
+                    self._last_error_time[name] = 0.0
                     logger.info(f"Provider cooldown expired: {name} recovered to HEALTHY")
                     self._diagnostics.append(DiagnosticRecord(
                         event=DIAG_PROVIDER_RECOVERY_ATTEMPTED, provider=name,
@@ -152,7 +158,10 @@ class ProviderFailoverRegistry:
                         detail=f"cooldown {remaining:.0f}s remaining", timestamp=now,
                     ))
             elif state == ProviderState.DEAD:
-                pass
+                self._diagnostics.append(DiagnosticRecord(
+                    event=DIAG_PROVIDER_SKIPPED, provider=name,
+                    detail="DEAD — permanent error", timestamp=now,
+                ))
             else:
                 chain.append(name)
         if not chain:
@@ -166,6 +175,8 @@ class ProviderFailoverRegistry:
         if name not in self._states:
             return
         self._failures[name] = 0
+        self._last_error[name] = ""
+        self._last_error_time[name] = 0.0
         self._states[name] = ProviderState.HEALTHY
         self._diagnostics.append(DiagnosticRecord(
             event=DIAG_PROVIDER_SELECTED, provider=name,
@@ -177,6 +188,8 @@ class ProviderFailoverRegistry:
             return ProviderState.DEAD
         now = time.time()
         self._failures[name] = self._failures.get(name, 0) + 1
+        self._last_error[name] = error_code
+        self._last_error_time[name] = now
         fail_count = self._failures[name]
 
         if _is_permanent_error(error_code):
@@ -186,6 +199,11 @@ class ProviderFailoverRegistry:
                 detail=f"permanent: {error_code}", timestamp=now,
             ))
             return ProviderState.DEAD
+
+        self._diagnostics.append(DiagnosticRecord(
+            event=DIAG_PROVIDER_FAILED, provider=name,
+            detail=f"{error_code} (failure #{fail_count})", timestamp=now,
+        ))
 
         if fail_count >= self.COOLDOWN_THRESHOLD:
             cooldown = self._get_cooldown_duration(error_code)
@@ -197,11 +215,6 @@ class ProviderFailoverRegistry:
                 timestamp=now,
             ))
             return ProviderState.COOLDOWN
-
-        self._diagnostics.append(DiagnosticRecord(
-            event=DIAG_PROVIDER_FAILED, provider=name,
-            detail=f"{error_code} (failure #{fail_count})", timestamp=now,
-        ))
 
         if fail_count >= self.DEGRADE_THRESHOLD:
             self._states[name] = ProviderState.DEGRADED
@@ -237,48 +250,28 @@ class ProviderFailoverRegistry:
     def get_failure_count(self, name: str) -> int:
         return self._failures.get(name, 0)
 
+    def get_last_error(self, name: str) -> str:
+        return self._last_error.get(name, "")
+
+    def get_last_error_time(self, name: str) -> float:
+        return self._last_error_time.get(name, 0.0)
+
     def snapshot(self) -> dict:
         """Immutable registry snapshot for chain integrity validation."""
         return {
             "providers": list(self._providers),
             "states": dict(self._states),
             "failures": dict(self._failures),
+            "last_error": dict(self._last_error),
+            "last_error_time": dict(self._last_error_time),
             "priorities": dict(self._priority_map),
         }
-
-    def validate_chain(self) -> tuple[bool, str]:
-        """Validate chain integrity: no duplicate priorities, no self-contradictory states."""
-        snap = self.snapshot()
-        priorities = list(snap["priorities"].values())
-        if len(priorities) != len(set(priorities)):
-            self._diagnostics.append(DiagnosticRecord(
-                event=DIAG_PROVIDER_REGISTRY_CORRUPTION, provider="system",
-                detail="duplicate priority values", timestamp=time.time(),
-            ))
-            return False, "duplicate priority values"
-        for name in snap["providers"]:
-            state = snap["states"].get(name)
-            if state == ProviderState.COOLDOWN:
-                cd = self._cooldown_until.get(name, 0)
-                if cd > time.time() and name in snap["providers"] and state not in (ProviderState.HEALTHY, ProviderState.DEGRADED):
-                    pass
-            if state not in (ProviderState.HEALTHY, ProviderState.DEGRADED, ProviderState.COOLDOWN, ProviderState.DEAD):
-                self._diagnostics.append(DiagnosticRecord(
-                    event=DIAG_PROVIDER_REGISTRY_CORRUPTION, provider=name,
-                    detail=f"invalid state: {state}", timestamp=time.time(),
-                ))
-                return False, f"invalid state for {name}: {state}"
-        if not snap["providers"]:
-            self._diagnostics.append(DiagnosticRecord(
-                event=DIAG_PROVIDER_CHAIN_EMPTY, provider="system",
-                detail="no registered providers", timestamp=time.time(),
-            ))
-            return False, "no registered providers"
-        return True, "chain valid"
 
     def reset(self) -> None:
         self._providers.clear()
         self._states.clear()
         self._failures.clear()
+        self._last_error.clear()
+        self._last_error_time.clear()
         self._cooldown_until.clear()
         self._diagnostics.clear()

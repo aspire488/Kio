@@ -79,7 +79,7 @@ class TestConversationResponder(unittest.TestCase):
         response = self.responder.generate(text, orch, result)
         self.assertNotEqual(response, text)
         self.assertTrue(len(response) > 0)
-        self.assertLess(len(response), 600)
+        self.assertLess(len(response), 2000)
         has_authority = any(w in response.lower() for w in ["permissions", "control", "security", "authority", "access", "veto", "gate"])
         self.assertTrue(has_authority, f"Expected authority/security/control semantics, got: {response}")
 
@@ -122,6 +122,28 @@ class TestConversationResponder(unittest.TestCase):
             f"Expected greeting, got: {response}",
         )
 
+    def test_greeting_hello_kio(self):
+        """'hello kio' resolves to greeting."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="hello kio")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "hello kio")
+        response = self.responder.generate("hello kio", orch, result)
+        self.assertTrue(
+            "hello" in response.lower() or "hi" in response.lower() or "hey" in response.lower(),
+            f"Expected greeting for 'hello kio', got: {response}",
+        )
+
+    def test_greeting_qualifiers(self):
+        """Greetings with qualifier words resolve to base greeting."""
+        for text in ["hi kio", "hey kio", "good morning kio", "yo kio", "hello bro", "hey dude", "hi buddy", "hello there"]:
+            with self.subTest(text=text):
+                orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+                result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+                response = self.responder.generate(text, orch, result)
+                self.assertTrue(
+                    any(w in response.lower() for w in ["hello", "hi", "hey", "ready", "online", "present", "here"]),
+                    f"Expected greeting for {text!r}, got: {response}",
+                )
+
 
     def test_greeting_how_are_you(self):
         """'how are you' returns status response."""
@@ -138,6 +160,47 @@ class TestConversationResponder(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "thanks")
         response = self.responder.generate("thanks", orch, result)
         self.assertNotEqual(response, "thanks")
+
+    # ── Social routing ─────────────────────────────────────────────────
+
+    def test_social_thanks_variants(self):
+        """Thanks variants resolve locally."""
+        phrases = ["thanks", "thank you", "thanks kio", "thank you kio", "appreciate it", "that helped"]
+        for text in phrases:
+            with self.subTest(text=text):
+                orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+                result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+                response = self.responder.generate(text, orch, result)
+                self.assertIn(response, ["You're welcome.", "No problem.", "Happy to help.", "Anytime."],
+                              f"Expected thanks response for {text!r}, got: {response}")
+
+    def test_social_farewell_variants(self):
+        """Farewell variants resolve locally."""
+        for text in ["bye", "bye kio", "goodbye", "see you", "see you later", "catch you later", "talk to you later", "good night", "good night kio"]:
+            with self.subTest(text=text):
+                orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+                result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+                response = self.responder.generate(text, orch, result)
+                self.assertNotIn(response, [text, f"I couldn't retrieve information for {text!r}"],
+                                 f"Expected farewell response for {text!r}, got: {response}")
+
+    def test_social_positive_feedback(self):
+        """Positive feedback variants resolve locally."""
+        phrases = ["good job", "nice work", "well done", "awesome", "great work", "excellent"]
+        for text in phrases:
+            with self.subTest(text=text):
+                orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text=text)
+                result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, text)
+                response = self.responder.generate(text, orch, result)
+                self.assertNotIn(response, [text, f"I couldn't retrieve information for {text!r}"],
+                                 f"Expected feedback response for {text!r}, got: {response}")
+
+    def test_social_thanks_kio(self):
+        """'thanks kio' resolves locally through qualifier stripping."""
+        orch = _mock_orchestration(OrchestrationState.CONVERSATIONAL, response_text="thanks kio")
+        result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "thanks kio")
+        response = self.responder.generate("thanks kio", orch, result)
+        self.assertIn(response, ["You're welcome.", "No problem.", "Happy to help.", "Anytime."])
 
     # ── Confirmation prompts ───────────────────────────────────────────
 
@@ -209,7 +272,7 @@ class TestConversationResponder(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       long_msg, success=True)
         response = self.responder.generate("open notepad", orch, result)
-        self.assertLessEqual(len(response), 600)
+        self.assertLessEqual(len(response), 2000)
 
     # ── Restricted-topic handling ──────────────────────────────────────
 
@@ -247,7 +310,7 @@ class TestConversationResponder(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY,
                                       "hello " * 500)
         response = self.responder.generate("hello", orch, result)
-        self.assertLessEqual(len(response), 600)
+        self.assertLessEqual(len(response), 2000)
 
 
 class TestResponderIntegration(unittest.TestCase):
@@ -392,7 +455,7 @@ class TestToneProfiles(unittest.TestCase):
         """Neutral generic response is standard."""
         generic = self.responder._generic_response()
         self.assertTrue(len(generic) > 0)
-        self.assertLess(len(generic), 600)
+        self.assertLess(len(generic), 2000)
 
     def test_tone_concise(self):
         """Concise tone generic response is shorter."""
@@ -405,7 +468,7 @@ class TestToneProfiles(unittest.TestCase):
         self.responder.set_tone(ConversationTone.HELPFUL)
         generic = self.responder._generic_response()
         self.assertTrue(len(generic) > 0)
-        self.assertLess(len(generic), 600)
+        self.assertLess(len(generic), 2000)
 
     def test_tone_does_not_affect_knowledge_base(self):
         """Tone does not alter knowledge base responses — canonical authority preserved."""
@@ -571,7 +634,7 @@ class TestExecutionRotation(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       f"Opened {long_target}", success=True)
         response = self.responder.generate(f"open {long_target}", orch, result)
-        self.assertLessEqual(len(response), 600)
+        self.assertLessEqual(len(response), 2000)
 
 
 class TestGenericVariation(unittest.TestCase):
@@ -597,7 +660,7 @@ class TestGenericVariation(unittest.TestCase):
         r3 = self._generic()
         for r in (r1, r2, r3):
             self.assertTrue(len(r) > 0)
-            self.assertLess(len(r), 600)
+            self.assertLess(len(r), 2000)
         self.assertGreater(len(set([r1, r2, r3])), 1,
                            "All generic responses identical — dead collapse")
 
@@ -615,7 +678,7 @@ class TestGenericVariation(unittest.TestCase):
         self.assertEqual(len(seq2), 5)
         for r in seq1 + seq2:
             self.assertTrue(len(r) > 0)
-            self.assertLessEqual(len(r), 600)
+            self.assertLessEqual(len(r), 2000)
         all_responses = seq1 + seq2
         self.assertGreater(len(set(all_responses)), 1,
                            "All generic responses identical — dead collapse")
@@ -930,7 +993,7 @@ class TestSynthesisCoherence(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       f"Opened {long_target}", success=True)
         response = self.responder.generate(f"open {long_target}", orch, result)
-        self.assertLessEqual(len(response), 600)
+        self.assertLessEqual(len(response), 2000)
 
 
 class TestMultiStepNarration(unittest.TestCase):

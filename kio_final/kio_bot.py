@@ -95,11 +95,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.chat.send_action("typing")
 
     try:
-        # route() runs synchronous blocking code — use to_thread to avoid
-        # blocking the asyncio event loop
         result = await asyncio.to_thread(route, command, user_id)
 
-        # BUG-08 FIX: safe multi-type handling
         if isinstance(result, dict):
             msg = result.get("message", "")
         elif isinstance(result, str):
@@ -110,13 +107,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not msg:
             msg = "Done."
 
-        # Telegram max message length is 4096 chars
         if len(msg) > 4000:
             msg = msg[:4000] + "…"
 
         await update.message.reply_text(msg)
 
-    except Exception as exc:
+    except BaseException as exc:
         logger.exception(f"[TELEGRAM] handler error: {exc}")
         await update.message.reply_text(
             "KIO encountered an error but is still running."
@@ -129,11 +125,61 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ---------------------------------------------------------------------------
+# PTB Lifecycle Instrumentation
+# ---------------------------------------------------------------------------
+
+async def _lifecycle_post_init(app: Application) -> None:
+    """Called by PTB after initialize() — lifecycle trace point."""
+    logger.info("[LIFECYCLE] post_init app.running=%s", app.running)
+
+
+async def _lifecycle_post_stop(app: Application) -> None:
+    """Called by PTB after stop() — lifecycle trace point."""
+    logger.info("[LIFECYCLE] post_stop app.running=%s", app.running)
+
+
+async def _lifecycle_post_shutdown(app: Application) -> None:
+    """Called by PTB after shutdown() — lifecycle trace point."""
+    logger.info("[LIFECYCLE] post_shutdown app.running=%s", app.running)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
+_restart_counter = 0
+
+
+def _build_app() -> Application:
+    """Build a fresh PTB Application instance with all handlers."""
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .post_init(_lifecycle_post_init)
+        .post_stop(_lifecycle_post_stop)
+        .post_shutdown(_lifecycle_post_shutdown)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(handle_error)
+    return app
+
+
 def run_bot(runtime=None) -> None:
-    """Build and run the Telegram bot (blocks until Ctrl-C)."""
+    """Build and run the Telegram bot indefinitely.
+
+    The bot auto-restarts if python-telegram-bot's run_polling exits
+    unexpectedly (e.g. due to KeyboardInterrupt internally caught by PTB).
+
+    Only a true OS signal (Ctrl+C / SIGTERM) stops the loop.
+    """
     if not TELEGRAM_TOKEN:
         logger.error("TELEGRAM_TOKEN not set — bot cannot start")
         print("ERROR: TELEGRAM_TOKEN not configured in .env")
@@ -147,35 +193,55 @@ def run_bot(runtime=None) -> None:
         runtime = bootstrap_runtime()
         print("Runtime initialized")
 
-    # Apply bounded timeouts for network resilience (30s max)
-    app = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .build()
-    )
+    global _restart_counter
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help",  cmd_help))
-    # Catch-all for unrecognized /commands — prevents silent drop
-    app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(handle_error)
+    # ── FIX: run_polling auto-restart loop ──────────────────────────
+    # PTB's run_polling can exit when KeyboardInterrupt/SystemExit is
+    # raised inside the event loop (caught by PTB's internal except).
+    # On return the Application is shut down and must be rebuilt.
+    # We loop forever so KIO survives these transient shutdowns.
+    while True:
+        app = _build_app()
+        print("Bot running…")
 
-    print("Bot running… Press Ctrl-C to stop.")
-    # BUG-09 FIX: PTB's run_polling handles its own loops, but we catch
-    # initial startup networking failures (like TimedOut) to exit cleanly.
+        try:
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+            )
+        except KeyboardInterrupt:
+            # Real Ctrl+C from terminal — stop the loop, let process exit
+            logger.warning("[KIO] KeyboardInterrupt — shutting down")
+            print("\nShutdown requested.")
+            break
+        except SystemExit:
+            # SystemExit — treat as unexpected, restart
+            logger.warning("[KIO] run_polling exited with SystemExit — restarting", exc_info=True)
+        except BaseException:
+            logger.exception("[KIO] run_polling exited with unexpected exception — restarting")
+        else:
+            # run_polling returned normally (caught KeyboardInterrupt inside PTB)
+            logger.warning(
+                "[KIO] run_polling returned without exception (restart #%d)",
+                _restart_counter,
+            )
+
+        _restart_counter += 1
+
+        # Brief pause before restart to avoid tight loop on repeated failures
+        import time as _time
+        _time.sleep(2)
+
+    # Graceful shutdown of connector
     try:
-        app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-        )
-    except Exception as exc:
-        logger.error(f"Telegram bot failed to start: {exc}")
-        print(f"\nERROR: Telegram network failure: {exc}")
+        from mini_kio.core.runtime import get_runtime
+        rt = get_runtime()
+        if rt:
+            # Give connector a moment to close gracefully
+            import time as _time
+            _time.sleep(0.5)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

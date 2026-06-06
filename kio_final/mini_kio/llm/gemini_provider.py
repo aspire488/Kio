@@ -16,13 +16,13 @@ class GeminiProvider(LLMProvider):
     """
     Bounded Gemini conversational provider.
     Text-in / text-out only. No tools, no streaming, no autonomous behavior.
-    Model name is configurable via GEMINI_MODEL (default: gemini-1.5-flash).
-    Falls back to GEMINI_FALLBACK_MODEL (default: gemini-1.5-flash-8b) on empty response.
+    Model name is configurable via GEMINI_MODEL (default: gemini-2.5-flash).
+    Falls back to GEMINI_FALLBACK_MODEL (default: gemini-2.0-flash) on empty response.
     """
 
     def __init__(self, api_key: str, timeout_s: float = 15.0, max_tokens: int = 200,
-                 model_name: str = "gemini-1.5-flash",
-                 fallback_model_name: str = "gemini-1.5-flash-8b"):
+                 model_name: str = "gemini-2.5-flash",
+                 fallback_model_name: str = "gemini-2.0-flash"):
         self._api_key = api_key
         self._default_timeout_s = timeout_s
         self._default_max_tokens = max_tokens
@@ -109,6 +109,15 @@ class GeminiProvider(LLMProvider):
                         status=LLMStatus.DEGRADED,
                         content="",
                         error_code="GEMINI_QUOTA_EXCEEDED",
+                        provider=self.provider_name,
+                    )
+                elif "404" in error_str.lower() or "model removed" in error_str.lower() or "model unsupported" in error_str.lower() or "model unavailable" in error_str.lower():
+                    logger.warning(f"Gemini provider generate: model not found/unavailable on {name}")
+                    return LLMResponse(
+                        success=False,
+                        status=LLMStatus.ERROR,
+                        content="",
+                        error_code="GEMINI_MODEL_NOT_FOUND",
                         provider=self.provider_name,
                     )
                 if "api_key" in error_str.lower() or "api key" in error_str.lower() or "unauthorized" in error_str.lower():

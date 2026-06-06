@@ -12,6 +12,8 @@ import re
 import logging
 from typing import Optional, Dict
 
+from mini_kio.llm.emoji_normalizer import normalize_emoji_text
+
 logger = logging.getLogger(__name__)
 
 _TYPO_MAP = {
@@ -34,6 +36,29 @@ _TYPO_MAP = {
     "thx": "thanks",
     "thanx": "thanks",
     "javascrpt": "javascript",
+    "urs": "yours",
+    "im": "i am",
+    "idk": "i do not know",
+    "ik": "i know",
+    "imo": "in my opinion",
+    "tbh": "to be honest",
+    "wbt": "what about",
+    "abt": "about",
+    "bc": "because",
+    "cuz": "because",
+    "pls": "please",
+    "ty": "thank you",
+    "rn": "right now",
+    "tmrw": "tomorrow",
+    "tdy": "today",
+    "wdym": "what do you mean",
+    "wyd": "what are you doing",
+    "gonna": "going to",
+    "wanna": "want to",
+    "yh": "yeah",
+    "ye": "yeah",
+    "yup": "yeah",
+    "nah": "no",
 }
 
 _CONTINUITY_TRIGGERS = {"next", "continue", "more"}
@@ -47,6 +72,7 @@ class InputNormalizer:
             "typo_normalization_applied": False,
             "authority_override_used": False,
             "continuity_resume_used": False,
+            "emoji_normalize_applied": False,
             "emoji_sanitize_applied": False,
         }
 
@@ -56,6 +82,7 @@ class InputNormalizer:
             "typo_normalization_applied": False,
             "authority_override_used": False,
             "continuity_resume_used": False,
+            "emoji_normalize_applied": False,
             "emoji_sanitize_applied": False,
         }
 
@@ -80,7 +107,14 @@ class InputNormalizer:
         urls = re.findall(r'https?://\S+', text)
         for i, url in enumerate(urls):
             text = text.replace(url, f"__URL_PLACEHOLDER_{i}__")
-            
+
+        # 1b. Emoji normalization — replace mapped emojis with semantic tags
+        # BEFORE non-ASCII stripping. Unmapped emojis still get stripped below.
+        emoji_normalized = normalize_emoji_text(text)
+        if emoji_normalized != text:
+            self._diag["emoji_normalize_applied"] = True
+        text = emoji_normalized
+
         # 2. Strip emojis and symbol noise (preserving basic alphanumeric and command punctuation)
         # We want to keep: a-z A-Z 0-9 space . , ! ? : ; / - _ ( ) [ ] { } ' " 
         # and our placeholders

@@ -274,6 +274,63 @@ class TestInputNormalizer:
         result = normalizer.normalize_typos("pythn baiscs")
         assert "python" in result and "basics" in result
 
+    # ── Emoji normalization regression tests ──
+
+    def test_sanitize_emoji_bro_skull(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("bro 💀")
+        assert "dead_laughing" in result
+        assert "bro" in result
+        assert normalizer.get_diag()["emoji_normalize_applied"]
+
+    def test_sanitize_emoji_nah_cry(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("nah 😭")
+        assert "crying_laughing_or_overwhelmed" in result
+        assert "nah" in result
+
+    def test_sanitize_emoji_fire(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("that's fire 🔥")
+        assert "excellent_or_exciting" in result
+        assert "fire" in result
+
+    def test_sanitize_emoji_who_r_u(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("who r u 💀")
+        assert "dead_laughing" in result
+
+    def test_sanitize_emoji_nvidia_news(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("latest nvidia news 🔥")
+        assert "excellent_or_exciting" in result
+        assert "nvidia" in result
+
+    def test_sanitize_emoji_open_youtube(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("open youtube 💀")
+        assert "dead_laughing" in result
+        assert "youtube" in result
+
+    def test_sanitize_emoji_non_mapped_preserved(self):
+        normalizer = InputNormalizer()
+        # 🦥 (sloth) is not in the emoji map — should be stripped, not converted
+        result = normalizer.sanitize("hello 🦥")
+        assert "hello" in result
+        assert "🦥" not in result
+
+    def test_sanitize_emoji_plain_text_unchanged(self):
+        normalizer = InputNormalizer()
+        result = normalizer.sanitize("explain the TCP/IP protocol")
+        assert "tcp/ip" in result or "protocol" in result
+        assert not normalizer.get_diag()["emoji_normalize_applied"]
+
+    def test_strip_emoji_still_works(self):
+        # strip_emoji must remain unaffected by emoji normalization
+        result = InputNormalizer.strip_emoji("bro 💀")
+        assert "💀" not in result
+        assert "bro" in result
+
 
 # ── Continuity Pre-Route Tests ───────────────────────────────────────────────
 

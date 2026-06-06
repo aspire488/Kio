@@ -28,6 +28,7 @@ _EXTRACT_TOPIC_PREFIXES = [
     "what is ", "what are ", "tell me about ", "what does ", "what do ",
     "what's ", "whats ", "explain ", "define ", "teach me ",
     "who created ", "who is ", "who made ", "who wrote ",
+    "who do you think ", "who do you ",
 ]
 
 _PRONOMINAL_STOPWORDS = frozenset({
@@ -68,6 +69,8 @@ class ConversationContext:
     def __init__(self):
         self._exchanges: list[tuple[str, str]] = []
         self._topic_stack: list[str] = []
+        self._entity_stack: list[str] = []
+        self._last_subject: Optional[str] = None
         self._lesson_mode: bool = False
         self._lesson_step: int = 0
         self._session_mode: SessionMode = SessionMode.CONVERSATIONAL
@@ -80,8 +83,22 @@ class ConversationContext:
         topic = self._extract_topic(user_text)
         if topic:
             self._topic_stack.append(topic)
+        entities = self._extract_entities(user_text)
+        for e in entities:
+            if e.lower() not in (self._entity_stack[-1].lower() if self._entity_stack else ""):
+                self._entity_stack.append(e)
+                self._last_subject = e
         self._exchanges.append((user_text, reply))
         self.prune()
+
+    @staticmethod
+    def _extract_entities(text: str) -> list[str]:
+        entities: list[str] = []
+        for word in text.split():
+            clean = word.strip(".,!?;:'\"()")
+            if len(clean) > 1 and clean[0].isupper() and clean.lower() not in _PRONOMINAL_STOPWORDS:
+                entities.append(clean)
+        return entities
 
     def set_lesson_state(self, mode: bool, step: int) -> None:
         pass
@@ -100,28 +117,47 @@ class ConversationContext:
             return self._topic_stack[-1]
         return None
 
+    def recent_entity(self) -> Optional[str]:
+        if self._entity_stack:
+            return self._entity_stack[-1]
+        return self.recent_topic()
+
+    def last_subject(self) -> Optional[str]:
+        return self._last_subject or self.recent_topic()
+
     def resolve_reference(self, text: str) -> str:
         topic = self.recent_topic()
-        if not topic:
-            return text
+        entity = self.recent_entity()
+        subject = self.last_subject()
+        referent = entity or subject or topic or ""
 
         stripped = text.strip()
         if not stripped:
             return text
 
-        for pattern, repl_fn in _PRONOUN_REF_PATTERNS:
-            m = pattern.match(stripped)
-            if m:
-                prefix = repl_fn(m, topic)
-                rest = stripped[m.end():]
-                result = prefix + rest
-                self._diag["context_reference_resolved"] += 1
-                logger.debug(f"context: resolved '{stripped[:40]}' -> '{result[:60]}'")
-                if result.strip():
-                    return result
-                return text
+        # Phase 1: Pronoun patterns (existing)
+        if referent:
+            for pattern, repl_fn in _PRONOUN_REF_PATTERNS:
+                m = pattern.match(stripped)
+                if m:
+                    prefix = repl_fn(m, referent)
+                    rest = stripped[m.end():]
+                    result = prefix + rest
+                    self._diag["context_reference_resolved"] += 1
+                    logger.debug(f"context: resolved pronoun '{stripped[:40]}' -> '{result[:60]}'")
+                    if result.strip():
+                        return result
+                    return text
 
-        # "Why X" follow-up resolution
+        # Phase 2: Standalone "Why?"
+        alone = re.match(r"^why\s*\??\s*$", stripped, re.IGNORECASE)
+        if alone and referent:
+            result = f"Tell me more about {referent}"
+            self._diag["context_reference_resolved"] += 1
+            logger.debug(f"context: resolved 'Why?' -> '{result}'")
+            return result
+
+        # Phase 3: "Why X?" with verb
         why_match = re.match(
             r"^why\s+(is|does|do|are|was|were|did|can|could|would|should)\s+"
             r"(.+?)\s*\??\s*$", stripped, re.IGNORECASE
@@ -129,18 +165,60 @@ class ConversationContext:
         if why_match:
             verb = why_match.group(1)
             x = why_match.group(2).strip().strip(".,!?;:")
-            result = f"What is {topic} and why {verb} {x}"
+            result = f"What is {topic or referent} and why {verb} {x}"
             self._diag["context_reference_resolved"] += 1
-            logger.debug(f"context: resolved 'why X' -> '{result}'")
+            logger.debug(f"context: resolved 'why verb X' -> '{result}'")
             return result
 
-        # Single-word follow-up continuity
-        if " " not in stripped and len(stripped) > 1:
-            # Skip if it's a known command or stopword
-            if stripped.lower() not in _PRONOMINAL_STOPWORDS and stripped.lower() not in ("hi", "hello", "bye", "thanks", "ok", "okay"):
-                # Capitalized words are likely entities (Portugal, Barcelona)
+        # Phase 4: "Why X?" without verb (e.g., "Why Portugal?")
+        why_noun = re.match(r"^why\s+(.+?)\s*\??\s*$", stripped, re.IGNORECASE)
+        if why_noun:
+            x = why_noun.group(1).strip()
+            if x.lower() not in _PRONOMINAL_STOPWORDS:
+                if topic:
+                    result = f"Tell me about {x} in the context of {topic}"
+                else:
+                    result = f"Tell me about {x}"
+                self._diag["context_reference_resolved"] += 1
+                logger.debug(f"context: resolved 'Why X?' -> '{result}'")
+                return result
+
+        # Phase 5: "What about X?"
+        what_about = re.match(r"^what\s+about\s+(.+?)\s*\??\s*$", stripped, re.IGNORECASE)
+        if what_about:
+            x = what_about.group(1).strip()
+            if x.lower() not in _PRONOMINAL_STOPWORDS:
+                if topic:
+                    result = f"Tell me about {x} in the context of {topic}"
+                else:
+                    result = f"Tell me about {x}"
+                self._diag["context_reference_resolved"] += 1
+                logger.debug(f"context: resolved 'What about X?' -> '{result}'")
+                return result
+
+        # Phase 6: Continuation/elaboration patterns
+        continue_match = re.match(
+            r"^(tell\s+me\s+more|explain\s+(that|this|it|more)(\s+more)?|"
+            r"can\s+you\s+explain\s+(that|this|it|more)(\s+more)?|"
+            r"elaborate|more\s+details|"
+            r"that\s+one|this\s+one)\s*\??\s*$",
+            stripped, re.IGNORECASE
+        )
+        if continue_match and referent:
+            result = f"Tell me more about {referent}"
+            self._diag["context_reference_resolved"] += 1
+            logger.debug(f"context: resolved continuation -> '{result}'")
+            return result
+
+        # Phase 7: Single-word follow-up continuity
+        if " " not in stripped and len(stripped) > 1 and "?" not in stripped:
+            low = stripped.lower()
+            if low not in _PRONOMINAL_STOPWORDS and low not in ("hi", "hello", "bye", "thanks", "ok", "okay", "yes", "no", "yeah", "nope"):
                 if stripped[0].isupper() or len(stripped) > 4:
-                    result = f"Tell me about {stripped} in the context of {topic}"
+                    if topic:
+                        result = f"Tell me about {stripped} in the context of {topic}"
+                    else:
+                        result = f"Tell me about {stripped}"
                     self._diag["context_reference_resolved"] += 1
                     logger.debug(f"context: resolved follow-up '{stripped}' -> '{result}'")
                     return result
@@ -153,15 +231,21 @@ class ConversationContext:
             self._diag["conversational_context_pruned"] += 1
         while len(self._topic_stack) > _MAX_EXCHANGES:
             self._topic_stack.pop(0)
+        while len(self._entity_stack) > _MAX_EXCHANGES:
+            self._entity_stack.pop(0)
 
     def clear(self) -> None:
         self._exchanges.clear()
         self._topic_stack.clear()
+        self._entity_stack.clear()
+        self._last_subject = None
         self._lesson_mode = False
         self._lesson_step = 0
 
     def clear_topic_stack(self) -> None:
         self._topic_stack.clear()
+        self._entity_stack.clear()
+        self._last_subject = None
 
     def exchange_count(self) -> int:
         return len(self._exchanges)

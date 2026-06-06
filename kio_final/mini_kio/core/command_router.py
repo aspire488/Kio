@@ -17,15 +17,84 @@ BUG-04  "what are your features" was not in the knowledge base, causing it to
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
+import os
+import sys
 import re
 from typing import Any, Optional
 
 from mini_kio.core.execution_boundary import execute_action
 from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
+from mini_kio.core import config
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Browser Connector singleton (lazy)
+# ---------------------------------------------------------------------------
+
+_CONNECTOR_INSTANCE = None
+_CONNECTOR_STARTED = False
+
+def _get_connector():
+    global _CONNECTOR_INSTANCE, _CONNECTOR_MODULES_LOADED, _CONNECTOR_STARTED
+    if _CONNECTOR_INSTANCE is None:
+        if not config.BROWSER_CONNECTOR_ENABLED:
+            return None
+        mod = _load_connector_module()
+        if mod is None:
+            return None
+        _CONNECTOR_INSTANCE = mod.Connector(
+            mock=config.BROWSER_CONNECTOR_MOCK,
+            port=config.BROWSER_CONNECTOR_PORT,
+        )
+    if not _CONNECTOR_STARTED and config.BROWSER_CONNECTOR_ENABLED:
+        _CONNECTOR_STARTED = True
+        conn = _CONNECTOR_INSTANCE
+        if conn and not conn._mock:
+            conn.start_background()
+    return _CONNECTOR_INSTANCE
+
+
+_CONNECTOR_MODULES_LOADED = False
+_BC_PKG = "_kio_bc"
+
+
+def _load_connector_module():
+    global _CONNECTOR_MODULES_LOADED
+    if _CONNECTOR_MODULES_LOADED:
+        return sys.modules.get(f"{_BC_PKG}.connector")
+    _here = os.path.dirname(os.path.abspath(__file__))
+    # Gate 5.7 Fix: root is 2 levels up (mini_kio/core -> project root)
+    _root = os.path.abspath(os.path.join(_here, "..", ".."))
+    _pkg_dir = os.path.join(_root, "mini_kio", "browser_connector")
+    _pkg_init = os.path.join(_pkg_dir, "__init__.py")
+    if not os.path.isfile(_pkg_init):
+        return None
+    _modules = [("__init__", f"{_BC_PKG}.__init__"),
+                 ("protocol", f"{_BC_PKG}.protocol"),
+                 ("registry", f"{_BC_PKG}.registry"),
+                 ("connector", f"{_BC_PKG}.connector")]
+    try:
+        for _base, _full in _modules:
+            _file = os.path.join(_pkg_dir, _base + ".py")
+            if not os.path.isfile(_file):
+                continue
+            if _full in sys.modules:
+                continue
+            spec = importlib.util.spec_from_file_location(_full, _file)
+            if spec is None or spec.loader is None:
+                return None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[_full] = mod
+            spec.loader.exec_module(mod)
+        _CONNECTOR_MODULES_LOADED = True
+        return sys.modules.get(f"{_BC_PKG}.connector")
+    except Exception as exc:
+        logger.exception("[CONNECTOR] failed to load modules: %s", exc)
+        return None
 
 # ---------------------------------------------------------------------------
 # Lazy-import helpers (avoid circular imports at module load time)
@@ -358,27 +427,187 @@ def handle_command(command: str) -> dict:
                 from mini_kio.core.kio_diagnostics import log_diagnostic
                 log_diagnostic("browser_fallback_used", {"target": target, "browser": route_info.get("browser")})
 
-            return execute_action(route_info["action"], route_info["target"])
+            # Browser Connector: intercept browser/web targets
+            if route_info["route_type"] == "browser_fallback" and config.BROWSER_CONNECTOR_ENABLED:
+                conn = _get_connector()
+                if conn and conn.is_connected():
+                    url = _normalize_web_target_to_url(target)
+                    if url:
+                        try:
+                            result = asyncio.run(conn.open_tab(url))
+                            if result.success:
+                                _log_route("route", intent="connector_open", target=target)
+                                from mini_kio.platform.window_activation import try_activate_browser
+                                from mini_kio.core.capability_registry import get_capability_registry
+                                _entry = get_capability_registry().get_latest_active()
+                                if _entry and _entry.browser_pid:
+                                    try_activate_browser(_entry.browser_pid)
+                                return {
+                                    "success": True,
+                                    "message": f"Opened {target.capitalize()} in Chrome.",
+                                    "action": "open_app",
+                                    "target": target,
+                                }
+                        except BaseException as exc:
+                            logger.warning("[CONNECTOR] open_tab failed: %s", exc)
+
+            result = execute_action(route_info["action"], route_info["target"])
+            if route_info["route_type"] == "browser_fallback":
+                from mini_kio.platform.window_activation import try_activate_browser
+                _pid = result.get("pid") if isinstance(result, dict) else None
+                if _pid:
+                    try_activate_browser(int(_pid))
+            return result
+
+        # ── FOCUS / SWITCH ────────────────────────────────────────────────────
+        is_focus = lower.startswith("focus ")
+        is_switch = lower.startswith("switch ")
+        if (is_focus or is_switch) and config.BROWSER_CONNECTOR_ENABLED:
+            if is_focus:
+                target = command[6:].strip()
+            elif lower.startswith("switch to "):
+                target = command[10:].strip()
+            else:
+                target = command[7:].strip()
+
+            conn = _get_connector()
+            if conn and conn.is_connected():
+                try:
+                    result = asyncio.run(conn.focus_tab(target))
+                    if result.success:
+                        _log_route("route", intent="connector_focus", target=target)
+                        from mini_kio.platform.window_activation import try_activate_browser
+                        from mini_kio.core.capability_registry import get_capability_registry
+                        from mini_kio.core.routing_utils import get_browser_registry
+                        
+                        cap_reg = get_capability_registry()
+                        # Patch 2: Targeted PID selection
+                        canon_target = get_browser_registry().canonicalize(target.lower().strip())
+                        _entry = cap_reg.resolve_by_target(canon_target)
+                        if not _entry:
+                            _entry = cap_reg.get_latest_active()
+                        
+                        if _entry and _entry.browser_pid:
+                            try_activate_browser(_entry.browser_pid)
+                        return {
+                            "success": True,
+                            "message": f"Focused {target.capitalize()} tab.",
+                            "action": "focus_tab",
+                            "target": target,
+                        }
+                    return {
+                        "success": False,
+                        "message": f"Couldn't focus {target}: {result.error}",
+                        "action": "focus_tab",
+                        "target": target,
+                    }
+                except BaseException as exc:
+                    logger.warning("[CONNECTOR] focus_tab failed: %s", exc)
+                    return {
+                        "success": False,
+                        "message": f"Couldn't focus {target}.",
+                        "action": "focus_tab",
+                        "target": target,
+                    }
+            if config.BROWSER_CONNECTOR_ENABLED:
+                return {
+                    "success": False,
+                    "message": f"Can't focus {target} — Browser Connector is not connected.",
+                }
+
+        # ── LIST TABS ─────────────────────────────────────────────────────────
+        if lower in ("list tabs", "list open tabs", "what tabs are open", "show tabs") and config.BROWSER_CONNECTOR_ENABLED:
+            conn = _get_connector()
+            if conn and conn.is_connected():
+                try:
+                    result = asyncio.run(conn.list_tabs())
+                    if result.success and result.tabs:
+                        lines = []
+                        for idx, t in enumerate(result.tabs, start=1):
+                            marker = " [Opened by KIO]" if getattr(t, "is_owned", False) else ""
+                            lines.append(f"  {idx}. {t.title or t.url}{marker}")
+                        tab_list = "\n".join(lines)
+                        return {
+                            "success": True,
+                            "message": f"Open tabs:\n{tab_list}",
+                            "action": "list_tabs",
+                        }
+                    elif result.success:
+                        return {
+                            "success": True,
+                            "message": "No tabs open.",
+                            "action": "list_tabs",
+                        }
+                    return {
+                        "success": False,
+                        "message": "Couldn't list tabs.",
+                        "action": "list_tabs",
+                    }
+                except BaseException as exc:
+                    logger.warning("[CONNECTOR] list_tabs failed: %s", exc)
+                    return {
+                        "success": False,
+                        "message": "Couldn't list tabs.",
+                        "action": "list_tabs",
+                    }
+            return {
+                "success": False,
+                "message": "Browser Connector is not connected.",
+            }
 
         # ── CLOSE ─────────────────────────────────────────────────────────────
         if lower.startswith("close "):
             target = command[6:].strip()
+
+            # Browser Connector: try owned-tab close before capability registry
+            if config.BROWSER_CONNECTOR_ENABLED:
+                conn = _get_connector()
+                if conn and conn.is_connected():
+                    try:
+                        result = asyncio.run(conn.close_tab(target))
+                        if result.success:
+                            _log_route("route", intent="connector_close", target=target)
+                            return {
+                                "success": True,
+                                "message": f"Closed {target.capitalize()} tab.",
+                                "action": "close_app",
+                                "target": target,
+                            }
+                        return {
+                            "success": False,
+                            "message": f"Couldn't close {target}: {result.error}",
+                        }
+                    except BaseException as exc:
+                        logger.warning("[CONNECTOR] close_tab failed: %s", exc)
+                        return {
+                            "success": False,
+                            "message": f"Couldn't close {target}.",
+                        }
+
             # Gate 5.1: Check capability registry FIRST for browser session close
             from mini_kio.core.routing_utils import resolve_capability_for_close, deactivate_capability, close_browser_capability
             cap_info = resolve_capability_for_close(target)
             if cap_info and cap_info.get("active"):
-                close_browser_capability(cap_info)
-                deactivate_capability(target)
-                capability_name = cap_info.get("canonical_target", target).capitalize()
-                _log_route("route", intent="close_capability", target=target, capability_id=cap_info.get("capability_id"))
-                return {
-                    "success": True,
-                    "message": f"Closed the {capability_name} session.",
-                    "action": "close_app",
-                    "target": target,
-                    "capability_closed": True,
-                    "capability_name": capability_name,
-                }
+                success = close_browser_capability(cap_info)
+                if success:
+                    deactivate_capability(target)
+                    capability_name = cap_info.get("canonical_target", target).capitalize()
+                    _log_route("route", intent="close_capability", target=target, capability_id=cap_info.get("capability_id"))
+                    return {
+                        "success": True,
+                        "message": f"Closed the {capability_name} session.",
+                        "action": "close_app",
+                        "target": target,
+                        "capability_closed": True,
+                        "capability_name": capability_name,
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"Could not safely close {target} session (it might be the main browser profile).",
+                        "action": "close_app",
+                        "target": target
+                    }
             _log_route("route", intent="close_app", target=target)
             return execute_action("close_app", target)
 
@@ -424,8 +653,8 @@ def handle_command(command: str) -> dict:
             return execute_action("recovery_runtime")
 
         # ── UTILITY ───────────────────────────────────────────────────────────
-        if lower == "ping":
-            return {"success": True, "message": "Here."}
+        if lower in ("ping", "Ping", "PING"):
+            return {"success": True, "message": "KIO online!"}
 
         # ── TELEMETRY ROUTING ────────────────────────────────────────────────
         if any(x in lower for x in ("uptime", "how long have you been running")):
@@ -492,6 +721,15 @@ _ACTION_VERBS: dict[str, str] = {
     "play_youtube": "played",
     "open_folder": "opened",
     "execute_capability": "ran",
+    # Short form aliases for summarizer
+    "open": "opened",
+    "close": "closed",
+    "focus": "focused",
+    "search": "searched",
+    "play": "played",
+    "lock": "locked",
+    "shutdown": "shut down",
+    "restart": "restarted",
 }
 
 def _format_list(items: list[str]) -> str:
@@ -504,29 +742,31 @@ def _format_list(items: list[str]) -> str:
     return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
-    succeeded: list[str] = []
+    succeeded: dict[str, list[str]] = {}
     blocked: list[str] = []
-    last_verb: Optional[str] = None
     for step, result in zip(steps, results):
         action = step.get("action", "")
         target = step.get("target", "")
         verb = _ACTION_VERBS.get(action, action)
-        if verb and verb == last_verb:
-            entry = target
-        else:
-            entry = f"{verb} {target}" if verb else target
+        verb_cap = verb.capitalize()
         if result.get("blocked"):
-            blocked.append(entry)
+            blocked.append(f"{verb_cap} {target.capitalize()}")
         elif result.get("success"):
-            succeeded.append(entry)
-        last_verb = verb if verb else last_verb
-    if not succeeded and not blocked:
+            succeeded.setdefault(verb_cap, [])
+            succeeded[verb_cap].append(target.capitalize())
+    lines = []
+    for verb_cap, targets in succeeded.items():
+        v = verb_cap.capitalize()
+        lines.append(f"{v}:")
+        for t in targets:
+            lines.append(f"- {t}")
+    if blocked:
+        lines.append("Blocked:")
+        for b in blocked:
+            lines.append(f"- {b}")
+    if not lines:
         return "done"
-    if succeeded and not blocked:
-        return "done - " + _format_list(succeeded)
-    if not succeeded and blocked:
-        return "all blocked - " + _format_list(blocked)
-    return "done - " + _format_list(succeeded) + "; blocked " + _format_list(blocked)
+    return "\n".join(lines)
 
 def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
     """Execute parsed multi-step commands through runtime execution policy."""
@@ -544,6 +784,132 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
             step=idx,
             total=len(steps),
         )
+
+        # Browser Connector: intercept close actions for owned tabs
+        if action == "close" and config.BROWSER_CONNECTOR_ENABLED:
+            conn = _get_connector()
+            close_error = ""
+            close_success = False
+            if conn and conn.is_connected():
+                try:
+                    close_result = asyncio.run(conn.close_tab(target))
+                    close_success = close_result.success
+                    close_error = close_result.error or ""
+                except BaseException as exc:
+                    close_error = str(exc)
+                    logger.warning("[CONNECTOR] multi-step close_tab failed: %s", exc)
+            if close_success:
+                result = {
+                    "success": True,
+                    "message": f"Closed {target.capitalize()} tab.",
+                    "action": action,
+                    "target": target,
+                }
+            else:
+                result = {
+                    "success": False,
+                    "message": f"Couldn't close {target}: {close_error or 'browser connector not available'}",
+                    "action": action,
+                    "target": target,
+                }
+            results.append(result)
+            if result.get("success"):
+                success_count += 1
+            _log_route(
+                "execution_policy_allowed",
+                action=action,
+                target=target,
+                step=idx,
+                success=result.get("success", False),
+            )
+            continue
+
+        # Browser Connector: intercept focus actions for browser tabs
+        if action == "focus" and config.BROWSER_CONNECTOR_ENABLED:
+            conn = _get_connector()
+            if conn and conn.is_connected():
+                focus_success = False
+                focus_error = ""
+                try:
+                    focus_result = asyncio.run(conn.focus_tab(target))
+                    focus_success = focus_result.success
+                    focus_error = focus_result.error or ""
+                except BaseException as exc:
+                    focus_error = str(exc)
+                    logger.warning("[CONNECTOR] multi-step focus_tab failed: %s", exc)
+                if focus_success:
+                    from mini_kio.platform.window_activation import try_activate_browser
+                    from mini_kio.core.capability_registry import get_capability_registry
+                    from mini_kio.core.routing_utils import get_browser_registry
+                    
+                    cap_reg = get_capability_registry()
+                    # Patch 2: Targeted PID selection
+                    canon_target = get_browser_registry().canonicalize(target.lower().strip())
+                    _entry = cap_reg.resolve_by_target(canon_target)
+                    if not _entry:
+                        _entry = cap_reg.get_latest_active()
+                    
+                    if _entry and _entry.browser_pid:
+                        try_activate_browser(_entry.browser_pid)
+                    result = {"success": True, "message": f"Focused {target.capitalize()} tab.",
+                              "action": action, "target": target}
+                else:
+                    result = {"success": False, "message": f"Couldn't focus {target}: {focus_error or 'browser connector not available'}",
+                              "action": action, "target": target}
+                results.append(result)
+                if result.get("success"):
+                    success_count += 1
+                _log_route(
+                    "execution_policy_allowed",
+                    action=action,
+                    target=target,
+                    step=idx,
+                    success=result.get("success", False),
+                )
+                continue
+            else:
+                result = {"success": False, "message": f"Can't focus {target} — Browser Connector is not connected.",
+                          "action": action, "target": target}
+                results.append(result)
+                _log_route("execution_policy_allowed", action=action, target=target, step=idx, success=False)
+                continue
+
+        # Browser Connector: intercept open actions for browser web targets
+        if action == "open" and config.BROWSER_CONNECTOR_ENABLED:
+            conn = _get_connector()
+            url = _normalize_web_target_to_url(target)
+            if url and conn and conn.is_connected():
+                open_success = False
+                open_error = ""
+                try:
+                    open_result = asyncio.run(conn.open_tab(url))
+                    open_success = open_result.success
+                    open_error = open_result.error or ""
+                except BaseException as exc:
+                    open_error = str(exc)
+                    logger.warning("[CONNECTOR] multi-step open_tab failed: %s", exc)
+                if open_success:
+                    from mini_kio.platform.window_activation import try_activate_browser
+                    from mini_kio.core.capability_registry import get_capability_registry
+                    _entry = get_capability_registry().get_latest_active()
+                    if _entry and _entry.browser_pid:
+                        try_activate_browser(_entry.browser_pid)
+                    result = {"success": True, "message": f"Opened {target.capitalize()} in Chrome.",
+                              "action": action, "target": target}
+                else:
+                    result = {"success": False, "message": f"Couldn't open {target}: {open_error or 'browser connector not available'}",
+                              "action": action, "target": target}
+                results.append(result)
+                if result.get("success"):
+                    success_count += 1
+                _log_route(
+                    "execution_policy_allowed",
+                    action=action,
+                    target=target,
+                    step=idx,
+                    success=result.get("success", False),
+                )
+                continue
 
         result = execute_action(action, target)
         results.append(result)
@@ -603,7 +969,7 @@ def route(text: str, user_id: int = 0) -> str:
 
         result = dispatch_channel_input(text, channel="telegram", user_id=user_id)
         return format_channel_reply(result)
-    except Exception as exc:
+    except BaseException as exc:
         logger.exception(f"route() crashed: {exc}")
         return "KIO encountered an internal error but is still running."
 
@@ -613,17 +979,22 @@ def route(text: str, user_id: int = 0) -> str:
 # ---------------------------------------------------------------------------
 
 _KNOWLEDGE_BASE: dict[str, str] = {
-    "who is monkey d luffy":    "Monkey D. Luffy is the main protagonist of the One Piece manga/anime by Eiichiro Oda.",
-    "what is one piece":        "One Piece is a popular Japanese manga and anime series created by Eiichiro Oda.",
-    "explain c programming":    "C is a general-purpose, low-level programming language widely used for systems programming, embedded systems, and performance-critical applications.",
-    "what is programming":      "Programming is writing instructions for computers to follow, using languages like Python, C, or JavaScript.",
-    "what is computer science": "Computer science is the study of computation, algorithms, data structures, software engineering, and related fields.",
-    "what is algorithm":        "An algorithm is a step-by-step procedure for solving a problem.",
-    "what is data structure":   "A data structure organises and stores data for efficient access and modification (e.g. arrays, lists, trees).",
-    "what is recursion":        "Recursion is when a function calls itself to solve smaller sub-problems until a base case is reached.",
-    "explain recursion":        "Recursion is when a function calls itself. Example: factorial(n) = n * factorial(n-1), with factorial(0) = 1.",
-    "what is ai":               "AI (Artificial Intelligence) is the simulation of human intelligence by machines, including learning, reasoning, and problem-solving.",
-    "binary search":            "Binary search finds a target in a sorted array by repeatedly halving the search range. Time complexity: O(log n).",
+    # ── Greetings (Deterministic) ─────────────────────────────────────
+    "hello": "Hello.",
+    "hi": "Hi there.",
+    "hey": "Hey.",
+    "yo": "KIO here.",
+    "wassup": "KIO here.",
+    
+    # ── Identity (Deterministic) ──────────────────────────────────────
+    "who are you": "I am KIO — Kernel for Intelligent Orchestration. A personal operating companion built by Joel.",
+    "what are you": "I am KIO — a personal operating companion focused on automation and orchestration.",
+    "who is joel": "Joel is the creator of KIO.",
+    "who built you": "Joel built KIO.",
+    
+    # ── Capabilities (Deterministic) ──────────────────────────────────
+    "what can you do": "I can open and close applications, search Google and YouTube, play media, and open folders.",
+    "capabilities": "I handle desktop automation, web search, and conversational assistance.",
 }
 
 
@@ -639,7 +1010,7 @@ def _ai_fallback(query: str) -> dict:
 
     # 1. Knowledge base
     for key, answer in _KNOWLEDGE_BASE.items():
-        if key in q:
+        if re.search(rf"\b{re.escape(key)}\b", q):
             return {"success": True, "message": answer}
 
     # 2. Graceful unknown — eligible for Gate 3 orchestration pipeline
@@ -674,3 +1045,4 @@ def _show_help() -> dict:
 
 
 __all__ = ["handle_command", "route"]
+

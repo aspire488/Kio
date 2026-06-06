@@ -911,7 +911,7 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             },
         )
         return verified_result
-    except Exception as exc:
+    except BaseException as exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         logger.error("[EXEC] action=%s failed: %s", action, exc)
         _log_execution_event(

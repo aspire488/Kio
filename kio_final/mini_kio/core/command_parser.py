@@ -42,14 +42,16 @@ _FOLDER_KEYWORDS = {
 
 _VERBS = {
     "open", "close", "search", "type", "launch", "folder", 
-    "play", "lock", "shutdown", "restart"
+    "play", "lock", "shutdown", "restart", "focus", "switch"
 }
 
 _PLATFORM_MARKERS = {"spotify", "youtube", "google", "edge", "chrome", "comet", "firefox", "brave"}
 
-_INHERITABLE_VERBS = {"play", "search"}
+_INHERITABLE_VERBS = {"play", "search", "open", "close", "launch", "focus"}
 
-_MAX_COMMAND_STEPS = 4
+_BROWSER_ACTION_VERBS = {"open", "close", "focus", "launch", "switch"}
+
+_MAX_COMMAND_STEPS = 8
 _ALLOWED_WEB_TLDS = {"com", "ai", "org", "io", "dev", "app"}
 _SAFE_SINGLE_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SAFE_EXPLICIT_DOMAIN_RE = re.compile(
@@ -73,6 +75,13 @@ def _normalize_connectors(text: str) -> str:
     """Normalize common typos in command connectors."""
     text = re.sub(r"\b(?:anf|andd)\b", "and", text, flags=re.I)
     text = re.sub(r"\b(?:thenn)\b", "then", text, flags=re.I)
+    return text
+
+
+def _normalize_browser_multi(text: str) -> str:
+    """Normalize commas and '+' to 'and' for browser-action commands."""
+    text = re.sub(r"\s*,\s*", " and ", text)
+    text = re.sub(r"\s*\+\s*", " and ", text)
     return text
 
 
@@ -129,6 +138,12 @@ def parse_command(command: str) -> List[Dict[str, Any]]:
     command = _apply_aliases(command)
     command = _normalize_whitespace(command)
     command_lower = command.lower()
+
+    # Pre-normalize commas and '+' to 'and' for browser-action verbs
+    first_word = command_lower.split()[0] if command_lower.split() else ""
+    if first_word in _BROWSER_ACTION_VERBS:
+        command_lower = _normalize_browser_multi(command_lower)
+
     command_lower = _normalize_connectors(command_lower)
     command_lower = _collapse_repeated_conjunctions(command_lower)
 
@@ -268,6 +283,12 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
             return {}
         return {"action": "close", "target": target}
 
+    # ── SWITCH / FOCUS ────────────────────────────────────────────────────────
+    if action == "switch":
+        if target.startswith("to "):
+            target = target[3:].strip()
+        return {"action": "focus", "target": target}
+
     # ── SEARCH ────────────────────────────────────────────────────────────────
     if action == "search":
         # Strip leading "for " if present
@@ -337,9 +358,14 @@ def is_multi_step(command: str) -> bool:
     Differentiates between:
     - "open chrome and search python" (TRUE - multi-step)
     - "search for cats and dogs" (FALSE - 'and' is part of query)
-    - "play safar in spotify and sports apm in youtube" (TRUE - inheritance)
+    - "open github and youtube" (TRUE - verb inheritance)
+    - "close github and youtube" (TRUE - verb inheritance)
     """
     lower = command.lower()
+    # Normalize commas and + for browser-action verbs
+    first_word = lower.split()[0] if lower.split() else ""
+    if first_word in _BROWSER_ACTION_VERBS:
+        lower = _normalize_browser_multi(lower)
     
     for sep in (r"\s+and\s+", r"\s+then\s+"):
         parts = re.split(sep, lower, maxsplit=1)
@@ -358,9 +384,12 @@ def is_multi_step(command: str) -> bool:
             if left_verb in _VERBS:
                 if right_verb in _VERBS:
                     return True
+                # Verb inheritance: browser-action verbs are permissive
+                if left_verb in _BROWSER_ACTION_VERBS:
+                    return True
                 # Bounded continuation inheritance logic (Gate 2.4 prep)
                 if left_verb in _INHERITABLE_VERBS:
-                    # Robust check: either side has a platform marker, OR right starts with verb
+                    # Robust check: either side has a platform marker
                     if any(marker in left_part for marker in _PLATFORM_MARKERS) or \
                        any(marker in right_part for marker in _PLATFORM_MARKERS):
                         return True

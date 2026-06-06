@@ -1,5 +1,6 @@
 import pytest
 from mini_kio.llm.identity_dataset import resolve, get_identity_answer, IDENTITY_ENTRIES
+from mini_kio.llm.KIO_character_knowledge import resolve_entry_answer
 
 
 class TestIdentityDatasetCore:
@@ -199,8 +200,10 @@ class TestIdentityDatasetCoverage:
     def test_all_entries_have_triggers_and_answers(self):
         for entry in IDENTITY_ENTRIES:
             assert len(entry["triggers"]) >= 1
-            assert len(entry["answer"]) >= 10
             assert "id" in entry
+            answer = resolve_entry_answer(entry["id"])
+            assert answer is not None, f"missing authority answer for {entry['id']}"
+            assert len(answer) >= 10
 
-    def test_23_categories(self):
-        assert len(IDENTITY_ENTRIES) == 23
+    def test_28_categories(self):
+        assert len(IDENTITY_ENTRIES) == 28

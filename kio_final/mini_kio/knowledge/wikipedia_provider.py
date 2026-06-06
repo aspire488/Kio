@@ -43,11 +43,25 @@ def _cache_set(query: str, value: Optional[str]) -> None:
         _CACHE.popitem(last=False)
 
 
+def _is_disambiguation(title: str) -> bool:
+    try:
+        resp = requests.get(
+            f"{_WIKIPEDIA_REST}/{quote(title, safe='')}",
+            headers=_HEADERS,
+            timeout=_TIMEOUT_S,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("type") == "disambiguation"
+    except Exception:
+        pass
+    return False
+
+
 def _search_topic(query: str) -> Optional[str]:
     params = {
         "action": "opensearch",
         "search": query,
-        "limit": 1,
+        "limit": 5,
         "format": "json",
     }
     try:
@@ -55,7 +69,9 @@ def _search_topic(query: str) -> Optional[str]:
         resp.raise_for_status()
         data = resp.json()
         if data and len(data) > 1 and data[1]:
-            return str(data[1][0])
+            for title in data[1]:
+                if not _is_disambiguation(str(title)):
+                    return str(title)
     except requests.Timeout:
         logger.warning("wikipedia: search timeout for '%s'", query)
     except requests.RequestException as exc:

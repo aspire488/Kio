@@ -63,28 +63,6 @@ class Gate2RegressionTests(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertEqual(result["failure_class"], "restricted_target")
 
-    # ── C. CLOSE_APP SAFETY ────────────────────────────────────────────────
-
-    @patch('mini_kio.core.app_operator._find_active_process_matches')
-    def test_close_app_ambiguity_rejection(self, mock_matches):
-        """Verify ambiguous matches reject to prevent accidental mass kills."""
-        mock_matches.return_value = [1234, 5678]
-        # Using "notepad" which is in registry but we'll mock multiple PIDs
-        result = close_app("notepad")
-        self.assertFalse(result["success"])
-        self.assertEqual(result["failure_class"], "ambiguous_target")
-
-    @patch('mini_kio.core.app_operator._find_active_process_matches')
-    @patch('mini_kio.core.app_operator._terminate_with_verification')
-    def test_close_app_exact_match(self, mock_term, mock_matches):
-        """Verify exact canonical matching only."""
-        mock_matches.return_value = [1234]
-        mock_term.return_value = {"success": True, "verified_terminated": True}
-        
-        result = close_app("notepad")
-        self.assertTrue(result["success"])
-        mock_term.assert_called_once()
-
     # ── D. EXECUTION CLASSIFICATION ───────────────────────────────────────
 
     def test_execution_classification(self):

@@ -1324,6 +1324,14 @@ def bootstrap_runtime() -> KioRuntime:
     from mini_kio.core.activation import prepare_activation_groundwork
 
     prepare_activation_groundwork()
+
+    # Proactive Browser Connector initialization (Gate 5.7)
+    try:
+        from mini_kio.core.command_router import _get_connector
+        _get_connector()
+    except Exception as exc:
+        logger.error("Failed to proactively start Browser Connector: %s", exc)
+
     return runtime
 
 

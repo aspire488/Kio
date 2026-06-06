@@ -30,6 +30,18 @@ class ConversationOrchestrator:
         """
         primary = classification.primary_intent
         
+        # Gate 5: Reset state if a new conversational/educational topic is detected
+        # even if we were awaiting confirmation. This prevents confirmation leakage.
+        if self._state == OrchestrationState.AWAITING_CONFIRMATION:
+            # If the new intent is clearly not a confirmation attempt for the pending action
+            if primary.intent_type in (IntentType.CONVERSATIONAL, IntentType.EDUCATIONAL, IntentType.INFORMATIONAL):
+                text_lower = primary.normalized_text.strip(".,!?;: ")
+                is_confirmation = any(trigger == text_lower for trigger in self.CONFIRMATION_TRIGGERS)
+                # If it's not a confirmation, and it's a high-confidence non-executable intent, reset.
+                if not is_confirmation and primary.confidence > 0.5:
+                    logger.info(f"Topic change detected during confirmation: {primary.intent_type}. Resetting state.")
+                    self._reset_state()
+
         # 1. Handle AWAITING_CONFIRMATION state first
         if self._state == OrchestrationState.AWAITING_CONFIRMATION:
             return self._handle_confirmation_attempt(primary.normalized_text)

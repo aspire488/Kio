@@ -176,6 +176,93 @@ class TestContextDiagnostics:
         assert diag["context_reference_resolved"] == 2
 
 
+
+
+class TestContinuityHardening:
+    """Gate 5D.3 — continuity hardening: entity tracking, standalone why, etc."""
+
+    def setup_method(self):
+        self.ctx = ConversationContext()
+
+    def test_who_do_you_think_extracts_topic(self):
+        self.ctx.append_exchange("Who do you think wins the next football world cup?", "Hard to predict.")
+        assert self.ctx.recent_topic() is not None
+        assert "football" in self.ctx.recent_topic().lower() or "world cup" in self.ctx.recent_topic().lower()
+
+    def test_single_word_entity_followup(self):
+        self.ctx.append_exchange("Who do you think wins the next football world cup?", "Hard to predict.")
+        result = self.ctx.resolve_reference("Portugal")
+        assert "Portugal" in result
+        assert "football" in result.lower() or "world cup" in result.lower()
+
+    def test_why_standalone_resolved(self):
+        self.ctx.append_exchange("Windows or Linux?", "Depends on use case.")
+        self.ctx.append_exchange("Linux", "Good choice.")
+        result = self.ctx.resolve_reference("Why?")
+        assert "Linux" in result
+
+    def test_why_x_without_verb_resolved(self):
+        self.ctx.append_exchange("What is Python?", "A language.")
+        result = self.ctx.resolve_reference("Why Python?")
+        assert "Python" in result
+
+    def test_why_x_with_context(self):
+        self.ctx.append_exchange("Who do you think wins the next football world cup?", "Hard to predict.")
+        result = self.ctx.resolve_reference("Why Portugal?")
+        assert "Portugal" in result
+        assert "football" in result.lower() or "world cup" in result.lower()
+
+    def test_what_about_x_with_topic(self):
+        self.ctx.append_exchange("What is Python?", "A language.")
+        result = self.ctx.resolve_reference("What about Java?")
+        assert "Java" in result
+        assert "Python" in result
+
+    def test_explain_that_resolved(self):
+        self.ctx.append_exchange("What is Kubernetes?", "K8s orchestrates containers.")
+        result = self.ctx.resolve_reference("Explain that")
+        assert "Kubernetes" in result or "K8s" in result
+
+    def test_tell_me_more_resolved(self):
+        self.ctx.append_exchange("What is Kubernetes?", "K8s orchestrates containers.")
+        result = self.ctx.resolve_reference("Tell me more")
+        assert "Kubernetes" in result or "K8s" in result
+
+    def test_that_one_resolved(self):
+        self.ctx.append_exchange("What is Kubernetes?", "K8s orchestrates containers.")
+        result = self.ctx.resolve_reference("That one")
+        assert "Kubernetes" in result or "K8s" in result
+
+    def test_explain_that_more_resolved(self):
+        self.ctx.append_exchange("What is Docker?", "Docker is containers.")
+        result = self.ctx.resolve_reference("Can you explain that more?")
+        assert "Docker" in result
+
+    def test_entity_stack_prunes(self):
+        for i in range(15):
+            self.ctx.append_exchange(f"Hello {chr(65+i)}", f"Hi {chr(65+i)}")
+        assert len(self.ctx._entity_stack) <= 10
+
+    def test_entity_stack_clears_on_clear(self):
+        self.ctx.append_exchange("What is Python?", "A language.")
+        assert len(self.ctx._entity_stack) > 0
+        self.ctx.clear()
+        assert len(self.ctx._entity_stack) == 0
+
+    def test_single_word_no_topic_no_match(self):
+        result = self.ctx.resolve_reference("ok")
+        assert result == "ok"
+
+    def test_no_topic_why_standalone_unchanged(self):
+        result = self.ctx.resolve_reference("Why?")
+        assert result == "Why?"
+
+    def test_verbless_why_no_topic_returns_text(self):
+        result = self.ctx.resolve_reference("Why Portugal?")
+        assert "Portugal" in result
+
+
+
 # ── Expanded Governor — New Protected Queries ──────────────────────────
 
 
@@ -434,9 +521,6 @@ class TestResponderContextAwareFallback:
             _mock_orchestration(),
             _mock_handoff_result(ExecutionClassification.CONVERSATIONAL_ONLY, "what is the secret"),
         )
-        # Should use fallback (no LLM, no protected query match)
-        # The responder will go through conversational_reply path
-        # We can't easily mock the LLM here, but we can check that generate returns a string
 
 
 class TestResponderDiagnostics:
@@ -461,7 +545,6 @@ class TestResponderDiagnostics:
         )
         assert "KIO" in r
         diag = self.responder.get_context_diagnostics()
-        # Exchange was appended (prune count didn't increase since < 10 exchanges)
         assert self.responder._context.exchange_count() >= 1
 
 

@@ -23,7 +23,7 @@ import platform
 import re
 import shutil
 import subprocess
-import tempfile
+
 import time
 import urllib.parse
 import webbrowser
@@ -101,18 +101,7 @@ def _graceful_uwp_close(pid: int, name: str):
 # Temporary session helpers
 # ---------------------------------------------------------------------------
 
-CHROME_TEMP_PROFILE_DIRS: Dict[int, str] = {}
 
-
-def _cleanup_chrome_temp_profile(pid: int) -> None:
-    path = CHROME_TEMP_PROFILE_DIRS.pop(pid, None)
-    if not path:
-        return
-    try:
-        shutil.rmtree(path, ignore_errors=True)
-        logger.info(f"[APP] cleaned up chrome temp profile for pid {pid}: {path}")
-    except Exception as exc:
-        logger.debug(f"[APP] failed to remove chrome temp profile {path}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +452,7 @@ _RESERVED_SYNTHETIC_WEB_LABELS = {
     "cmd",
     "powershell",
     "terminal",
+    "appdata",
 }
 
 # Dynamic resolvers map
@@ -616,16 +606,26 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
     from mini_kio.core.routing_utils import resolve_capability_for_close, deactivate_capability, close_browser_capability
     cap_info = resolve_capability_for_close(key)
     if cap_info and cap_info.get("active"):
-        close_browser_capability(cap_info)
-        deactivate_capability(key)
-        cap_name = cap_info.get("canonical_target", key).capitalize()
-        logger.info(f"[APP] close_app: deactivated capability session '{cap_name}' (tab remains open)")
-        return {
-            "success": True,
-            "message": f"Closed the {cap_name} session.",
-            "capability_closed": True,
-            "capability_name": cap_name,
-        }
+        success = close_browser_capability(cap_info)
+        if success:
+            deactivate_capability(key)
+            cap_name = cap_info.get("canonical_target", key).capitalize()
+            logger.info(f"[APP] close_app: terminated browser process for capability '{cap_name}'")
+            return {
+                "success": True,
+                "message": f"Closed the {cap_name} session (browser instance terminated).",
+                "capability_closed": True,
+                "capability_name": cap_name,
+            }
+        else:
+            cap_name = cap_info.get("canonical_target", key).capitalize()
+            logger.error(f"[APP] close_app: failed to terminate browser process for capability '{cap_name}'")
+            return {
+                "success": False,
+                "message": f"Failed to close the {cap_name} session. The browser process is still running.",
+                "capability_closed": False,
+                "capability_name": cap_name,
+            }
 
     canonical = key
     if info:
@@ -664,7 +664,6 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
 
             termination = _terminate_with_verification(name, key, pid, info)
             if termination.get("verified_terminated"):
-                _cleanup_chrome_temp_profile(pid)
                 _graceful_uwp_close(pid, name)
             
             # Prune from runtime registry
@@ -815,10 +814,35 @@ def _normalize_web_target_to_url(target: str) -> Optional[str]:
         return WEB_URLS[normalized]
     if normalized in WEB_DOMAIN_ALIASES:
         return WEB_DOMAIN_ALIASES[normalized]
+
+    # Multi-word domain inference: "stack overflow" → "stackoverflow.com"
+    # Must happen before forbidden-char check (which rejects spaces).
+    # Only collapses 2-3 word targets that look like site names,
+    # NOT search queries (4+ words, or 3 words with question/preposition words).
+    if " " in normalized:
+        parts = normalized.split()
+        word_count = len(parts)
+        # Never collapse 4+ word targets — they are search queries
+        if 2 <= word_count <= 3:
+            # Skip if any word is a search/query indicator
+            _SEARCH_INDICATORS = {
+                "best", "top", "latest", "near", "under", "cheap",
+                "who", "what", "where", "when", "why", "how",
+                "in", "on", "at", "for", "with", "by", "to", "of",
+            }
+            if not (set(parts) & _SEARCH_INDICATORS):
+                collapsed = normalized.replace(" ", "")
+                if _can_synthesize_single_label_domain(collapsed):
+                    url = f"https://{collapsed}.com"
+                    if not _contains_forbidden_web_chars(collapsed) and \
+                       not _is_internal_or_local_web_target(collapsed):
+                        return url
+
     if _contains_forbidden_web_chars(normalized):
         return None
     if _is_internal_or_local_web_target(normalized):
         return None
+
     if (
         "://" in normalized
         or ".." in normalized
@@ -1451,15 +1475,12 @@ def _launch_from_info(info: Dict, name: str) -> dict:
 
         if isinstance(info.get("exe"), str) and info.get("exe").lower() == "chrome.exe":
             try:
-                temp_profile_dir = tempfile.mkdtemp(prefix="kio_chrome_")
                 launch_cmd.extend([
-                    "--user-data-dir=" + temp_profile_dir,
-                    "--new-window",
                     "--no-first-run",
                     "--disable-extensions",
                 ])
             except Exception as exc:
-                logger.debug(f"[APP] unable to create chrome temp profile: {exc}")
+                logger.debug(f"[APP] unable to prepare chrome launch args: {exc}")
 
         if os.path.isabs(launch_cmd[0]) or shutil.which(launch_cmd[0]):
             proc = subprocess.Popen(
@@ -1478,8 +1499,6 @@ def _launch_from_info(info: Dict, name: str) -> dict:
             )
         
         pid = proc.pid
-        if temp_profile_dir is not None:
-            CHROME_TEMP_PROFILE_DIRS[pid] = temp_profile_dir
         logger.info(f"[APP] launched: {path} (initial pid: {pid})")
 
         # Lightweight verification: poll for process presence by image name
@@ -1508,8 +1527,6 @@ def _launch_from_info(info: Dict, name: str) -> dict:
                 return out
             else:
                 logger.warning(f"[APP] launch verification failed for: {proc_name}")
-                if temp_profile_dir is not None:
-                    _cleanup_chrome_temp_profile(pid)
                 return {"success": False, "message": f"Failed to launch {name}.", "pid": pid}
         else:
             # Non-windows: best-effort via Popen status
@@ -1517,18 +1534,8 @@ def _launch_from_info(info: Dict, name: str) -> dict:
             out.update(res_extra)
             return out
     except FileNotFoundError:
-        if temp_profile_dir is not None:
-            if 'pid' in locals():
-                _cleanup_chrome_temp_profile(pid)
-            else:
-                shutil.rmtree(temp_profile_dir, ignore_errors=True)
         return {"success": False, "message": f"Cannot find {name}"}
     except Exception as exc:
-        if temp_profile_dir is not None:
-            if 'pid' in locals():
-                _cleanup_chrome_temp_profile(pid)
-            else:
-                shutil.rmtree(temp_profile_dir, ignore_errors=True)
         return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
 
 
@@ -1781,8 +1788,11 @@ def execute_capability(target: str) -> dict:
                             prior_pids.add(proc.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied): continue
 
+            chrome_args = [path]
+            chrome_args.append(url)
+
             proc = subprocess.Popen(
-                [path, url], 
+                chrome_args, 
                 shell=False,
                 creationflags=_creation_flags(),
                 stdout=subprocess.DEVNULL,
@@ -1812,7 +1822,6 @@ def execute_capability(target: str) -> dict:
             return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": proc.pid, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
         except Exception as e:
             return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
-            
     # For now, just mock media capabilities since KIO is lightweight and doesn't hook into Windows Media APIs
     if cap in ("play", "pause", "next", "previous", "open_project", "open_file", "send_message"):
         return _normalize_public_result("execute_capability", target, {"success": True, "message": f"Successfully routed '{cap}' to {app_name} (mocked API)."}, start_time)

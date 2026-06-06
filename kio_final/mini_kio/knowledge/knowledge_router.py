@@ -3,6 +3,10 @@ import re
 from typing import Optional
 
 from mini_kio.knowledge.wikipedia_provider import fetch_summary
+from mini_kio.knowledge import exa_provider
+from mini_kio.knowledge import tavily_provider
+from mini_kio.knowledge import duckduckgo_provider
+from mini_kio.knowledge import jina_reader_provider
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +46,46 @@ class KnowledgeRouter:
         if not self.is_knowledge_query(query):
             return None
 
-        result = fetch_summary(query)
+        # Tier 1: External Search Providers
+        # Try Exa
+        result = exa_provider.search(query)
         if result:
+            logger.debug("knowledge_router: result from exa for '%s'", query)
             return result
 
-        logger.debug("knowledge_router: no wikipedia result for '%s'", query)
+        # Try Tavily
+        result = tavily_provider.search(query)
+        if result:
+            logger.debug("knowledge_router: result from tavily for '%s'", query)
+            return result
+
+        # Try DuckDuckGo
+        result = duckduckgo_provider.search(query)
+        if result:
+            logger.debug("knowledge_router: result from duckduckgo for '%s'", query)
+            return result
+        
+        # Tier 2: URL Reading (Jina)
+        if query.startswith(("http://", "https://")):
+            result = jina_reader_provider.read_url(query)
+            if result:
+                logger.debug("knowledge_router: result from Jina Reader for URL '%s'", query)
+                return result
+
+        # Tier 3: Wikipedia (Deterministic Topic extraction fallback)
+        # We try Wikipedia on the full query first, then on extracted topic
+        result = fetch_summary(query)
+        if result:
+            logger.debug("knowledge_router: result from wikipedia (full query) for '%s'", query)
+            return result
+            
+        from mini_kio.llm.conversation_context import ConversationContext
+        effective_topic = ConversationContext._extract_topic(query)
+        if effective_topic and effective_topic.lower() != query.lower():
+            result = fetch_summary(effective_topic)
+            if result:
+                logger.debug("knowledge_router: result from wikipedia (extracted topic: %s) for '%s'", effective_topic, query)
+                return result
+
+        logger.debug("knowledge_router: no knowledge result for '%s'", query)
         return None

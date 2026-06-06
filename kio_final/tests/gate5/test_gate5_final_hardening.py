@@ -25,7 +25,8 @@ def test_emoji_sanitization():
     text = "Open chrome🙂‍↕️"
     sanitized = normalizer.sanitize(text)
     assert "🙂‍↕️" not in sanitized
-    assert sanitized == "open chrome"
+    assert "slight_smile" in sanitized
+    assert normalizer.get_diag()["emoji_normalize_applied"] is True
     assert normalizer.get_diag()["emoji_sanitize_applied"] is True
 
 def test_url_preservation_during_sanitize():
@@ -33,7 +34,7 @@ def test_url_preservation_during_sanitize():
     text = "Open https://google.com/search?q=kio! 🙂"
     sanitized = normalizer.sanitize(text)
     assert "https://google.com/search?q=kio!" in sanitized
-    assert "🙂" not in sanitized
+    assert "slight_smile" in sanitized
     assert "!" in sanitized # preserve punctuation
 
 def test_compound_typo_normalization():
