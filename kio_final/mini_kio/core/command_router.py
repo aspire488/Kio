@@ -28,6 +28,7 @@ from typing import Any, Optional
 from mini_kio.core.execution_boundary import execute_action
 from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
 from mini_kio.core import config
+from mini_kio.llm.identity_dataset import get_identity_answer
 
 logger = logging.getLogger(__name__)
 
@@ -292,37 +293,10 @@ def handle_command(command: str) -> dict:
     if lower_clean == "bruh":
         return {"success": True, "message": "..."}
 
-    # ── DETERMINISTIC RESPONSES (Identity BUG 1) ─────────────────────────
-    if lower_clean in ("who are you", "what are you", "what exactly are you", "identify yourself", "introduce yourself", "what is kio"):
-        return {"success": True, "message": "I am KIO — Kernel for Intelligent Orchestration. A personal operating companion created by Joel."}
-    
-    if lower_clean in ("who made you", "who created you", "who is your creator", "who built you", "who created kio", "who made u", "who built u"):
-        return {"success": True, "message": "Joel built KIO."}
-
-    if lower_clean == "why were you created":
-        return {"success": True, "message": "KIO was built as a personal operating companion focused on automation, orchestration and assistance."}
-
-    if lower_clean in ("who is joel", "who's joel"):
-        return {"success": True, "message": "Joel is the creator of KIO."}
-
-    if lower_clean in ("what can you do", "what are your features", "what can u do"):
-        return {
-            "success": True,
-            "message": (
-                "I can open and close applications, search Google and YouTube, "
-                "play media, open folders, and execute multi-step commands."
-            )
-        }
-
-    if lower_clean in ("what are your limitations", "what are u limited to"):
-        return {
-            "success": True,
-            "message": (
-                "I operate within the capabilities available to the current runtime.\n\n"
-                "I cannot access systems, accounts or information "
-                "that have not been made available to me."
-            )
-        }
+    # ── IDENTITY AUTHORITY (canonical identity resolution) ─────────────
+    identity_answer = get_identity_answer(lower_clean)
+    if identity_answer:
+        return {"success": True, "message": identity_answer}
 
     try:
 
@@ -743,30 +717,34 @@ def _format_list(items: list[str]) -> str:
 
 def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
     succeeded: dict[str, list[str]] = {}
-    blocked: list[str] = []
+    blocked: list[tuple[str, str]] = []
     for step, result in zip(steps, results):
         action = step.get("action", "")
         target = step.get("target", "")
         verb = _ACTION_VERBS.get(action, action)
-        verb_cap = verb.capitalize()
         if result.get("blocked"):
-            blocked.append(f"{verb_cap} {target.capitalize()}")
+            blocked.append((verb, target))
         elif result.get("success"):
-            succeeded.setdefault(verb_cap, [])
-            succeeded[verb_cap].append(target.capitalize())
-    lines = []
-    for verb_cap, targets in succeeded.items():
-        v = verb_cap.capitalize()
-        lines.append(f"{v}:")
-        for t in targets:
-            lines.append(f"- {t}")
+            succeeded.setdefault(verb, [])
+            succeeded[verb].append(target)
+    parts = []
+    if succeeded:
+        items = []
+        for verb, targets in succeeded.items():
+            if len(targets) == 1:
+                items.append(f"{verb} {targets[0]}")
+            else:
+                items.append(f"{verb} {_format_list(targets)}")
+        parts.append("done - " + _format_list(items))
     if blocked:
-        lines.append("Blocked:")
-        for b in blocked:
-            lines.append(f"- {b}")
-    if not lines:
+        items = [f"{verb} {target}" for verb, target in blocked]
+        if not succeeded:
+            parts.append("all blocked - " + _format_list(items))
+        else:
+            parts.append("blocked - " + _format_list(items))
+    if not parts:
         return "done"
-    return "\n".join(lines)
+    return " | ".join(parts)
 
 def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
     """Execute parsed multi-step commands through runtime execution policy."""
@@ -985,12 +963,6 @@ _KNOWLEDGE_BASE: dict[str, str] = {
     "hey": "Hey.",
     "yo": "KIO here.",
     "wassup": "KIO here.",
-    
-    # ── Identity (Deterministic) ──────────────────────────────────────
-    "who are you": "I am KIO — Kernel for Intelligent Orchestration. A personal operating companion built by Joel.",
-    "what are you": "I am KIO — a personal operating companion focused on automation and orchestration.",
-    "who is joel": "Joel is the creator of KIO.",
-    "who built you": "Joel built KIO.",
     
     # ── Capabilities (Deterministic) ──────────────────────────────────
     "what can you do": "I can open and close applications, search Google and YouTube, play media, and open folders.",

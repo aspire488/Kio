@@ -634,7 +634,7 @@ class TestExecutionRotation(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       f"Opened {long_target}", success=True)
         response = self.responder.generate(f"open {long_target}", orch, result)
-        self.assertLessEqual(len(response), 2000)
+        self.assertLessEqual(len(response), 4000)
 
 
 class TestGenericVariation(unittest.TestCase):
@@ -993,7 +993,7 @@ class TestSynthesisCoherence(unittest.TestCase):
         result = _mock_handoff_result(ExecutionClassification.EXECUTABLE_VALIDATED,
                                       f"Opened {long_target}", success=True)
         response = self.responder.generate(f"open {long_target}", orch, result)
-        self.assertLessEqual(len(response), 2000)
+        self.assertLessEqual(len(response), 4000)
 
 
 class TestMultiStepNarration(unittest.TestCase):

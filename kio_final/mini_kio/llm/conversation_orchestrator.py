@@ -1,6 +1,9 @@
 from typing import Optional, Set
+import logging
 from .intent_models import IntentType, IntentClassification
 from .conversation_models import OrchestrationState, OrchestrationResponse, PendingAction
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationOrchestrator:
@@ -18,6 +21,7 @@ class ConversationOrchestrator:
     
     # Positive confirmation triggers (only valid when in AWAITING_CONFIRMATION state)
     CONFIRMATION_TRIGGERS: Set[str] = {"yes", "confirm", "proceed", "go ahead", "do it", "y"}
+    REJECTION_TRIGGERS: Set[str] = {"no", "nope", "cancel", "stop", "don't", "never mind", "forget it"}
 
     def __init__(self):
         self._state = OrchestrationState.CONVERSATIONAL
@@ -30,14 +34,24 @@ class ConversationOrchestrator:
         """
         primary = classification.primary_intent
         
+        # Gate 5: Handle rejection first — before topic-change detection
+        if self._state == OrchestrationState.AWAITING_CONFIRMATION:
+            text_lower = primary.normalized_text.strip(".,!?;: ")
+            if any(trigger == text_lower for trigger in self.REJECTION_TRIGGERS):
+                action_name = self._pending_action.action if self._pending_action else "action"
+                logger.info(f"Confirmation rejected: {action_name}. Transitioning to REFUSED.")
+                self._reset_state()
+                return OrchestrationResponse(
+                    state=OrchestrationState.REFUSED,
+                    response_text=f"Action '{action_name}' cancelled.",
+                    intent_type=primary.intent_type,
+                )
+
         # Gate 5: Reset state if a new conversational/educational topic is detected
         # even if we were awaiting confirmation. This prevents confirmation leakage.
         if self._state == OrchestrationState.AWAITING_CONFIRMATION:
-            # If the new intent is clearly not a confirmation attempt for the pending action
             if primary.intent_type in (IntentType.CONVERSATIONAL, IntentType.EDUCATIONAL, IntentType.INFORMATIONAL):
-                text_lower = primary.normalized_text.strip(".,!?;: ")
                 is_confirmation = any(trigger == text_lower for trigger in self.CONFIRMATION_TRIGGERS)
-                # If it's not a confirmation, and it's a high-confidence non-executable intent, reset.
                 if not is_confirmation and primary.confidence > 0.5:
                     logger.info(f"Topic change detected during confirmation: {primary.intent_type}. Resetting state.")
                     self._reset_state()

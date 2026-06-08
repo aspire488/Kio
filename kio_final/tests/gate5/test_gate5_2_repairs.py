@@ -19,7 +19,7 @@ def test_bug1_identity_consistency():
     
     # Test IdentityGuard rewrite
     guard = IdentityGuard()
-    rewritten, violations = guard.check_and_rewrite("I am an AI made by Meta.", "Who made you?")
+    rewritten, violations = guard.check_and_rewrite("This was made by Meta.", "Who made you?")
     assert "Joel" in rewritten
     assert "Meta" not in rewritten
 

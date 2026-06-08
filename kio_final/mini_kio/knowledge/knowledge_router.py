@@ -1,6 +1,7 @@
 import logging
 import re
-from typing import Optional
+from typing import Optional, List
+from mini_kio.knowledge.knowledge_models import SearchSource, MultiSourceResult
 
 from mini_kio.knowledge.wikipedia_provider import fetch_summary
 from mini_kio.knowledge import exa_provider
@@ -87,5 +88,47 @@ class KnowledgeRouter:
                 logger.debug("knowledge_router: result from wikipedia (extracted topic: %s) for '%s'", effective_topic, query)
                 return result
 
-        logger.debug("knowledge_router: no knowledge result for '%s'", query)
-        return None
+    def route_freshness(self, query: str) -> Optional[MultiSourceResult]:
+        """Route a freshness-required query, bypassing is_knowledge_query().
+
+        Attempts to collect results from all enabled search providers.
+        Returns a MultiSourceResult for consensus analysis.
+        """
+        if not query or not query.strip():
+            return None
+
+        text = query.strip()
+        sources: List[SearchSource] = []
+
+        # Collect results from all providers for consensus
+        
+        # Exa
+        res = exa_provider.search(text)
+        if res:
+            logger.debug("knowledge_router: collected from exa for '%s'", text)
+            sources.append(SearchSource(name="Exa", url=None, content=res))
+
+        # Tavily
+        res = tavily_provider.search(text)
+        if res:
+            logger.debug("knowledge_router: collected from tavily for '%s'", text)
+            sources.append(SearchSource(name="Tavily", url=None, content=res))
+
+        # DuckDuckGo
+        res = duckduckgo_provider.search(text)
+        if res:
+            logger.debug("knowledge_router: collected from duckduckgo for '%s'", text)
+            sources.append(SearchSource(name="DuckDuckGo", url=None, content=res))
+
+        # URL Reading
+        if text.startswith(("http://", "https://")):
+            res = jina_reader_provider.read_url(text)
+            if res:
+                logger.debug("knowledge_router: collected from Jina Reader for '%s'", text)
+                sources.append(SearchSource(name="Jina", url=text, content=res))
+
+        if not sources:
+            logger.debug("knowledge_router: no freshness results for '%s'", query)
+            return None
+
+        return MultiSourceResult(query=query, sources=sources)

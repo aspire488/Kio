@@ -114,13 +114,18 @@ def test_identity_rewrite_protection(responder):
     guard = IdentityGuard()
     
     # Test cases where provider might claim to be someone else
+    # Provider-neutral patterns catch ALL provider self-identification
     hallucinations = [
         ("I am ChatGPT, a large language model trained by OpenAI.", 
-         "No. I am KIO. I can use external AI models when available, but I am not those systems."),
-        ("I was created by Google.", "Joel built KIO."),
+         "I use AI providers as tools"),
+        ("I was created by Google.", "built by Joel"),
         ("I am Gemini, an AI from Google.", 
-         "No. I am KIO. I can use external AI models when available, but I am not those systems."),
-        ("I am a language model developed by Meta.", "Joel built KIO."),
+         "I use AI providers as tools"),
+        ("I am a language model developed by Meta.", "KIO was built by Joel"),
+        ("I am an AI assistant designed to help you.",
+         "I am KIO"),
+        ("As an AI assistant, I can help you with that.",
+         "As KIO"),
     ]
     
     for raw, expected in hallucinations:

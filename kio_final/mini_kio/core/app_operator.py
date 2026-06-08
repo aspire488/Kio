@@ -829,6 +829,7 @@ def _normalize_web_target_to_url(target: str) -> Optional[str]:
                 "best", "top", "latest", "near", "under", "cheap",
                 "who", "what", "where", "when", "why", "how",
                 "in", "on", "at", "for", "with", "by", "to", "of",
+                "some", "thing", "something", "anything",
             }
             if not (set(parts) & _SEARCH_INDICATORS):
                 collapsed = normalized.replace(" ", "")

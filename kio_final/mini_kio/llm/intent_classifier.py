@@ -118,21 +118,50 @@ class IntentClassifier:
         target = None
         confidence = 0.4
         
-        # Check for executable patterns
-        for pattern in self.exec_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                intent_type = IntentType.EXECUTABLE
-                # Simple action extraction from pattern
-                if "open" in pattern or "launch" in pattern: action = "open"
-                elif "search" in pattern or "find" in pattern: action = "search"
-                elif "type" in pattern or "write" in pattern: action = "type"
-                elif "click" in pattern or "press" in pattern: action = "click"
-                elif "close" in pattern or "kill" in pattern: action = "close"
-                
-                target = match.group(1).strip()
-                confidence = 0.7
-                break
+        # 1. Check for Math (Deterministic resolution preferred)
+        if re.search(r"^\s*[\d\(\)\s\+\-\*\/\%\^\.\*\*]+\s*$", text_lower) and any(op in text_lower for op in "+-*/%^"):
+            intent_type = IntentType.MATH
+            confidence = 1.0
+        elif any(kw in text_lower for kw in ["calculate", "squared", "cube root", "factorial", "square root", "to the power of"]):
+            intent_type = IntentType.MATH
+            confidence = 0.9
+
+        # 2. Check for Reasoning (Generic detection)
+        elif any(kw in text_lower for kw in ["choose one", "must decide", "forced choice", "tradeoff", "pick between", "compare and decide"]):
+            intent_type = IntentType.REASONING
+            confidence = 0.8
+
+        # 3. Check for System State (Authoritative reality only)
+        elif any(kw in text_lower for kw in ["battery percentage", "browser tabs", "running applications", "applications are running", "apps are running", "running apps", "show running", "ram usage", "cpu usage", "memory usage", "what tabs are open", "which tabs are open"]):
+            intent_type = IntentType.SYSTEM_STATE
+            confidence = 0.9
+
+        # 4. Check for Memory
+        elif any(kw in text_lower for kw in ["what did i say", "what was my first", "summarize this session", "what have we talked about"]):
+            intent_type = IntentType.MEMORY
+            confidence = 0.9
+
+        # 5. Check for Identity
+        elif any(kw in text_lower for kw in ["who are you", "what is kio", "self-analysis", "tell me about yourself"]):
+            intent_type = IntentType.IDENTITY
+            confidence = 0.9
+
+        if intent_type == IntentType.CONVERSATIONAL:
+            # Check for executable patterns
+            for pattern in self.exec_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    intent_type = IntentType.EXECUTABLE
+                    # Simple action extraction from pattern
+                    if "open" in pattern or "launch" in pattern: action = "open"
+                    elif "search" in pattern or "find" in pattern: action = "search"
+                    elif "type" in pattern or "write" in pattern: action = "type"
+                    elif "click" in pattern or "press" in pattern: action = "click"
+                    elif "close" in pattern or "kill" in pattern: action = "close"
+                    
+                    target = match.group(1).strip()
+                    confidence = 0.7
+                    break
 
         # Check for educational (before informational/conversational)
         if intent_type == IntentType.CONVERSATIONAL:

@@ -10,6 +10,11 @@ class IntentType(Enum):
     EXECUTABLE = "executable"
     UNSAFE = "unsafe"
     UNKNOWN = "unknown"
+    MATH = "math"
+    REASONING = "reasoning"
+    SYSTEM_STATE = "system_state"
+    MEMORY = "memory"
+    IDENTITY = "identity"
 
 
 @dataclass(frozen=True)

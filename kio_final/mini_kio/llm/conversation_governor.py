@@ -3,6 +3,7 @@ import re
 from enum import Enum
 from typing import Optional
 from mini_kio.llm.identity_dataset import resolve as identity_resolve
+from mini_kio.llm.conversation_models import ConversationTone
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class ResponseQuality(Enum):
 
 _CANONICAL_KNOWLEDGE = {
     "full_form": "KIO stands for Kernel for Intelligent Orchestration.",
-    "identity": "KIO — Kernel for Intelligent Orchestration. A personal operating companion created by Joel.",
+    "identity": "KIO — Kernel for Intelligent Orchestration. A personal operating companion built by Joel.",
     "philosophy": (
         "KIO combines deterministic local execution with bounded conversational AI."
     ),
@@ -67,11 +68,6 @@ _PROTECTED_QUERIES: dict[str, str] = {
         "KIO has no root or admin access. All operations are gated by "
         "deterministic runtime safety controls."
     ),
-    "how are you different from chatgpt": (
-        "Unlike ChatGPT, KIO runs entirely locally and can control applications "
-        "on your machine. KIO is focused on practical desktop automation rather "
-        "than general conversation. No cloud dependency for core operations."
-    ),
     "how are you different from claude": (
         "Unlike Claude, KIO runs locally and can directly execute system "
         "commands. KIO is focused on desktop operation and automation."
@@ -102,6 +98,22 @@ _PROTECTED_QUERIES: dict[str, str] = {
         "Gate 2 is the deterministic command routing layer. It handles known "
         "commands like opening apps, searching, and playing media directly "
         "without going through the full orchestration pipeline."
+    ),
+    "what time is it": (
+        "I cannot tell you the current time. I have no clock access. "
+        "You can check your system clock."
+    ),
+    "what is the date": (
+        "I cannot tell you the current date. I have no clock access. "
+        "You can check your system clock."
+    ),
+    "do you know current events": (
+        "I do not have live access to current events. "
+        "I can search for information if you tell me what you're looking for."
+    ),
+    "what news today": (
+        "I do not have live news access. "
+        "Would you like me to search for current news?"
     ),
 }
 
@@ -312,6 +324,9 @@ class ConversationGovernor:
             return response
 
         return response
+
+    def set_tone(self, tone: ConversationTone) -> None:
+        self._tone = tone
 
     def govern(
         self, user_text: str, llm_response: Optional[str], context=None

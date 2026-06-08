@@ -205,5 +205,5 @@ class TestIdentityDatasetCoverage:
             assert answer is not None, f"missing authority answer for {entry['id']}"
             assert len(answer) >= 10
 
-    def test_28_categories(self):
-        assert len(IDENTITY_ENTRIES) == 28
+    def test_59_categories(self):
+        assert len(IDENTITY_ENTRIES) == 59

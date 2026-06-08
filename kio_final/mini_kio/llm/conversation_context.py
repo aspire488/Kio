@@ -11,10 +11,24 @@ HARD CONSTRAINTS:
 
 import logging
 import re
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingAction:
+    """A deferred action awaiting user confirmation.
+
+    Used for freshness-triggered searches where KIO offers to look
+    something up and the user confirms with "yes" / "go ahead".
+    """
+    action_type: str  # "search"
+    query: str
+    topic: str = ""
+    executed: bool = False
 
 
 class SessionMode(Enum):
@@ -59,9 +73,9 @@ _PRONOUN_REF_PATTERNS = [
 
 
 class ConversationContext:
-    """Bounded runtime-only conversational continuity.
+    """Bounded persistent conversational continuity.
 
-    Tracks recent exchanges and topics without persistence.
+    Tracks recent exchanges and topics with PostgreSQL persistence.
     Automatically prunes beyond MAX_EXCHANGES (10).
     Provider-agnostic — works identically with any LLM backend.
     """
@@ -74,10 +88,53 @@ class ConversationContext:
         self._lesson_mode: bool = False
         self._lesson_step: int = 0
         self._session_mode: SessionMode = SessionMode.CONVERSATIONAL
+        self._pending_action: Optional[PendingAction] = None
         self._diag: dict[str, int] = {
             "context_reference_resolved": 0,
             "conversational_context_pruned": 0,
+            "pending_action_set": 0,
+            "pending_action_executed": 0,
+            "pending_action_cleared": 0,
+            "context_synced_from_memory": 0,
         }
+
+    def sync_from_memory(self, memory_store: object) -> None:
+        """Load recent exchanges from persistent memory store.
+        
+        Note: memory_store is expected to be a mini_kio.memory.memory_store.MemoryStore.
+        """
+        try:
+            # Load twice the max exchanges to ensure we can find enough pairs
+            history = memory_store.last_n_messages(_MAX_EXCHANGES * 2)
+            self._exchanges.clear()
+            
+            # Pair user/assistant messages for the context window
+            user_msg = None
+            for entry in history:
+                if entry.role == "user":
+                    user_msg = entry.message
+                elif entry.role == "assistant" and user_msg is not None:
+                    self._exchanges.append((user_msg, entry.message))
+                    user_msg = None
+            
+            # Prune to bound
+            self.prune()
+            
+            # Rebuild topic stack from loaded history
+            self.clear_topic_stack()
+            for u, r in self._exchanges:
+                topic = self._extract_topic(u)
+                if topic:
+                    self._topic_stack.append(topic)
+                entities = self._extract_entities(u)
+                for e in entities:
+                    if e.lower() not in (self._entity_stack[-1].lower() if self._entity_stack else ""):
+                        self._entity_stack.append(e)
+            
+            self._diag["context_synced_from_memory"] += 1
+            logger.info(f"ConversationContext: synced {len(self._exchanges)} exchanges from memory")
+        except Exception as e:
+            logger.warning(f"ConversationContext: sync failed: {e}")
 
     def append_exchange(self, user_text: str, reply: str) -> None:
         topic = self._extract_topic(user_text)
@@ -234,6 +291,25 @@ class ConversationContext:
         while len(self._entity_stack) > _MAX_EXCHANGES:
             self._entity_stack.pop(0)
 
+    def set_pending_search(self, query: str, topic: str = "") -> None:
+        self._pending_action = PendingAction(action_type="search", query=query, topic=topic)
+        self._diag["pending_action_set"] += 1
+
+    def get_pending_action(self) -> Optional[PendingAction]:
+        return self._pending_action
+
+    def clear_pending_action(self) -> None:
+        self._pending_action = None
+        self._diag["pending_action_cleared"] += 1
+
+    def has_pending_action(self) -> bool:
+        return self._pending_action is not None and not self._pending_action.executed
+
+    def mark_pending_executed(self) -> None:
+        if self._pending_action:
+            self._pending_action.executed = True
+            self._diag["pending_action_executed"] += 1
+
     def clear(self) -> None:
         self._exchanges.clear()
         self._topic_stack.clear()
@@ -241,6 +317,7 @@ class ConversationContext:
         self._last_subject = None
         self._lesson_mode = False
         self._lesson_step = 0
+        self._pending_action = None
 
     def clear_topic_stack(self) -> None:
         self._topic_stack.clear()
