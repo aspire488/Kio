@@ -17,6 +17,7 @@ class IntentClassifier:
         self.exec_patterns = [
             r"^(?:open|launch)\s+([a-zA-Z0-9\s\.\-_]+)",
             r"^(?:search|find)\s+(?:for\s+)?(.+)",
+            r"^(?:play)\s+(.+)",
             r"^(?:type|write)\s+(.+)",
             r"^(?:click|press)\s+(.+)",
             r"^(?:close|kill|exit)\s+([a-zA-Z0-9\s\.\-_]+)"
@@ -155,6 +156,7 @@ class IntentClassifier:
                     # Simple action extraction from pattern
                     if "open" in pattern or "launch" in pattern: action = "open"
                     elif "search" in pattern or "find" in pattern: action = "search"
+                    elif "play" in pattern: action = "play"
                     elif "type" in pattern or "write" in pattern: action = "type"
                     elif "click" in pattern or "press" in pattern: action = "click"
                     elif "close" in pattern or "kill" in pattern: action = "close"

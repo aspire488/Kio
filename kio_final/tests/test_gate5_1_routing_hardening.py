@@ -7,6 +7,7 @@ from mini_kio.llm.intent_classifier import IntentClassifier
 from mini_kio.llm.conversation_responder import ConversationResponder
 from mini_kio.runtime.runtime_contracts import RuntimeHandoffResult, ExecutionClassification, ExecutionAuditMetadata
 from mini_kio.llm.conversation_models import OrchestrationResponse, OrchestrationState
+from mini_kio.llm.intent_models import IntentType
 
 @pytest.fixture(autouse=True)
 def setup_runtime():
@@ -41,7 +42,7 @@ def test_patch3_achievement_recognition():
         orchestration = OrchestrationResponse(
             state=OrchestrationState.CONVERSATIONAL,
             response_text=text,
-            intent_type="conversational"
+            intent_type=IntentType.CONVERSATIONAL
         )
         audit = ExecutionAuditMetadata(
             intent_origin="test",

@@ -23,18 +23,16 @@ import logging
 import os
 import sys
 import re
+import time
 from typing import Any, Optional
 
 from mini_kio.core.execution_boundary import execute_action
 from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
 from mini_kio.core import config
 from mini_kio.llm.identity_dataset import get_identity_answer
+from mini_kio.media.media_manager import MediaManager
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Browser Connector singleton (lazy)
-# ---------------------------------------------------------------------------
 
 _CONNECTOR_INSTANCE = None
 _CONNECTOR_STARTED = False
@@ -343,6 +341,18 @@ def handle_command(command: str) -> dict:
                     target_app = parts[1].strip()
                     clean_query = parts[0].strip()
                     if target_app == "youtube":
+                        if config.BROWSER_CONNECTOR_ENABLED:
+                            conn = _get_connector()
+                            if conn and conn.is_connected():
+                                import urllib.parse
+                                _url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(clean_query)}"
+                                try:
+                                    _result = asyncio.run(conn.open_tab(_url))
+                                    if _result.success:
+                                        logger.info("[BROWSER_CONNECTOR_SEARCH] query=%s", clean_query)
+                                        return {"success": True, "message": f"Searched YouTube: {clean_query}"}
+                                except BaseException as _exc:
+                                    logger.warning("[CONNECTOR] search_youtube failed: %s", _exc)
                         _log_route("route", intent="search_youtube", query=clean_query)
                         return execute_action("search_youtube", clean_query)
                     if target_app in ("chrome", "edge", "firefox", "brave", "comet"):
@@ -355,6 +365,18 @@ def handle_command(command: str) -> dict:
             # Handle "search youtube X" swallow fix
             if query.lower().startswith("youtube "):
                 clean_query = query[8:].strip()
+                if config.BROWSER_CONNECTOR_ENABLED:
+                    conn = _get_connector()
+                    if conn and conn.is_connected():
+                        import urllib.parse
+                        _url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(clean_query)}"
+                        try:
+                            _result = asyncio.run(conn.open_tab(_url))
+                            if _result.success:
+                                logger.info("[BROWSER_CONNECTOR_SEARCH] query=%s", clean_query)
+                                return {"success": True, "message": f"Searched YouTube: {clean_query}"}
+                        except BaseException as _exc:
+                            logger.warning("[CONNECTOR] search_youtube failed: %s", _exc)
                 _log_route("route", intent="search_youtube", query=clean_query)
                 return execute_action("search_youtube", clean_query)
 
@@ -533,6 +555,13 @@ def handle_command(command: str) -> dict:
         if lower.startswith("close "):
             target = command[6:].strip()
 
+            # Check for explicit browser application termination commands
+            browser_targets = {"chrome", "edge", "firefox", "brave", "comet", "browser"}
+            if target.lower() in browser_targets or (target.lower().endswith(" browser") and target.lower().replace(" browser", "") in browser_targets):
+                app_target = target.lower().replace(" browser", "") # Normalize to actual app name for app_operator
+                _log_route("route", intent="terminate_browser_app", target=app_target)
+                return execute_action("close_app", app_target)
+
             # Browser Connector: try owned-tab close before capability registry
             if config.BROWSER_CONNECTOR_ENABLED:
                 conn = _get_connector()
@@ -541,6 +570,15 @@ def handle_command(command: str) -> dict:
                         result = asyncio.run(conn.close_tab(target))
                         if result.success:
                             _log_route("route", intent="connector_close", target=target)
+                            # Clean up any browser session record for this target
+                            try:
+                                from mini_kio.core.routing_utils import get_browser_registry
+                                _conn_session = get_browser_registry().find_session(target)
+                                if _conn_session:
+                                    get_browser_registry().remove_session(_conn_session.get("session_id", ""))
+                                    logger.info("[BROWSER_SESSION_CONNECTOR_CLOSE] session_id=%s target=%s", _conn_session.get("session_id"), target)
+                            except Exception:
+                                pass
                             return {
                                 "success": True,
                                 "message": f"Closed {target.capitalize()} tab.",
@@ -557,6 +595,23 @@ def handle_command(command: str) -> dict:
                             "success": False,
                             "message": f"Couldn't close {target}.",
                         }
+
+            # Gate 5 P2: Check browser session registry for browser_operator-owned sessions
+            from mini_kio.core.routing_utils import get_browser_registry
+            _session = get_browser_registry().find_session(target)
+            if _session:
+                _session_id = _session.get("session_id", "unknown")
+                get_browser_registry().remove_session(_session_id)
+                logger.info("[BROWSER_SESSION_CLOSE] session_id=%s target=%s", _session_id, target)
+                return {
+                    "success": True,
+                    "message": f"I opened {target.capitalize()} earlier, but without the Browser Connector I cannot guarantee closing it.",
+                    "close_verified": False,
+                    "action": "close_app",
+                    "target": target,
+                    "session_closed": True,
+                }
+            logger.info("[BROWSER_SESSION_NOT_FOUND] target=%s", target)
 
             # Gate 5.1: Check capability registry FIRST for browser session close
             from mini_kio.core.routing_utils import resolve_capability_for_close, deactivate_capability, close_browser_capability
@@ -585,23 +640,74 @@ def handle_command(command: str) -> dict:
             _log_route("route", intent="close_app", target=target)
             return execute_action("close_app", target)
 
-        # ── PLAY (YouTube / Media) ─────────────────────────────────────────────
+        # ── MEDIA COMMAND ROUTING ─────────────────────────────────────────────
+        _mm = MediaManager.get_instance()
+
+        # ── Fuzzy Intent Correction ──────────────────────────────────────────
+        _corrected = _mm.correct_fuzzy(lower)
+        if _corrected != lower:
+            _log_route("route", intent="fuzzy_correction", original=lower, corrected=_corrected)
+            lower = _corrected
+
+        # ── Natural Language Seek ────────────────────────────────────────────
+        _seek_result = _mm.process_nl_seek(lower)
+        if _seek_result is not None:
+            _log_route("route", intent="nl_seek", text=lower)
+            return _seek_result
+
+        # ── Next / Previous (must route to MediaManager, never continuation) ─
+        if lower == "next":
+            _log_route("route", intent="next_track")
+            return _mm.next_track()
+
+        if lower == "previous":
+            _log_route("route", intent="previous_track")
+            return _mm.previous_track()
+
+        # ── Resolve references (it / this / that) against Media Context ──────
+        _resolved = _mm.resolve_query(lower)
+        if _resolved is not None and _resolved != lower:
+            logger.info("[ROUTER] resolved reference '%s' -> '%s'", lower, _resolved)
+            _log_route("route", intent="context_resolve", original=lower, resolved=_resolved)
+            lower_play = f"play {_resolved}"
+            _resolved_play = _mm.resolve_query(lower_play)
+            resolved = _resolved_play or _resolved
+            return _mm.play(resolved, platform=_mm.get_context().get_provider_for_reference())
+
+        # ── Accept media offer (yes / play it after discovery offer) ─────────
+        _accept_first = lower.split()[0] if lower else ""
+        if (_accept_first in ("yes", "yeah", "sure", "ok") or
+              lower in ("play it", "play that", "watch it", "watch that",
+                        "play video", "play the first one")):
+            last_offer = _mm.get_last_offer()
+            if last_offer:
+                _log_route("route", intent="accept_media_offer")
+                result = _mm.accept_offer()
+                if result:
+                    return result
+                return {"success": True, "message": "The media offer is no longer available."}
+            if _accept_first in ("yes", "yeah", "sure", "ok"):
+                return {"success": True, "message": "I don't have a pending offer to act on."}
+
+        # ── PLAY ─────────────────────────────────────────────────────────────
         if lower.startswith("play "):
             query = command[5:].strip()
+            # Check for explicit platform separators
             for sep in [" on ", " in ", " using "]:
                 if sep in query:
                     parts = query.rsplit(sep, 1)
-                    target_app = parts[1].strip()
+                    target_app = parts[1].strip().lower()
                     clean_query = parts[0].strip()
-                    if target_app == "youtube":
-                         _log_route("route", intent="play_youtube", query=clean_query)
-                         return execute_action("play_youtube", clean_query)
-                    if target_app in ("spotify", "vlc", "capcut"):
-                        _log_route("route", intent="capability", app=target_app, cap="play")
-                        return execute_action("execute_capability", f"{target_app}::play::{clean_query}")
-            
-            # AMBIGUITY FIX: Return choice message instead of defaulting to YouTube
-            return {"success": True, "message": "Play on YouTube or Spotify?"}
+                    # Resolve references in the query part
+                    resolved = _mm.resolve_query(clean_query)
+                    final_query = resolved if resolved else clean_query
+                    _log_route("route", intent="play_on_platform", platform=target_app, query=final_query)
+                    return _mm.play(final_query, platform=target_app)
+
+            # Resolve references in bare play query
+            resolved = _mm.resolve_query(query)
+            final_query = resolved if resolved else query
+            return _mm.play(final_query)
 
         # ── SEARCH YOUTUBE ────────────────────────────────────────────────────
         if lower.startswith("search youtube "):
@@ -610,7 +716,36 @@ def handle_command(command: str) -> dict:
 
         if lower.startswith("youtube "):
             query = command[8:].strip()
-            return execute_action("play_youtube", query)
+            _resolved = _mm.resolve_query(query)
+            _final = _resolved if _resolved else query
+            return _mm.play(_final, platform="youtube")
+
+        # ── TRANSPORT CONTROLS ────────────────────────────────────────────────
+        _words = lower.split()
+        _media_main = _words[0] if _words else ""
+
+        if lower == "volume up":
+            return _mm.volume_up()
+        if lower == "volume down":
+            return _mm.volume_down()
+        if lower == "seek forward":
+            return _mm.seek_forward()
+        if lower == "seek backward":
+            return _mm.seek_backward()
+        if _media_main in ("resume", "continue"):
+            return _mm.resume()
+        if _media_main == "pause":
+            return _mm.pause()
+        if _media_main == "stop":
+            r = _mm.stop()
+            if r.get("success"):
+                return r
+        if _media_main == "mute":
+            return _mm.mute()
+        if _media_main == "unmute":
+            return _mm.unmute()
+        if lower == "play":
+            return _mm.play()
 
         # ── SYSTEM ────────────────────────────────────────────────────────────
         if lower in ("shutdown", "shutdown computer", "shut down"):
@@ -889,6 +1024,30 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
                 )
                 continue
 
+        # MediaManager: intercept play actions instead of legacy execute_action("play_youtube")
+        if action == "play":
+            from mini_kio.media.media_manager import MediaManager
+            try:
+                _mm_inst = MediaManager.get_instance()
+                play_result = _mm_inst.play(target)
+                if isinstance(play_result, dict):
+                    result = {
+                        "success": play_result.get("success", False),
+                        "message": play_result.get("message", ""),
+                        "action": action,
+                        "target": target,
+                    }
+                else:
+                    result = {"success": True, "message": str(play_result), "action": action, "target": target}
+            except Exception as exc:
+                logger.warning("[MULTI_STEP] MediaManager play failed: %s", exc)
+                result = {"success": False, "message": f"Playback failed: {exc}", "action": action, "target": target}
+            results.append(result)
+            if result.get("success"):
+                success_count += 1
+            _log_route("execution_policy_allowed", action=action, target=target, step=idx, success=result.get("success", False))
+            continue
+
         result = execute_action(action, target)
         results.append(result)
 
@@ -976,16 +1135,35 @@ def _ai_fallback(query: str) -> dict:
 
     Order:
       1. Knowledge-base lookup (instant, no network).
-      2. Signal eligibility for Gate 3 orchestration pipeline.
+      2. Media opportunity detection (trailer/tutorial/recommendation).
+      3. Signal eligibility for Gate 3 orchestration pipeline.
     """
     q = query.lower().strip()
 
     # 1. Knowledge base
     for key, answer in _KNOWLEDGE_BASE.items():
         if re.search(rf"\b{re.escape(key)}\b", q):
-            return {"success": True, "message": answer}
+            result = {"success": True, "message": answer}
+            _append_media_offer(query, result)
+            return result
 
-    # 2. Graceful unknown — eligible for Gate 3 orchestration pipeline
+    # 2. Check for media opportunity
+    if config.BROWSER_CONNECTOR_ENABLED:
+        mm = MediaManager.get_instance()
+        opportunity = mm.offer_media(query)
+        if opportunity:
+            offer_msg = opportunity.get("offer", "")
+            if offer_msg:
+                return {
+                    "success": True,
+                    "message": (
+                        f"I don't have a direct answer for that. However, {offer_msg}"
+                    ),
+                    "_media_offer": opportunity,
+                    "_gate3_eligible": True,
+                }
+
+    # 3. Graceful unknown — eligible for Gate 3 orchestration pipeline
     return {
         "success": False,
         "message": (
@@ -994,6 +1172,22 @@ def _ai_fallback(query: str) -> dict:
         ),
         "_gate3_eligible": True,
     }
+
+
+def _append_media_offer(query: str, result: dict):
+    try:
+        if not config.BROWSER_CONNECTOR_ENABLED:
+            return
+        mm = MediaManager.get_instance()
+        opportunity = mm.offer_media(query)
+        if opportunity:
+            offer_msg = opportunity.get("offer", "")
+            if offer_msg:
+                existing = result.get("message", "")
+                result["message"] = f"{existing}\n\n{offer_msg}"
+                result["_media_offer"] = opportunity
+    except Exception:
+        pass
 
 
 def _show_help() -> dict:

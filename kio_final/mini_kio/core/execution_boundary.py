@@ -163,7 +163,16 @@ _ACTION_MAP: dict[str, str] = {
     "shutdown_system": "shutdown_system",
     "restart": "restart_system",
     "restart_system": "restart_system",
-    "execute_capability": "execute_capability"
+    "execute_capability": "execute_capability",
+    "media_play": "media_play",
+    "media_pause": "media_pause",
+    "media_stop": "media_stop",
+    "media_mute": "media_mute",
+    "media_unmute": "media_unmute",
+    "media_volume_up": "media_volume_up",
+    "media_volume_down": "media_volume_down",
+    "media_seek_forward": "media_seek_forward",
+    "media_seek_backward": "media_seek_backward",
 }
 
 _BLOCKED_ACTIONS: frozenset[str] = frozenset(

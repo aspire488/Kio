@@ -79,6 +79,22 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
 GROQ_TIMEOUT_S = float(os.getenv("GROQ_TIMEOUT_S", "12.0"))
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
 
+# ── SambaNova Configuration ───────────────────────────────────────
+SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY", "")
+SAMBANOVA_ENABLED = bool(SAMBANOVA_API_KEY.strip())
+SAMBANOVA_MODEL = os.getenv("SAMBANOVA_MODEL", "Llama-2-7b-chat-hf")
+SAMBANOVA_TIMEOUT_S = float(os.getenv("SAMBANOVA_TIMEOUT_S", "15.0"))
+SAMBANOVA_MAX_TOKENS = int(os.getenv("SAMBANOVA_MAX_TOKENS", "1024"))
+SAMBANOVA_BASE_URL = os.getenv("SAMBANOVA_BASE_URL", "https://api.sambanova.ai")
+
+# ── Fireworks Configuration ───────────────────────────────────────
+FIREWORKS_API_KEY = os.getenv("FIREWORKS_API_KEY", "")
+FIREWORKS_ENABLED = bool(FIREWORKS_API_KEY.strip())
+FIREWORKS_MODEL = os.getenv("FIREWORKS_MODEL", "accounts/fireworks/models/llama-v2-7b")
+FIREWORKS_TIMEOUT_S = float(os.getenv("FIREWORKS_TIMEOUT_S", "15.0"))
+FIREWORKS_MAX_TOKENS = int(os.getenv("FIREWORKS_MAX_TOKENS", "1024"))
+FIREWORKS_BASE_URL = os.getenv("FIREWORKS_BASE_URL", "https://api.fireworks.ai/inference")
+
 # ── Hugging Face Configuration ────────────────────────────────────
 HUGGINGFACE_API_KEY = os.getenv("HF_TOKEN", "")  # Use HF_TOKEN as specified in the prompt
 HUGGINGFACE_ENABLED = bool(HUGGINGFACE_API_KEY.strip())
@@ -112,6 +128,11 @@ JINA_READER_TIMEOUT_S = float(os.getenv("JINA_READER_TIMEOUT_S", "10.0"))
 
 # ── Failover Chain Configuration ──────────────────────────────────
 PROVIDER_FAILOVER_ENABLED = bool(os.getenv("PROVIDER_FAILOVER_ENABLED", "true").strip().lower() == "true")
+
+# ── Spotify API Configuration (for track resolution) ──────────────
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+SPOTIFY_API_ENABLED = bool(SPOTIFY_CLIENT_ID.strip() and SPOTIFY_CLIENT_SECRET.strip())
 
 # ── Browser Connector V1 ───────────────────────────────────────────
 BROWSER_CONNECTOR_ENABLED = os.getenv("BROWSER_CONNECTOR_ENABLED", "").strip().lower() == "true"

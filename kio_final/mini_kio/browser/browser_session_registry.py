@@ -8,7 +8,9 @@ Provides a single source of truth for:
 """
 
 import logging
-from typing import Optional, Dict
+import time
+import uuid
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,43 @@ class BrowserSessionRegistry:
         """Remove a tracked session."""
         if browser_id in self._active_sessions:
             del self._active_sessions[browser_id]
+
+    def create_session(self, action: str, url: str, source: str = "browser_operator") -> str:
+        """Create a lightweight session record for a browser_operator action."""
+        session_id = str(uuid.uuid4())[:8]
+        self._active_sessions[session_id] = {
+            "session_id": session_id,
+            "action": action,
+            "url": url,
+            "created_at": time.time(),
+            "source": source,
+        }
+        logger.info(
+            "[BROWSER_SESSION_CREATED] session_id=%s action=%s source=%s",
+            session_id, action, source,
+        )
+        return session_id
+
+    def find_session(self, target: str) -> Optional[Dict[str, Any]]:
+        """Find a session by target name (newest-first, canonical then substring)."""
+        target_lower = target.lower().strip()
+        target_url = self.get_url(target_lower)
+        if target_url:
+            for session in reversed(list(self._active_sessions.values())):
+                if session.get("url", "").startswith(target_url):
+                    return session
+        for session in reversed(list(self._active_sessions.values())):
+            url = session.get("url", "").lower()
+            if target_lower in url:
+                return session
+        return None
+
+    def remove_session(self, session_id: str) -> bool:
+        """Remove a tracked session by session_id."""
+        if session_id in self._active_sessions:
+            del self._active_sessions[session_id]
+            return True
+        return False
 
     def get_diagnostics(self) -> dict:
         return dict(self._diag)

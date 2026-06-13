@@ -27,7 +27,7 @@ IDENTITY_ENTRIES: list[dict] = [
         "id": "core_who_are_you",
         "triggers": [
             "who are you", "what are you", "what exactly are you",
-            "who are you really", "who're u", "whore u",
+            "who are you really", "who're you", "who're u", "whore u",
             "identify yourself", "introduce yourself",
             "tell me about yourself",
             "what is kio", "who is kio",

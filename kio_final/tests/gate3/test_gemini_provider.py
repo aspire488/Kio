@@ -257,7 +257,7 @@ class TestGeminiAsyncSafe:
             return "I opened the file for you. That's a great question!"
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("test")
@@ -274,7 +274,7 @@ class TestGeminiAsyncSafe:
             return ""
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("test")
@@ -289,7 +289,7 @@ class TestGeminiAsyncSafe:
             return None
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("test")
@@ -530,7 +530,7 @@ class TestLLMResponseContract:
             return "That is an interesting question about quantum physics!"
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("tell me about quantum physics")
@@ -546,7 +546,7 @@ class TestLLMResponseContract:
             return ""
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("test")
@@ -561,7 +561,7 @@ class TestLLMResponseContract:
             return None
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             mock_ask_llm,
         )
         result = _ask_gemini("test")
@@ -598,7 +598,7 @@ class TestGeminiModelConfig:
             return "response"
 
         monkeypatch.setattr(
-            "mini_kio.core.llm_router.ask_llm",
+            "mini_kio.llm.llm_ops.ask_llm",
             tracking_ask_llm,
         )
         monkeypatch.setattr("mini_kio.core.config.GEMINI_ENABLED", True)

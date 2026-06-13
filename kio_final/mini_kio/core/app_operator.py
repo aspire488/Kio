@@ -713,6 +713,15 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
     )
 
 
+def _register_browser_session(action: str, url: str) -> None:
+    """Register a lightweight session record for a browser_operator action."""
+    try:
+        from mini_kio.core.routing_utils import get_browser_registry
+        get_browser_registry().create_session(action, url)
+    except Exception as exc:
+        logger.warning("[BROWSER_SESSION] Registration error: %s", exc)
+
+
 def _safe_webbrowser_open(url: str) -> bool:
     if os.environ.get("KIO_TEST_MODE") == "1":
         logger.info("[TEST MODE] Blocked webbrowser.open(%s)", url)
@@ -730,6 +739,7 @@ def search_web(query: str) -> dict:
     try:
         _safe_webbrowser_open(url)
         logger.info(f"[APP] search: {query!r}")
+        _register_browser_session("search_web", url)
         return _normalize_public_result("search", query, {"success": True, "message": f"Searched: {query}"}, start_time)
     except Exception as exc:
         return _normalize_public_result("search", query, {"success": False, "message": f"Search failed: {str(exc)[:80]}"}, start_time)
@@ -751,6 +761,7 @@ def _find_in_registry(key: str) -> Optional[Dict]:
 def _open_url(url: str, label: str) -> dict:
     try:
         _safe_webbrowser_open(url)
+        _register_browser_session("open_url", url)
         # Use "Launched" for URIs without PID tracking; request noop verification
         return {"success": True, "message": f"Launched {label} in browser.", "verification_mode": "noop"}
     except Exception as exc:

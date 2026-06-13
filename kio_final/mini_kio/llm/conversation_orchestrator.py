@@ -21,6 +21,7 @@ class ConversationOrchestrator:
     
     # Positive confirmation triggers (only valid when in AWAITING_CONFIRMATION state)
     CONFIRMATION_TRIGGERS: Set[str] = {"yes", "confirm", "proceed", "go ahead", "do it", "y"}
+    SELECTION_TRIGGERS: Set[str] = {"youtube", "spotify"}
     REJECTION_TRIGGERS: Set[str] = {"no", "nope", "cancel", "stop", "don't", "never mind", "forget it"}
 
     def __init__(self):
@@ -148,9 +149,27 @@ class ConversationOrchestrator:
 
     def _handle_confirmation_attempt(self, text: str) -> OrchestrationResponse:
         # Strict confirmation check
-        if any(trigger == text.lower().strip() for trigger in self.CONFIRMATION_TRIGGERS):
+        text_lower = text.lower().strip()
+        if any(trigger == text_lower for trigger in self.CONFIRMATION_TRIGGERS) or \
+           any(trigger == text_lower for trigger in self.SELECTION_TRIGGERS):
             pending = self._pending_action
             self._state = OrchestrationState.EXECUTABLE_READY
+            
+            # If user provided a specific selection, update the target
+            if text_lower in self.SELECTION_TRIGGERS:
+                target = pending.target
+                if " on " not in target.lower() and " in " not in target.lower():
+                    # Minimal update: append selection if not already present
+                    target = f"{target} on {text_lower}"
+                
+                # Update the pending action with the new target
+                pending = PendingAction(
+                    action=pending.action,
+                    target=target,
+                    classification=pending.classification,
+                    requires_confirmation=False
+                )
+
             return OrchestrationResponse(
                 state=OrchestrationState.EXECUTABLE_READY,
                 response_text=f"Confirmed. Proceeding with {pending.action} {pending.target}.",

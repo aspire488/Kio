@@ -87,18 +87,27 @@ class TabRegistry:
     def find_by_domain(self, domain: str) -> list[OwnedTab]:
         """Find all tabs matching a domain.
 
-        Supports partial domain matching:
-          "youtube" matches "https://youtube.com" and "https://www.youtube.com"
+        Supports bidirectional domain matching:
+          "youtube.com" matches "www.youtube.com"
+          "www.youtube.com" matches "youtube.com"
         """
-        domain_lower = domain.lower().strip().rstrip("/").replace(" ", "")
+        target = domain.lower().strip().rstrip("/").replace(" ", "")
+        if not target:
+            return []
+            
         results = []
         for tab in self._tabs.values():
             try:
                 parsed = urlparse(tab.url)
-                host = parsed.hostname or ""
+                host = (parsed.hostname or "").lower()
             except Exception:
                 continue
-            if domain_lower in host:
+            
+            if not host:
+                continue
+
+            # Bidirectional suffix matching
+            if target == host or host.endswith("." + target) or target.endswith("." + host):
                 results.append(tab)
         return results
 

@@ -195,49 +195,55 @@ def run_bot(runtime=None) -> None:
 
     global _restart_counter
 
-    # ── FIX: run_polling auto-restart loop ──────────────────────────
-    # PTB's run_polling can exit when KeyboardInterrupt/SystemExit is
-    # raised inside the event loop (caught by PTB's internal except).
-    # On return the Application is shut down and must be rebuilt.
-    # We loop forever so KIO survives these transient shutdowns.
+    # ── run_polling auto-restart loop ───────────────────────────────
+    # PTB's run_polling closes its internal event loop on exit.  On
+    # restart we must replace the closed loop on the main thread so
+    # that the fresh Application does not inherit a dead loop.
+    # ─────────────────────────────────────────────────────────────────
     while True:
+        # Reset main-thread event loop: if the previous run_polling()
+        # closed its loop, replace it with a fresh one so no code path
+        # ever picks up a closed loop via asyncio.get_event_loop().
+        try:
+            _old = asyncio.get_event_loop()
+            if _old.is_closed():
+                asyncio.set_event_loop(asyncio.new_event_loop())
+                logger.info("[LIFECYCLE] event_loop_replaced")
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            logger.info("[LIFECYCLE] event_loop_created")
+
         app = _build_app()
-        print("Bot running…")
+        logger.info("[LIFECYCLE] application_created restart_count=%d", _restart_counter)
 
         try:
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
             )
+            logger.info("[LIFECYCLE] polling_stopped reason=normal_exit")
         except KeyboardInterrupt:
-            # Real Ctrl+C from terminal — stop the loop, let process exit
-            logger.warning("[KIO] KeyboardInterrupt — shutting down")
+            logger.warning("[LIFECYCLE] shutdown_started reason=KeyboardInterrupt")
             print("\nShutdown requested.")
             break
         except SystemExit:
-            # SystemExit — treat as unexpected, restart
-            logger.warning("[KIO] run_polling exited with SystemExit — restarting", exc_info=True)
+            logger.warning("[LIFECYCLE] polling_stopped reason=SystemExit restart_count=%d", _restart_counter)
         except BaseException:
-            logger.exception("[KIO] run_polling exited with unexpected exception — restarting")
+            logger.exception("[LIFECYCLE] polling_stopped reason=unexpected_exception restart_count=%d", _restart_counter)
         else:
-            # run_polling returned normally (caught KeyboardInterrupt inside PTB)
-            logger.warning(
-                "[KIO] run_polling returned without exception (restart #%d)",
-                _restart_counter,
-            )
+            logger.warning("[LIFECYCLE] polling_stopped reason=clean_return restart_count=%d", _restart_counter)
 
         _restart_counter += 1
+        logger.info("[LIFECYCLE] restart_executed count=%d", _restart_counter)
 
-        # Brief pause before restart to avoid tight loop on repeated failures
         import time as _time
         _time.sleep(2)
 
-    # Graceful shutdown of connector
+    logger.info("[LIFECYCLE] shutdown_completed")
     try:
         from mini_kio.core.runtime import get_runtime
         rt = get_runtime()
         if rt:
-            # Give connector a moment to close gracefully
             import time as _time
             _time.sleep(0.5)
     except Exception:

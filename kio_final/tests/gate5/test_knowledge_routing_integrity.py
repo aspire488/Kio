@@ -53,7 +53,7 @@ def _assert_no_forbidden_status(reply: str):
 def test_information_query_uses_wikipedia_when_provider_unavailable(monkeypatch):
     monkeypatch.setattr("mini_kio.llm.conversation_responder._ask_gemini", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "mini_kio.knowledge.knowledge_router.fetch_summary",
+        "mini_kio.knowledge.retrieval_router.fetch_summary",
         lambda query: "Kubernetes is an open-source container orchestration system.",
     )
 
@@ -71,7 +71,7 @@ def test_information_query_uses_wikipedia_when_provider_unavailable(monkeypatch)
 def test_who_is_query_uses_wikipedia_when_provider_unavailable(monkeypatch):
     monkeypatch.setattr("mini_kio.llm.conversation_responder._ask_gemini", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "mini_kio.knowledge.knowledge_router.fetch_summary",
+        "mini_kio.knowledge.retrieval_router.fetch_summary",
         lambda query: "Linus Torvalds is the creator of Linux and Git.",
     )
 
@@ -94,7 +94,7 @@ def test_define_and_how_does_queries_use_same_chain(monkeypatch):
             return "Memoization stores previous results so repeated computations can be reused."
         return "Virtual memory maps addresses so processes can use isolated memory spaces."
 
-    monkeypatch.setattr("mini_kio.knowledge.knowledge_router.fetch_summary", fake_fetch)
+    monkeypatch.setattr("mini_kio.knowledge.retrieval_router.fetch_summary", fake_fetch)
 
     responder = ConversationResponder()
     memo = responder.generate(
@@ -116,7 +116,7 @@ def test_define_and_how_does_queries_use_same_chain(monkeypatch):
 
 def test_explicit_failure_when_provider_and_wikipedia_fail(monkeypatch):
     monkeypatch.setattr("mini_kio.llm.conversation_responder._ask_gemini", lambda *args, **kwargs: None)
-    monkeypatch.setattr("mini_kio.knowledge.knowledge_router.fetch_summary", lambda query: None)
+    monkeypatch.setattr("mini_kio.knowledge.retrieval_router.fetch_summary", lambda query: None)
 
     responder = ConversationResponder()
     reply = responder.generate(

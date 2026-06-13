@@ -8,6 +8,12 @@ from mini_kio.llm.conversation_models import OrchestrationResponse, Orchestratio
 from mini_kio.runtime.runtime_contracts import RuntimeHandoffResult, ExecutionClassification
 from mini_kio.llm.gemini_provider import GeminiProvider
 
+def _return_and_close(value):
+    def _wrap(coro):
+        coro.close()
+        return value
+    return _wrap
+
 def test_sanitize_gemini_output():
     # Safe response survives
     assert _sanitize_gemini_output("Hello there!") == "Hello there!"
@@ -34,20 +40,20 @@ def test_ask_gemini_logic(mock_ask_llm, mock_asyncio_run, mock_get_loop):
     mock_ask_llm.return_value = "Hello! I am KIO."
     # Simulate synchronous context (no running loop)
     mock_get_loop.side_effect = RuntimeError("No loop")
-    mock_asyncio_run.side_effect = lambda coro: "Hello! I am KIO."
+    mock_asyncio_run.side_effect = _return_and_close("Hello! I am KIO.")
     
     res = _ask_gemini("hi")
     assert res == "Hello! I am KIO."
     
     # Mock fully stripped response
     mock_ask_llm.return_value = "I will open "
-    mock_asyncio_run.side_effect = lambda coro: "I will open "
+    mock_asyncio_run.side_effect = _return_and_close("I will open ")
     res = _ask_gemini("hi")
     assert res is None # Should trigger fallback
     
     # Mock failed LLM
     mock_ask_llm.return_value = None
-    mock_asyncio_run.side_effect = lambda coro: None
+    mock_asyncio_run.side_effect = _return_and_close(None)
     res = _ask_gemini("hi")
     assert res is None
 

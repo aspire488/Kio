@@ -55,10 +55,12 @@ class DiagnosticRecord:
 class ProviderPriority(int, Enum):
     GEMINI = 0
     GROQ = 1
-    HUGGINGFACE = 2
-    OPENROUTER = 3
-    TOGETHER_AI = 4
-    CEREBRAS = 5
+    CEREBRAS = 2
+    SAMBANOVA = 3
+    FIREWORKS = 4
+    HUGGINGFACE = 5
+    OPENROUTER = 6
+    TOGETHER_AI = 7
 
 
 _PERMANENT_ERROR_PATTERNS = (

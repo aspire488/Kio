@@ -22,12 +22,14 @@ class MessageType(str, Enum):
     OPEN_TAB = "open_tab"
     CLOSE_TAB = "close_tab"
     FOCUS_TAB = "focus_tab"
+    NAVIGATE_TAB = "navigate_tab"
     LIST_TABS = "list_tabs"
     RESULT = "result"
     TAB_CLOSED = "tab_closed"
     TAB_UPDATED = "tab_updated"
     PING = "ping"
     PONG = "pong"
+    EXECUTE_SCRIPT = "execute_script"
     ERROR = "error"
 
 
@@ -43,6 +45,8 @@ class Message:
     window_id: Optional[int] = None
     success: Optional[bool] = None
     error: Optional[str] = None
+    script: Optional[str] = None
+    message: Optional[str] = None
     tabs: Optional[list[dict]] = None
 
     def to_json(self) -> str:
@@ -64,11 +68,16 @@ class OwnedTab:
     window_id: int = 0
     created_at: float = field(default_factory=lambda: __import__("time").time())
     is_owned: bool = False
+    audible: bool = False
+    active: bool = False
+    last_accessed: float = 0.0
 
     def to_dict(self) -> dict:
         return {"tab_id": self.tab_id, "url": self.url,
                 "title": self.title, "window_id": self.window_id,
-                "created_at": self.created_at, "is_owned": self.is_owned}
+                "created_at": self.created_at, "is_owned": self.is_owned,
+                "audible": self.audible, "active": self.active,
+                "last_accessed": self.last_accessed}
 
     @classmethod
     def from_dict(cls, d: dict) -> "OwnedTab":
@@ -79,6 +88,9 @@ class OwnedTab:
             window_id=d.get("window_id", 0),
             created_at=d.get("created_at", __import__("time").time()),
             is_owned=d.get("is_owned", False),
+            audible=d.get("audible", False),
+            active=d.get("active", False),
+            last_accessed=d.get("last_accessed", 0.0),
         )
 
 
@@ -154,10 +166,42 @@ def validate_focus_tab(msg: Message) -> Optional[str]:
     return None
 
 
+def validate_navigate_tab(msg: Message) -> Optional[str]:
+    """Validate navigate_tab command. Returns error string or None."""
+    if msg.type != MessageType.NAVIGATE_TAB:
+        return f"expected 'navigate_tab', got '{msg.type}'"
+    if msg.tab_id is None or not isinstance(msg.tab_id, int):
+        return "missing or invalid tab_id"
+    if msg.tab_id < 1:
+        return "invalid tab_id (must be positive)"
+    if not msg.url or not isinstance(msg.url, str):
+        return "missing or invalid url"
+    if not msg.url.startswith(("http://", "https://")):
+        return "url must start with http:// or https://"
+    if len(msg.url) > 2048:
+        return "url exceeds 2048 character limit"
+    return None
+
+
+def validate_execute_script(msg: Message) -> Optional[str]:
+    """Validate execute_script command. Returns error string or None."""
+    if msg.type != MessageType.EXECUTE_SCRIPT:
+        return f"expected 'execute_script', got '{msg.type}'"
+    if msg.tab_id is None or not isinstance(msg.tab_id, int):
+        return "missing or invalid tab_id"
+    if msg.tab_id < 1:
+        return "invalid tab_id (must be positive)"
+    if not msg.script or not isinstance(msg.script, str):
+        return "missing or invalid script"
+    return None
+
+
 _COMMAND_VALIDATORS = {
     MessageType.OPEN_TAB: validate_open_tab,
     MessageType.CLOSE_TAB: validate_close_tab,
     MessageType.FOCUS_TAB: validate_focus_tab,
+    MessageType.NAVIGATE_TAB: validate_navigate_tab,
+    MessageType.EXECUTE_SCRIPT: validate_execute_script,
 }
 
 

@@ -95,6 +95,188 @@ async function handleFocusTab(msg) {
   }
 }
 
+async function handleNavigateTab(msg) {
+  log("INFO", "Navigating tab", { tabId: msg.tab_id, url: msg.url });
+  try {
+    const tab = await chrome.tabs.get(msg.tab_id);
+    log("FOCUS", "Navigate tab window focus", { windowId: tab.windowId });
+    await chrome.windows.update(tab.windowId, { focused: true });
+    await chrome.tabs.update(msg.tab_id, { url: msg.url, active: true });
+    log("SUCCESS", "Tab navigated", { tabId: msg.tab_id, url: msg.url });
+    return {
+      type: "result",
+      success: true,
+      command_id: msg.command_id,
+      tab_id: msg.tab_id,
+      url: msg.url,
+      title: tab.title || "",
+      window_id: tab.windowId,
+    };
+  } catch (err) {
+    log("ERROR", "Failed to navigate tab", { error: err.message });
+    return { type: "result", success: false, command_id: msg.command_id, error: err.message };
+  }
+}
+
+// ── MV3 Static Script Registry ────────────────────────────────────────
+// Pre-defined functions for all supported operations.
+// No eval(), no new Function() — fully MV3 CSP compliant.
+
+const SCRIPTS = {
+  play: async () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    try {
+      await v.play();
+      return JSON.stringify({
+        status: 'playing',
+        currentTime: v.currentTime,
+        duration: v.duration,
+        volume: v.volume,
+        muted: v.muted,
+      });
+    } catch (e) {
+      if (e.name === 'NotAllowedError') return JSON.stringify({ status: 'blocked' });
+      if (e.name === 'AbortError') return JSON.stringify({ status: 'error', name: e.name });
+      return JSON.stringify({ status: 'error', name: e.name, message: e.message });
+    }
+  },
+  pause: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.pause();
+    return JSON.stringify({
+      status: 'paused',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  stop: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.pause();
+    v.currentTime = 0;
+    return JSON.stringify({
+      status: 'stopped',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  mute: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.muted = true;
+    return JSON.stringify({
+      status: 'muted',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  unmute: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.muted = false;
+    return JSON.stringify({
+      status: 'unmuted',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  volume_up: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.volume = Math.min(1, v.volume + 0.1);
+    return JSON.stringify({
+      status: 'volume_changed',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  volume_down: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.volume = Math.max(0, v.volume - 0.1);
+    return JSON.stringify({
+      status: 'volume_changed',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  seek_forward: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.currentTime = Math.min(v.duration || 0, v.currentTime + 10);
+    return JSON.stringify({
+      status: 'seeked',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  seek_backward: () => {
+    const v = document.querySelector('video,audio');
+    if (!v) return JSON.stringify({ status: 'no media' });
+    v.currentTime = Math.max(0, v.currentTime - 10);
+    return JSON.stringify({
+      status: 'seeked',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+    });
+  },
+  youtube_bootstrap: () => { const s = ['ytd-video-renderer a#video-title', 'a#video-title', 'ytd-video-renderer a#thumbnail', 'a#thumbnail', 'ytd-video-renderer a.yt-simple-endpoint']; for (const sel of s) { const a = document.querySelector(sel); if (a && a.href && a.href.includes('/watch?')) { a.click(); return 'navigating'; } } return 'not found'; },
+};
+
+async function handleExecuteScript(msg) {
+  const fn = SCRIPTS[msg.script];
+  if (!fn) {
+    log("ERROR", "Unknown script", { script: msg.script });
+    return { type: "result", success: false, command_id: msg.command_id, error: `unknown script: ${msg.script}` };
+  }
+  log("INFO", "Executing script", { scriptName: msg.script, tabId: msg.tab_id });
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: msg.tab_id },
+      func: fn,
+    });
+    const value = result.result;
+    log("SUCCESS", "Script executed", { tabId: msg.tab_id, scriptName: msg.script, result: value });
+
+    let message_value = value;
+    if (typeof value === 'string') {
+      try {
+        message_value = JSON.parse(value);
+      } catch (e) {
+        // Not JSON, keep as string
+      }
+    }
+    return {
+      type: "result",
+      success: true,
+      command_id: msg.command_id,
+      tab_id: msg.tab_id,
+      message: message_value,
+    };
+  } catch (err) {
+    log("ERROR", "Failed to execute script", { scriptName: msg.script, error: err.message });
+    return { type: "result", success: false, command_id: msg.command_id, error: err.message };
+  }
+}
+
 async function handleListTabs(msg) {
   log("INFO", "Listing tabs");
   try {
@@ -104,6 +286,9 @@ async function handleListTabs(msg) {
       url: t.url || t.pendingUrl || "",
       title: t.title || "",
       window_id: t.windowId,
+      audible: t.audible || false,
+      active: t.active || false,
+      last_accessed: t.lastAccessed || 0,
     }));
     log("SUCCESS", "Tabs listed", { count: tabList.length });
     return { type: "result", success: true, command_id: msg.command_id, tabs: tabList };
@@ -117,6 +302,8 @@ const COMMAND_HANDLERS = {
   open_tab: handleOpenTab,
   close_tab: handleCloseTab,
   focus_tab: handleFocusTab,
+  navigate_tab: handleNavigateTab,
+  execute_script: handleExecuteScript,
   list_tabs: handleListTabs,
 };
 

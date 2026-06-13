@@ -21,6 +21,7 @@ import secrets
 import sys
 import threading
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import websockets
 from websockets.asyncio.server import serve
@@ -37,6 +38,17 @@ logger = logging.getLogger(__name__)
 _WS_HOST = "127.0.0.1"
 _WS_PORT = 9877
 _CONNECTOR_THREAD_NAME = "kio-bc-ws"
+
+_MEDIA_DOMAINS = [
+    "youtube.com",
+    "music.youtube.com",
+    "open.spotify.com",
+    "soundcloud.com",
+    "twitch.tv",
+    "netflix.com",
+    "primevideo.com",
+    "disneyplus.com",
+]
 
 # ── Thread exception hook (global, installed once) ────────────────────
 
@@ -135,6 +147,13 @@ class MockExtension:
                 success=True, tab_id=cmd.tab_id,
             )
 
+        if cmd.type == MessageType.NAVIGATE_TAB:
+            return Message(
+                type=MessageType.RESULT, command_id=cmd.command_id,
+                success=True, tab_id=cmd.tab_id, url=cmd.url,
+                title=f"Navigated Tab {cmd.tab_id}",
+            )
+
         if cmd.type == MessageType.LIST_TABS:
             return Message(
                 type=MessageType.RESULT, command_id=cmd.command_id,
@@ -142,6 +161,13 @@ class MockExtension:
                     {"tab_id": 1, "url": "https://example.com",
                      "title": "Example"},
                 ],
+            )
+
+        if cmd.type == MessageType.EXECUTE_SCRIPT:
+            return Message(
+                type=MessageType.RESULT, command_id=cmd.command_id,
+                success=True, tab_id=cmd.tab_id,
+                message=f"mock: script executed on tab {cmd.tab_id}",
             )
 
         if cmd.type == MessageType.PING:
@@ -215,7 +241,33 @@ class Connector:
     # ── Public Async API ─────────────────────────────────────────────
 
     async def open_tab(self, url: str) -> TabResult:
-        """Open a URL in a new tab. Returns owned tab info."""
+        """Open a URL in a new tab. Returns owned tab info.
+
+        Deduplication (P5):
+        Before creating a new tab, check for an existing tab with the
+        same domain.  If found, focus that tab instead of creating a
+        duplicate.
+        """
+        # P5: Check for existing tab by domain
+        parsed = urlparse(url)
+        domain = parsed.hostname
+        if domain:
+            existing_matches = self._registry.find_by_domain(domain)
+            if existing_matches:
+                existing = existing_matches[0]
+                logger.info("[BROWSER_DEDUP_HIT] target=%s tab_id=%s", url, existing.tab_id)
+                # Navigate existing tab to requested URL instead of creating new
+                command_id = new_command_id()
+                msg = Message(type=MessageType.NAVIGATE_TAB, command_id=command_id,
+                              tab_id=existing.tab_id, url=url)
+                err = validate_command(msg)
+                if err:
+                    return TabResult(success=False, command_id=command_id,
+                                     error=err)
+                logger.info("[BROWSER_NAVIGATE_TAB] tab_id=%s url=%s", existing.tab_id, url)
+                return await self._dispatch(msg)
+
+        logger.info("[BROWSER_DEDUP_MISS] target=%s", url)
         command_id = new_command_id()
         msg = Message(type=MessageType.OPEN_TAB, command_id=command_id,
                       url=url)
@@ -299,6 +351,88 @@ class Connector:
         command_id = new_command_id()
         msg = Message(type=MessageType.LIST_TABS, command_id=command_id)
         return await self._dispatch(msg)
+
+    async def execute_script(self, tab_id: int, script: str) -> TabResult:
+        """Execute JavaScript in a browser tab.
+
+        Args:
+            tab_id: Chrome tab ID to inject into.
+            script: JavaScript code to execute (IIFE returning a value).
+
+        Returns:
+            TabResult with message containing the script return value.
+        """
+        command_id = new_command_id()
+        msg = Message(type=MessageType.EXECUTE_SCRIPT, command_id=command_id,
+                       tab_id=tab_id, script=script)
+        err = validate_command(msg)
+        if err:
+            return TabResult(success=False, command_id=command_id, error=err)
+        logger.info("[BROWSER_EXECUTE_SCRIPT] tab_id=%s", tab_id)
+        return await self._dispatch(msg)
+
+    async def _resolve_media_tab(self, domain_hint: str = "") -> Optional[OwnedTab]:
+        """Resolve the best media tab for media control actions.
+
+        Resolution order:
+        1. Domain hint: find tab matching the specified domain.
+        2. Audible tabs: find any tab currently producing audio.
+        3. Owned media tabs: find KIO-opened tabs on known media domains.
+        4. All media tabs: search ALL browser tabs for media domains.
+        5. Fail: return None.
+        """
+        # 1. Domain hint
+        if domain_hint:
+            owned = self._registry.find_by_domain(domain_hint)
+            if owned:
+                return owned[0]
+            try:
+                res = await self.list_tabs()
+                if res.success and res.tabs:
+                    for t in res.tabs:
+                        if t.url and domain_hint.lower() in t.url.lower():
+                            return t
+            except Exception:
+                pass
+            return None
+
+        # 2. Audible tabs (requires extension enhancement — audible field)
+        try:
+            res = await self.list_tabs()
+            if res.success and res.tabs:
+                audible_tabs = [t for t in res.tabs if getattr(t, "audible", False)]
+                if audible_tabs:
+                    # Prefer active tab among audible ones
+                    for t in audible_tabs:
+                        if getattr(t, "active", False):
+                            return t
+                    # Prefer owned among audible ones
+                    for t in audible_tabs:
+                        if t.is_owned:
+                            return t
+                    # Return first audible
+                    return audible_tabs[0]
+        except Exception:
+            pass
+
+        # 3. Owned media tabs
+        for domain in _MEDIA_DOMAINS:
+            matches = self._registry.find_by_domain(domain)
+            if matches:
+                return matches[0]
+
+        # 4. All media tabs (via list_tabs)
+        try:
+            res = await self.list_tabs()
+            if res.success and res.tabs:
+                for domain in _MEDIA_DOMAINS:
+                    for t in res.tabs:
+                        if t.url and domain.lower() in t.url.lower():
+                            return t
+        except Exception:
+            pass
+
+        return None
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -508,6 +642,7 @@ class Connector:
             success=ok,
             command_id=resp.command_id or "",
             error=resp.error or "",
+            message=resp.message or "",
         )
 
         if ok and resp.tab_id is not None:
@@ -523,6 +658,10 @@ class Connector:
                     self._registry.add(tab)
                 elif cmd.type == MessageType.CLOSE_TAB:
                     self._registry.remove(resp.tab_id)
+                elif cmd.type == MessageType.NAVIGATE_TAB and resp.url:
+                    self._registry.update_url(resp.tab_id, resp.url, resp.title or "")
+                elif cmd.type == MessageType.EXECUTE_SCRIPT:
+                    pass  # No registry state change
 
         if ok and resp.tabs is not None:
             tabs = []
@@ -603,6 +742,7 @@ class Connector:
             type=MessageType.CONNECTED, success=True,
         )))
         self._extension = websocket
+        logger.info("[CONNECTOR] extension registered: remote=%s", remote)
 
         try:
             async for raw in websocket:
@@ -642,6 +782,6 @@ class Connector:
                         remote, self._started,
                         self._loop.is_running() if self._loop else "N/A",
                         self._thread.is_alive() if self._thread else "N/A")
-            # RACE FIX: Only clear if this connection is the active one
             if self._extension is websocket:
+                logger.info("[CONNECTOR] extension disconnected: remote=%s", remote)
                 self._extension = None

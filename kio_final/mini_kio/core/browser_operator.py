@@ -33,6 +33,14 @@ def _safe_webbrowser_open(url: str) -> bool:
         return True
     return webbrowser.open(url)
 
+def _register_browser_session(action: str, url: str) -> None:
+    """Register a lightweight session record for a browser_operator action."""
+    try:
+        from mini_kio.core.routing_utils import get_browser_registry
+        get_browser_registry().create_session(action, url)
+    except Exception as exc:
+        logger.warning("[BROWSER_SESSION] Registration error: %s", exc)
+
 # ---------------------------------------------------------------------------
 # Operator Descriptor
 # ---------------------------------------------------------------------------
@@ -137,6 +145,7 @@ def open_url(url: str) -> Dict[str, Any]:
             url = "https://" + url
         _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] opened: {url}")
+        _register_browser_session("open_url", url)
         
         # Friendly name extraction to avoid URL leakage (BUG 4)
         from mini_kio.core.runtime_response_formatter import _extract_url_name
@@ -167,6 +176,7 @@ def search_google(query: str) -> Dict[str, Any]:
         url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
         _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] Google search: {query!r}")
+        _register_browser_session("search_google", url)
         return _normalize_public_result(
             "search",
             "google",
@@ -196,6 +206,7 @@ def search_youtube(query: str) -> Dict[str, Any]:
         url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
         _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] YouTube search: {query!r}")
+        _register_browser_session("search_youtube", url)
         return _normalize_public_result(
             "search_youtube",
             "youtube",
@@ -231,6 +242,7 @@ def play_youtube(query: str) -> Dict[str, Any]:
         url = f"https://www.youtube.com/results?search_query={encoded}&sp=EgIQAQ%253D%253D"
         _safe_webbrowser_open(url)
         logger.info(f"[BROWSER] YouTube play: {query!r}")
+        _register_browser_session("play_youtube", url)
         return _normalize_public_result(
             "youtube_play",
             "youtube",

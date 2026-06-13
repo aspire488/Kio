@@ -144,6 +144,38 @@ def _register_providers(gateway: LLMGateway) -> None:
             f"model={config.CEREBRAS_MODEL}"
         )
 
+    # Priority 3: SambaNova
+    if config.SAMBANOVA_ENABLED:
+        provider = DirectHTTPProvider(
+            name="sambanova",
+            base_url=config.SAMBANOVA_BASE_URL,
+            api_key=config.SAMBANOVA_API_KEY,
+            model=config.SAMBANOVA_MODEL,
+            timeout_s=config.SAMBANOVA_TIMEOUT_S,
+            max_tokens=config.SAMBANOVA_MAX_TOKENS,
+        )
+        gateway.register_provider(provider, priority=ProviderPriority.SAMBANOVA.value)
+        logger.info(
+            f"Registered SambaNova provider (priority {ProviderPriority.SAMBANOVA.value}): "
+            f"model={config.SAMBANOVA_MODEL}"
+        )
+
+    # Priority 4: Fireworks
+    if config.FIREWORKS_ENABLED:
+        provider = DirectHTTPProvider(
+            name="fireworks",
+            base_url=config.FIREWORKS_BASE_URL,
+            api_key=config.FIREWORKS_API_KEY,
+            model=config.FIREWORKS_MODEL,
+            timeout_s=config.FIREWORKS_TIMEOUT_S,
+            max_tokens=config.FIREWORKS_MAX_TOKENS,
+        )
+        gateway.register_provider(provider, priority=ProviderPriority.FIREWORKS.value)
+        logger.info(
+            f"Registered Fireworks provider (priority {ProviderPriority.FIREWORKS.value}): "
+            f"model={config.FIREWORKS_MODEL}"
+        )
+
     # Optional: FreeLLM experimental backend (off by default)
     if _ENABLE_FREELLM and config.FREELLMAPI_ENABLED:
         try:
@@ -172,14 +204,19 @@ def _register_providers(gateway: LLMGateway) -> None:
 
 
 def _get_config_label(name: str, provider) -> str:
-    """Return a human-readable config status for a provider."""
+    """Return a human-readable config status for a provider.
+
+    Uses a private event loop so we never touch the main-thread loop
+    (which may be closed after a PTB run_polling restart).
+    """
     try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            healthy = asyncio.run_coroutine_threadsafe(provider.health_check(), loop).result(timeout=2)
-        else:
-            healthy = asyncio.run(provider.health_check())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            healthy = loop.run_until_complete(provider.health_check())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
     except Exception:
         healthy = False
     if not healthy:

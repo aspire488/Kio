@@ -6,11 +6,20 @@
   "permissions": [
     "tabs",
     "activeTab",
-    "storage"
+    "storage",
+    "scripting"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
-    "ws://127.0.0.1/*"
+    "ws://127.0.0.1/*",
+    "*://*.youtube.com/*",
+    "*://*.music.youtube.com/*",
+    "*://*.open.spotify.com/*",
+    "*://*.soundcloud.com/*",
+    "*://*.twitch.tv/*",
+    "*://*.netflix.com/*",
+    "*://*.primevideo.com/*",
+    "*://*.disneyplus.com/*"
   ],
   "background": {
     "service_worker": "background.js"
