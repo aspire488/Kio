@@ -188,10 +188,21 @@ def _resolve_contextual_references(command: str) -> str:
     """
     Surgical short-context resolver.
     Handles 'it' (last target), 'that' (last target), 'this' (last target), 'again' (last action).
+    Media references (play, watch, pause, resume, stop, etc.) are owned by MediaManager
+    and must NOT be intercepted here.
     """
     from mini_kio.core.runtime import get_last_successful_interaction
 
     lower = command.lower().strip()
+
+    # ── Media verb guard ──────────────────────────────────────────────
+    # MediaManager handles its own reference resolution (pronouns,
+    # continuations, variants).  Do NOT hijack them with browser
+    # capability targets.
+    if lower.startswith(("play ", "watch ", "seek ", "turn ")):
+        return command
+    if lower in ("pause", "resume", "stop", "next", "previous", "mute", "unmute"):
+        return command
 
     # "again", "do it again"
     if lower == "again" or lower == "do it again":
@@ -210,7 +221,7 @@ def _resolve_contextual_references(command: str) -> str:
             _log_route("context_resolve", original=command, resolved=resolved)
             return resolved
 
-    # Handle "it", "that", "this"
+    # Handle "it", "that", "this" (non-media only at this point)
     if re.search(r"\b(it|that|this)\b", lower):
         # Gate 5.1: Resolve capability registry FIRST for browser sessions
         from mini_kio.core.routing_utils import get_latest_capability
@@ -674,11 +685,18 @@ def handle_command(command: str) -> dict:
             resolved = _resolved_play or _resolved
             return _mm.play(resolved, platform=_mm.get_context().get_provider_for_reference())
 
-        # ── Accept media offer (yes / play it after discovery offer) ─────────
+        # ── Accept media offer (yes / play it after discovery or intelligence) ─
         _accept_first = lower.split()[0] if lower else ""
         if (_accept_first in ("yes", "yeah", "sure", "ok") or
               lower in ("play it", "play that", "watch it", "watch that",
                         "play video", "play the first one")):
+            # Try intelligence offer first
+            if _mm.has_intelligence_offer():
+                _log_route("route", intent="accept_intelligence_offer")
+                result = _mm.accept_intelligence_offer()
+                if result:
+                    return result
+            # Fall back to legacy discovery offer
             last_offer = _mm.get_last_offer()
             if last_offer:
                 _log_route("route", intent="accept_media_offer")
@@ -709,6 +727,24 @@ def handle_command(command: str) -> dict:
             final_query = resolved if resolved else query
             return _mm.play(final_query)
 
+        # ── WATCH ────────────────────────────────────────────────────────────
+        if lower.startswith("watch "):
+            query = command[6:].strip()
+            # Check for explicit platform separators
+            for sep in [" on ", " in ", " using "]:
+                if sep in query:
+                    parts = query.rsplit(sep, 1)
+                    target_app = parts[1].strip().lower()
+                    clean_query = parts[0].strip()
+                    resolved = _mm.resolve_query(clean_query)
+                    final_query = resolved if resolved else clean_query
+                    _log_route("route", intent="watch_on_platform", platform=target_app, query=final_query)
+                    return _mm.play(final_query, platform=target_app)
+
+            resolved = _mm.resolve_query(query)
+            final_query = resolved if resolved else query
+            return _mm.play(final_query, platform="youtube")
+
         # ── SEARCH YOUTUBE ────────────────────────────────────────────────────
         if lower.startswith("search youtube "):
             query = command[15:].strip()
@@ -719,6 +755,12 @@ def handle_command(command: str) -> dict:
             _resolved = _mm.resolve_query(query)
             _final = _resolved if _resolved else query
             return _mm.play(_final, platform="youtube")
+
+        # ── Intelligence: Follow-up Detection ────────────────────────────────
+        _intel_fu = _mm.process_followup(lower)
+        if _intel_fu is not None:
+            _log_route("route", intent="intelligence_followup", text=lower)
+            return _intel_fu
 
         # ── TRANSPORT CONTROLS ────────────────────────────────────────────────
         _words = lower.split()
@@ -1147,7 +1189,7 @@ def _ai_fallback(query: str) -> dict:
             _append_media_offer(query, result)
             return result
 
-    # 2. Check for media opportunity
+    # 2. Check for media opportunity (legacy discovery)
     if config.BROWSER_CONNECTOR_ENABLED:
         mm = MediaManager.get_instance()
         opportunity = mm.offer_media(query)
@@ -1163,7 +1205,20 @@ def _ai_fallback(query: str) -> dict:
                     "_gate3_eligible": True,
                 }
 
-    # 3. Graceful unknown — eligible for Gate 3 orchestration pipeline
+    # 3. Intelligence opportunity detection
+    mm = MediaManager.get_instance()
+    _intel_opp = mm.process_opportunity(query)
+    if _intel_opp:
+        _display = _intel_opp.get("display_question", "")
+        if _display:
+            return {
+                "success": True,
+                "message": _display,
+                "_intelligence_opportunity": _intel_opp,
+                "_gate3_eligible": False,
+            }
+
+    # 4. Graceful unknown — eligible for Gate 3 orchestration pipeline
     return {
         "success": False,
         "message": (

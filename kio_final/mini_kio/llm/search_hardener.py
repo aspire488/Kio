@@ -5,11 +5,26 @@ from mini_kio.knowledge.knowledge_models import MultiSourceResult
 
 logger = logging.getLogger(__name__)
 
+# Pattern to strip structured metadata from LLM responses.
+# Captures CONFIDENCE, AGREEMENT, SUMMARY, and SOURCES lines.
+_METADATA_PATTERN = re.compile(
+    r"^(?:CONFIDENCE|AGREEMENT|SOURCES):\s*.*(?:\n|$)",
+    re.MULTILINE | re.IGNORECASE,
+)
+_SUMMARY_PREFIX = re.compile(r"^SUMMARY:\s*", re.IGNORECASE)
+
+
 class SearchHardener:
-    """Hardens search results via claim extraction, consensus analysis, and confidence scoring."""
+    """Hardens search results via claim extraction, consensus analysis, and confidence scoring.
+
+    Internal metadata (CONFIDENCE, AGREEMENT, SOURCES) is stored for debugging
+    but stripped from the user-visible response.
+    """
 
     def __init__(self):
-        pass
+        self.last_confidence: Optional[str] = None
+        self.last_agreement: Optional[str] = None
+        self.last_sources: Optional[str] = None
 
     def summarize(self, result: MultiSourceResult) -> str:
         # Accept plain string as passthrough (backward compat for tests)
@@ -52,10 +67,38 @@ class SearchHardener:
         if not raw_response:
             return "Failed to summarize search results."
 
+        # Extract metadata for internal tracking
+        self._extract_metadata(raw_response)
+
+        # Extract just the summary text for user-visible output
+        clean = self._strip_metadata(raw_response)
+
         # Post-process for truthfulness requirements
-        if "CONFIDENCE: Low" in raw_response:
-            return "I found conflicting information. " + raw_response
-        if "CONFIDENCE: Unknown" in raw_response:
+        if self.last_confidence == "Low":
+            return "I found conflicting information. " + clean
+        if self.last_confidence == "Unknown":
             return "I cannot verify that information based on the search results."
 
-        return raw_response
+        return clean
+
+    def _extract_metadata(self, response: str) -> None:
+        """Parse and store metadata labels from LLM response."""
+        for line in response.split("\n"):
+            line_stripped = line.strip()
+            lower = line_stripped.lower()
+            if lower.startswith("confidence:"):
+                self.last_confidence = line_stripped.split(":", 1)[1].strip()
+            elif lower.startswith("agreement:"):
+                self.last_agreement = line_stripped.split(":", 1)[1].strip()
+            elif lower.startswith("sources:"):
+                self.last_sources = line_stripped.split(":", 1)[1].strip()
+
+    def _strip_metadata(self, response: str) -> str:
+        """Remove CONFIDENCE/AGREEMENT/SOURCES lines; return only summary text."""
+        # Remove the metadata header lines
+        cleaned = _METADATA_PATTERN.sub("", response).strip()
+        # Remove the "SUMMARY:" prefix if present
+        cleaned = _SUMMARY_PREFIX.sub("", cleaned).strip()
+        if not cleaned:
+            return response
+        return cleaned

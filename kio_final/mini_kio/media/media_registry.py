@@ -43,7 +43,7 @@ class MediaRegistry:
         for s in self._sessions.values():
             if time.time() - s.updated_at > ACTIVE_SESSION_TTL_S:
                 continue
-            if s.state == MediaState.PAUSED:
+            if s.state in (MediaState.READY, MediaState.PAUSED):
                 if best is None or s.updated_at > best.updated_at:
                     best = s
         if best:
@@ -58,7 +58,7 @@ class MediaRegistry:
     def get_active_by_player(self) -> Optional[tuple[str, MediaSession]]:
         for p, s in self._sessions.items():
             if time.time() - s.updated_at <= ACTIVE_SESSION_TTL_S:
-                if s.state in (MediaState.PLAYING, MediaState.PAUSED):
+                if s.state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED):
                     return p, s
         for p, s in self._sessions.items():
             if time.time() - s.updated_at <= ACTIVE_SESSION_TTL_S:

@@ -9,6 +9,12 @@ from .runtime_contracts import ExecutionClassification, ExecutionAuditMetadata, 
 
 logger = logging.getLogger(__name__)
 
+_MEDIA_ACTIONS = frozenset({
+    "play", "watch", "pause", "resume", "stop",
+    "next", "previous", "mute", "unmute",
+    "seek", "volume",
+})
+
 class RuntimeHandoff:
     """
     Safe wiring between AI orchestration and deterministic runtime execution.
@@ -94,9 +100,47 @@ class RuntimeHandoff:
             
             # Dispatch to Authoritative Runtime Execution
             try:
-                # LLM proposes. Runtime decides.
-                result = execute_action(pending.action, pending.target)
+                action = (pending.action or "").lower()
+                logger.info("[HANDOFF_TRACE] action=%s target=%s provider=%s", action, pending.target, getattr(pending, 'provider', None))
+                if action in _MEDIA_ACTIONS:
+                    from mini_kio.media.media_manager import MediaManager
+                    mm = MediaManager.get_instance()
+                    if action in ("play", "watch"):
+                        provider = getattr(pending, 'provider', None) or ""
+                        logger.info("[HANDOFF_TRACE] dispatching_to_media_manager action=%s target=%s platform=%s", action, pending.target, provider)
+                        result = mm.play(pending.target or "", platform=provider)
+                    elif action == "pause":
+                        result = mm.pause()
+                    elif action == "resume":
+                        result = mm.resume()
+                    elif action == "stop":
+                        result = mm.stop()
+                    elif action == "next":
+                        result = mm.next_track()
+                    elif action == "previous":
+                        result = mm.previous_track()
+                    elif action == "mute":
+                        result = mm.mute()
+                    elif action == "unmute":
+                        result = mm.unmute()
+                    elif action == "seek":
+                        result = mm.process_nl_seek(pending.target) or {"success": True, "message": "Seek processed."}
+                    elif action == "volume":
+                        target_lower = (pending.target or "").lower()
+                        if "up" in target_lower:
+                            result = mm.volume_up()
+                        elif "down" in target_lower:
+                            result = mm.volume_down()
+                        else:
+                            result = mm.volume_up()
+                    else:
+                        result = execute_action(pending.action, pending.target)
+                else:
+                    result = execute_action(pending.action, pending.target)
                 
+                logger.info("[HANDOFF_TRACE] media_result success=%s message=%s has_session=%s", 
+                            result.get("success"), result.get("message"), 
+                            bool(result.get("session")))
                 return RuntimeHandoffResult(
                     success=result.get("success", False),
                     classification=ExecutionClassification.EXECUTABLE_VALIDATED,

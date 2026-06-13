@@ -7,15 +7,18 @@ Decoupled from playback — caller (MediaIntelligence) drives execution.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from media_entity_memory import (
-    EntityType, MediaEntityMemory, MediaProvider, ResolvedEntity
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity
 )
+from mini_kio.memory.memory_store import MemoryStore
 
 
 # ─────────────────────────── enums ───────────────────────────
@@ -68,6 +71,46 @@ class MediaOffer:
     def age_seconds(self) -> float:
         return time.time() - self.created_at
 
+    def to_dict(self) -> Dict:
+        d = {
+            "offer_id": self.offer_id,
+            "trigger": self.trigger.value,
+            "entity": self.entity.to_dict() if self.entity else None,
+            "title": self.title,
+            "description": self.description,
+            "candidates": [c.to_dict() for c in self.candidates],
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "ttl_seconds": self.ttl_seconds,
+            "accepted_at": self.accepted_at,
+            "rejected_at": self.rejected_at,
+            "accepted_index": self.accepted_index,
+            "source_query": self.source_query,
+            "confidence": self.confidence,
+        }
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "MediaOffer":
+        entity = ResolvedEntity.from_dict(d["entity"]) if d.get("entity") else None
+        candidates = [ResolvedEntity.from_dict(c) for c in d.get("candidates", [])]
+        return cls(
+            offer_id=d["offer_id"],
+            trigger=OfferTrigger(d["trigger"]),
+            entity=entity,
+            title=d["title"],
+            description=d["description"],
+            candidates=candidates,
+            status=OfferStatus(d["status"]),
+            created_at=d["created_at"],
+            ttl_seconds=d["ttl_seconds"],
+            accepted_at=d["accepted_at"],
+            rejected_at=d["rejected_at"],
+            accepted_index=d["accepted_index"],
+            source_query=d["source_query"],
+            confidence=d["confidence"],
+        )
+
     def to_display(self) -> str:
         """Human-readable offer text."""
         if self.candidates:
@@ -112,8 +155,8 @@ class MediaOfferManager:
     _NEGATIVES    = {"no", "nope", "nah", "skip", "not now", "don't", "never mind",
                      "pass", "no thanks", "forget it", "cancel"}
 
-    def __init__(self, memory: MediaEntityMemory):
-        self._mem    = memory
+    def __init__(self, memory_store: MemoryStore):
+        self._memory_store = memory_store
         self._offers: Dict[str, MediaOffer] = {}
         self._active: Optional[str] = None    # current pending offer id
 
@@ -144,12 +187,8 @@ class MediaOfferManager:
         self._offers[offer.offer_id] = offer
         self._active = offer.offer_id
         # Persist to memory
-        self._mem.set(f"offer:{offer.offer_id}", {
-            "id": offer.offer_id,
-            "trigger": trigger.value,
-            "title": offer.title,
-            "status": OfferStatus.PENDING.value,
-        }, ttl=ttl_seconds)
+        self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict()))
+        self._memory_store.set_fact("active_offer_id", offer.offer_id) # Store active offer ID
         return offer
 
     def create_single_offer(
@@ -193,8 +232,8 @@ class MediaOfferManager:
         offer.status       = OfferStatus.ACCEPTED
         offer.accepted_at  = time.time()
         offer.accepted_index = candidate_index
-        self._mem.set(f"offer_accepted:{offer.offer_id}", offer.offer_id,
-                      ttl=MediaEntityMemory.TTL_LAST_SESSION)
+        self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict()))
+        self._memory_store.set_fact("active_offer_id", "")
         self._active = None
         return offer
 
@@ -204,8 +243,8 @@ class MediaOfferManager:
             return None
         offer.status      = OfferStatus.REJECTED
         offer.rejected_at = time.time()
-        self._mem.set(f"offer_rejected:{offer.offer_id}", offer.offer_id,
-                      ttl=3600)
+        self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict()))
+        self._memory_store.set_fact("active_offer_id", "")
         self._active = None
         return offer
 
@@ -258,28 +297,48 @@ class MediaOfferManager:
         for offer_id, offer in list(self._offers.items()):
             if offer.status == OfferStatus.PENDING and offer.is_expired():
                 offer.status = OfferStatus.EXPIRED
+                self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict()))
                 expired += 1
                 if self._active == offer_id:
                     self._active = None
+                    self._memory_store.set_fact("active_offer_id", "")
         return expired
 
     def clear_all(self) -> None:
+        for offer_id in list(self._offers.keys()):
+            self._memory_store.set_fact(f"offer:{offer_id}", "")
+        self._memory_store.set_fact("active_offer_id", "")
         self._offers.clear()
         self._active = None
 
     # ── internal ──────────────────────────────────────────────
 
     def _get_active_offer(self) -> Optional[MediaOffer]:
-        if not self._active:
+        active_offer_id = self._memory_store.get_fact("active_offer_id")
+        if not active_offer_id:
             return None
-        offer = self._offers.get(self._active)
-        if not offer:
-            self._active = None
+
+        offer_str = self._memory_store.get_fact(f"offer:{active_offer_id}")
+        if not offer_str:
+            self._memory_store.set_fact("active_offer_id", "") # Clear stale active ID
             return None
+
+        try:
+            offer_dict = json.loads(offer_str)
+            offer = MediaOffer.from_dict(offer_dict)
+        except (json.JSONDecodeError, KeyError):
+            self._memory_store.set_fact("active_offer_id", "") # Clear corrupted offer
+            return None
+
         if offer.is_expired():
             offer.status = OfferStatus.EXPIRED
-            self._active = None
+            self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict())) # Update status
+            self._memory_store.set_fact("active_offer_id", "") # Clear expired active ID
             return None
+        
+        # Cache internally for quicker access within a turn
+        self._offers[offer.offer_id] = offer
+        self._active = offer.offer_id
         return offer
 
     # ── factory helpers ───────────────────────────────────────
@@ -318,8 +377,19 @@ import unittest
 class TestMediaOfferManager(unittest.TestCase):
 
     def setUp(self):
-        self.mem = MediaEntityMemory()
-        self.mgr = MediaOfferManager(self.mem)
+        # Create a mock MemoryStore for testing
+        class MockMemoryStore:
+            def __init__(self):
+                self._facts = {}
+            def set_fact(self, key, value):
+                self._facts[key] = value
+            def get_fact(self, key):
+                return self._facts.get(key)
+            def get_all_facts(self): # Added to satisfy some potential future needs, not strictly for this current test
+                return self._facts
+
+        self.mock_memory_store = MockMemoryStore()
+        self.mgr = MediaOfferManager(self.mock_memory_store)
 
     def _make_entity(self, name="Spider-Man Trailer", etype=EntityType.MOVIE):
         return ResolvedEntity(name=name, entity_type=etype,

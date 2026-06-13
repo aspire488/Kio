@@ -331,11 +331,11 @@ class TestMediaRecommendationEngine(unittest.TestCase):
         self.eng   = MediaRecommendationEngine(self.mem, self.res, self.prefs)
 
     def _push_track(self, name="Believer", artist="Imagine Dragons"):
-        from media_entity_memory import MediaSession
+        from mini_kio.media.media_intelligence_models import HistoricalMediaSession
         e = ResolvedEntity(name=name, entity_type=EntityType.SONG,
                            provider=MediaProvider.SPOTIFY,
                            metadata={"artist": artist})
-        s = MediaSession(session_id=f"s_{name}", entity=e)
+        s = HistoricalMediaSession(session_id=f"s_{name}", entity=e)
         self.mem.push_session(s)
         self.prefs.ingest_session(s)
 
@@ -384,11 +384,11 @@ class TestMediaRecommendationEngine(unittest.TestCase):
 
     def test_history_yesterday(self):
         import time
-        from media_entity_memory import MediaSession
+        from mini_kio.media.media_intelligence_models import HistoricalMediaSession
         e = ResolvedEntity("Thunder", EntityType.SONG, MediaProvider.SPOTIFY,
                            metadata={"artist": "Imagine Dragons"})
         yesterday = time.time() - 86400 - 1800
-        self.mem._history.append(MediaSession(session_id="yy", entity=e, started_at=yesterday))
+        self.mem._history.append(HistoricalMediaSession(session_id="yy", entity=e, started_at=yesterday))
         r = self.eng.recommend("play what I listened to yesterday")
         self.assertEqual(r.strategy_used, RecommendationStrategy.HISTORY_BASED)
         self.assertEqual(r.request.seed_entity.name, "Thunder")

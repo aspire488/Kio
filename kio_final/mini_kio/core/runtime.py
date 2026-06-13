@@ -1201,6 +1201,23 @@ def dispatch_channel_input(
     # ── Gate 3: Orchestration pipeline for non-deterministic input ─────
     if result.get("_gate3_eligible"):
         result = _route_via_orchestration(command, channel=channel, user_id=user_id)
+    elif hasattr(runtime, '_gate3_pipeline'):
+        # Bridge confirmation responses back into orchestrator.
+        # When orchestrator is awaiting confirmation, "yes"/"youtube"/"spotify"
+        # must be routed through the orchestrator, not just the deterministic
+        # fast-path (which has no awareness of the orchestrator's pending action).
+        _lower = command.lower().strip()
+        _orch = runtime._gate3_pipeline.get('orchestrator')
+        if _orch is not None:
+            from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
+            if isinstance(_orch, ConversationOrchestrator):
+                from mini_kio.llm.conversation_models import OrchestrationState
+                if _orch.get_state() == OrchestrationState.AWAITING_CONFIRMATION:
+                    _confirm_triggers = {"yes", "confirm", "proceed", "go ahead", "do it", "y"}
+                    _selection_triggers = {"youtube", "spotify"}
+                    if _lower in _confirm_triggers | _selection_triggers:
+                        logger.info("[BRIDGE] routing confirmation '%s' into orchestrator", _lower)
+                        result = _route_via_orchestration(command, channel=channel, user_id=user_id)
 
     if not isinstance(result, dict):
         result = {"success": False, "message": str(result)}

@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-from media_entity_memory import (
-    EntityType, MediaEntityMemory, MediaProvider, ResolvedEntity
+from mini_kio.media.media_context import MediaContext
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity
 )
-from media_offer_manager import MediaOffer, MediaOfferManager, OfferStatus
+from mini_kio.media.intelligence.media_offer_manager import MediaOffer, MediaOfferManager, OfferStatus, OfferTrigger
 
 
 # ─────────────────────────── enums ───────────────────────────
@@ -150,10 +151,10 @@ class MediaFollowUpEngine:
 
     def __init__(
         self,
-        memory: MediaEntityMemory,
+        media_context: MediaContext,
         offer_manager: MediaOfferManager,
     ):
-        self._mem     = memory
+        self._media_context = media_context
         self._offers  = offer_manager
         self._history: List[TurnContext] = []
         self._max_history = 10
@@ -209,7 +210,7 @@ class MediaFollowUpEngine:
 
         # 4. Queue operation
         if _QUEUE_PATTERNS.search(text):
-            entity = self._mem.get_last_entity()
+            entity = self._media_context.get_last_entity()
             return FollowUpResolution(
                 follow_up_type=FollowUpType.QUEUE_OP,
                 is_follow_up=True,
@@ -225,7 +226,7 @@ class MediaFollowUpEngine:
 
         # 6. Continuation
         if _CONTINUATION_PATTERNS.search(text):
-            artist = self._mem.get_last_artist()
+            artist = self._media_context.get_last_artist()
             return FollowUpResolution(
                 follow_up_type=FollowUpType.CONTINUATION,
                 is_follow_up=True,
@@ -343,9 +344,9 @@ class MediaFollowUpEngine:
         None if not a volume command.
         """
         text = utterance.lower()
-        if re.search(r"\b(louder|volume up|turn up)\b", text):
+        if re.search(r"\b(louder|volume up|turn\s+(?:it\s+|the\s+volume\s+)?up|increase volume)\b", text):
             return +10
-        if re.search(r"\b(quieter|softer|volume down|turn down)\b", text):
+        if re.search(r"\b(quieter|softer|volume down|turn\s+(?:it\s+|the\s+volume\s+)?down|lower\s+(?:the\s+)?volume)\b", text):
             return -10
         m = re.search(r"\b(\d+)\s*%?\s*(volume|vol)?\b", text)
         if m:
@@ -360,23 +361,49 @@ import unittest
 class TestMediaFollowUpEngine(unittest.TestCase):
 
     def setUp(self):
-        self.mem   = MediaEntityMemory()
-        self.offers = MediaOfferManager(self.mem)
-        self.engine = MediaFollowUpEngine(self.mem, self.offers)
+        class MockMediaContext:
+            def __init__(self):
+                self._last_resolved_entity = None
+                self._last_artist = None # To support get_last_artist() for test
+            def get_last_entity(self):
+                return self._last_resolved_entity
+            def set_last_entity(self, entity):
+                self._last_resolved_entity = entity
+            def get_last_artist(self):
+                return self._last_artist
+            def set_last_artist(self, artist): # Used by the mock _push_track_to_memory
+                self._last_artist = artist
+
+        class MockMemoryStore: # From MediaOfferManager's updated test
+            def __init__(self):
+                self._facts = {}
+            def set_fact(self, key, value):
+                self._facts[key] = value
+            def get_fact(self, key):
+                return self._facts.get(key)
+            def get_all_facts(self):
+                return self._facts
+
+        self.mock_media_context = MockMediaContext()
+        self.mock_memory_store = MockMemoryStore()
+        # MediaOfferManager now takes MemoryStore
+        self.offers = MediaOfferManager(self.mock_memory_store)
+        self.engine = MediaFollowUpEngine(self.mock_media_context, self.offers)
 
     def _make_entity(self, name="Believer", etype=EntityType.SONG):
         return ResolvedEntity(name=name, entity_type=etype, provider=MediaProvider.SPOTIFY,
                               metadata={"artist": "Imagine Dragons"})
 
     def _push_track_to_memory(self):
-        from media_entity_memory import MediaSession
+        # This helper now directly sets the last entity in the mock MediaContext.
         e = self._make_entity()
-        self.mem.push_session(MediaSession(session_id="s1", entity=e))
+        self.mock_media_context.set_last_entity(e)
+        self.mock_media_context.set_last_artist(e.metadata["artist"]) # To make get_last_artist work for the test
 
     # offer response
     def test_yes_to_offer(self):
         e = self._make_entity("Spider-Man Trailer", EntityType.MOVIE)
-        self.offers.create_single_offer(e, __import__("media_offer_manager").OfferTrigger.TRAILER_RELEASED, "test")
+        self.offers.create_single_offer(e, OfferTrigger.TRAILER_RELEASED, "test")
         r = self.engine.resolve_followup("yes")
         self.assertTrue(r.is_follow_up)
         self.assertEqual(r.follow_up_type, FollowUpType.OFFER_RESPONSE)
@@ -384,13 +411,13 @@ class TestMediaFollowUpEngine(unittest.TestCase):
 
     def test_no_to_offer(self):
         e = self._make_entity("Spider-Man Trailer", EntityType.MOVIE)
-        self.offers.create_single_offer(e, __import__("media_offer_manager").OfferTrigger.TRAILER_RELEASED, "test")
+        self.offers.create_single_offer(e, OfferTrigger.TRAILER_RELEASED, "test")
         r = self.engine.resolve_followup("no")
         self.assertFalse(r.offer_response)
 
     def test_ok_to_offer(self):
         e = self._make_entity("X", EntityType.MOVIE)
-        self.offers.create_single_offer(e, __import__("media_offer_manager").OfferTrigger.TRAILER_RELEASED, "test")
+        self.offers.create_single_offer(e, OfferTrigger.TRAILER_RELEASED, "test")
         r = self.engine.resolve_followup("ok")
         self.assertTrue(r.offer_response)
 

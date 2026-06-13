@@ -26,6 +26,8 @@ class PendingAction:
     classification: IntentClassification
     requires_confirmation: bool = True
     reason: Optional[str] = None
+    provider: Optional[str] = None
+    media_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -42,15 +44,6 @@ class OrchestrationResponse:
     REFUSED = "refused"
     DEGRADED = "degraded"
     CLARIFYING = "clarifying"
-
-
-@dataclass(frozen=True)
-class PendingAction:
-    action: str
-    target: str
-    classification: IntentClassification
-    requires_confirmation: bool = True
-    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)

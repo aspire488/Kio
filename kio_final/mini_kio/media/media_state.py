@@ -6,16 +6,18 @@ from typing import Optional
 
 class MediaState(str, Enum):
     IDLE = "idle"
+    LOADING = "loading"
+    READY = "ready"
     PLAYING = "playing"
     PAUSED = "paused"
     STOPPED = "stopped"
-    LOADING = "loading"
     ERROR = "error"
 
     def can_transition_to(self, target: MediaState) -> bool:
         transitions = {
             MediaState.IDLE: {MediaState.LOADING, MediaState.PLAYING, MediaState.ERROR},
-            MediaState.LOADING: {MediaState.PLAYING, MediaState.PAUSED, MediaState.STOPPED, MediaState.ERROR},
+            MediaState.LOADING: {MediaState.READY, MediaState.PLAYING, MediaState.PAUSED, MediaState.STOPPED, MediaState.ERROR},
+            MediaState.READY: {MediaState.PLAYING, MediaState.STOPPED, MediaState.IDLE, MediaState.ERROR},
             MediaState.PLAYING: {MediaState.PAUSED, MediaState.STOPPED, MediaState.IDLE, MediaState.ERROR},
             MediaState.PAUSED: {MediaState.PLAYING, MediaState.STOPPED, MediaState.IDLE, MediaState.ERROR},
             MediaState.STOPPED: {MediaState.PLAYING, MediaState.LOADING, MediaState.IDLE},

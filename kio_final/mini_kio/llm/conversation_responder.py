@@ -366,8 +366,10 @@ class ConversationResponder:
         pending_decl = orchestration.pending_action
         if pending_decl:
             try:
-                # For search-like actions we persist the pending query (target)
-                if hasattr(self._state, "set_pending_search"):
+                # Only persist search-type actions — media play/watch must never
+                # leak into the legacy pending search state or database.
+                action_type = getattr(pending_decl, 'action', '') or ''
+                if action_type == "search" and hasattr(self._state, "set_pending_search"):
                     self._state.set_pending_search(pending_decl.target or "", "")
             except Exception:
                 logger.debug("Failed to persist orchestrator pending action", exc_info=True)

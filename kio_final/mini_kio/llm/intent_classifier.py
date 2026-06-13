@@ -18,6 +18,7 @@ class IntentClassifier:
             r"^(?:open|launch)\s+([a-zA-Z0-9\s\.\-_]+)",
             r"^(?:search|find)\s+(?:for\s+)?(.+)",
             r"^(?:play)\s+(.+)",
+            r"^(?:watch)\s+(.+)",
             r"^(?:type|write)\s+(.+)",
             r"^(?:click|press)\s+(.+)",
             r"^(?:close|kill|exit)\s+([a-zA-Z0-9\s\.\-_]+)"
@@ -147,6 +148,9 @@ class IntentClassifier:
             intent_type = IntentType.IDENTITY
             confidence = 0.9
 
+        # Deterministic media command patterns — high confidence, skip confirmation
+        _DETERMINISTIC_MEDIA_ACTIONS = {"play", "watch", "pause", "resume", "stop", "mute", "unmute", "next", "previous"}
+
         if intent_type == IntentType.CONVERSATIONAL:
             # Check for executable patterns
             for pattern in self.exec_patterns:
@@ -157,12 +161,16 @@ class IntentClassifier:
                     if "open" in pattern or "launch" in pattern: action = "open"
                     elif "search" in pattern or "find" in pattern: action = "search"
                     elif "play" in pattern: action = "play"
+                    elif "watch" in pattern: action = "watch"
                     elif "type" in pattern or "write" in pattern: action = "type"
                     elif "click" in pattern or "press" in pattern: action = "click"
                     elif "close" in pattern or "kill" in pattern: action = "close"
                     
                     target = match.group(1).strip()
-                    confidence = 0.7
+                    if action in _DETERMINISTIC_MEDIA_ACTIONS:
+                        confidence = 0.85
+                    else:
+                        confidence = 0.7
                     break
 
         # Check for educational (before informational/conversational)

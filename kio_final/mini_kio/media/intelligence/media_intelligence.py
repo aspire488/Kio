@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from media_entity_memory import (
-    EntityType, MediaEntityMemory, MediaProvider, MediaSession, ResolvedEntity
+from media_entity_memory import MediaEntityMemory
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
 )
+from mini_kio.memory.memory_store import MemoryStore
 from media_offer_manager import (
     MediaOffer, MediaOfferManager, OfferTrigger
 )
@@ -40,7 +42,6 @@ from media_followup_engine import (
     FollowUpResolution, FollowUpType, MediaFollowUpEngine, TransportCommand
 )
 from media_preference_model import MediaPreferenceModel
-from media_entity_memory import MediaEntityMemory
 
 
 # ─────────────────────────── enums ───────────────────────────
@@ -136,14 +137,16 @@ class MediaIntelligence:
         self,
         persist_path: Optional[str] = None,
         memory: Optional[MediaEntityMemory] = None,
+        memory_store: Optional[MemoryStore] = None,
     ):
-        self.memory     = memory or MediaEntityMemory(persist_path=persist_path)
-        self.offers     = MediaOfferManager(self.memory)
-        self.resolver   = MediaReferenceResolver(self.memory)
-        self.prefs      = MediaPreferenceModel(self.memory)
-        self.recommender = MediaRecommendationEngine(self.memory, self.resolver, self.prefs)
-        self.opportunity = MediaOpportunityEngine(self.memory)
-        self.followup   = MediaFollowUpEngine(self.memory, self.offers)
+        self.memory       = memory or MediaEntityMemory(persist_path=persist_path)
+        self._memory_store = memory_store or MemoryStore(session_id="media_intelligence")
+        self.offers       = MediaOfferManager(self._memory_store)
+        self.resolver     = MediaReferenceResolver(self.memory)
+        self.prefs        = MediaPreferenceModel(self.memory)
+        self.recommender  = MediaRecommendationEngine(self.memory, self.resolver, self.prefs)
+        self.opportunity  = MediaOpportunityEngine(self.memory)
+        self.followup     = MediaFollowUpEngine(self.memory, self.offers)
         self._last_result: Optional[MediaIntelligenceResult] = None
 
     # ── main entry ────────────────────────────────────────────
@@ -426,7 +429,7 @@ class MediaIntelligence:
             return self.opportunity.create_offer(check, self.offers)
         return None
 
-    def on_session_ended(self, session: MediaSession) -> None:
+    def on_session_ended(self, session: HistoricalMediaSession) -> None:
         """Call when playback session ends. Updates memory + preferences."""
         self.memory.push_session(session)
         self.prefs.ingest_session(session)
@@ -455,7 +458,7 @@ class TestMediaIntelligence(unittest.TestCase):
         e = ResolvedEntity(name=name, entity_type=EntityType.SONG,
                            provider=MediaProvider.SPOTIFY,
                            metadata={"artist": artist})
-        s = MediaSession(session_id=f"s_{name}", entity=e)
+        s = HistoricalMediaSession(session_id=f"s_{name}", entity=e)
         self.mi.memory.push_session(s)
         self.mi.prefs.ingest_session(s)
         return e
@@ -505,11 +508,11 @@ class TestMediaIntelligence(unittest.TestCase):
 
     def test_play_yesterday(self):
         import time
-        from media_entity_memory import MediaSession
+        from mini_kio.media.media_intelligence_models import HistoricalMediaSession
         e = ResolvedEntity("Thunder", EntityType.SONG, MediaProvider.SPOTIFY,
                            metadata={"artist": "Imagine Dragons"})
         yesterday = time.time() - 86400 - 1800
-        self.mi.memory._history.append(MediaSession("yy", entity=e, started_at=yesterday))
+        self.mi.memory._history.append(HistoricalMediaSession("yy", entity=e, started_at=yesterday))
         r = self.mi.process("play what I listened to yesterday")
         self.assertNotEqual(r.action, IntelligenceAction.CLARIFY)
 

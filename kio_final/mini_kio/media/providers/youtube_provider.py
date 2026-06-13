@@ -38,38 +38,102 @@ class YouTubeProvider(MediaProvider):
         return self._conn
 
     def play(self, query: str, **kwargs) -> MediaResult:
+        logger.info("[ROOT_YT] ENTER query=%s kwargs=%s", query, kwargs)
         conn = self._get_conn()
-        if not conn or not conn.is_connected():
+        if not conn:
+            logger.info("[ROOT_YT] RETURN=R1 conn=None")
+            return MediaResult(success=False, error="Browser Connector not available", player="youtube")
+        if not conn.is_connected():
+            logger.info("[ROOT_YT] RETURN=R2 conn_not_connected")
             return MediaResult(success=False, error="Browser Connector not available", player="youtube")
 
         clean_query = query.strip()
         if not clean_query:
+            logger.info("[ROOT_YT] RETURN=R3 empty_query")
             return MediaResult(success=False, error="No query", player="youtube")
 
         encoded = urllib.parse.quote_plus(clean_query)
         url = _YOUTUBE_SEARCH_URL.format(encoded=encoded)
+        logger.info("[ROOT_YT] search_url=%s", url)
 
         try:
+            logger.info("[ROOT_YT] opening_tab url=%s", url)
             result = asyncio.run(conn.open_tab(url))
+            logger.info("[ROOT_YT] open_tab result success=%s error=%s", result.success, getattr(result, 'error', 'none'))
             if not result.success:
+                logger.info("[ROOT_YT] RETURN=R4 tab_open_failed error=%s", result.error)
                 return MediaResult(success=False, error=f"Failed to open YouTube: {result.error}", player="youtube")
 
             tab_id = result.tab.tab_id if result.tab else None
-            logger.info("[YT] opened tab tab_id=%s query=%s", tab_id, clean_query)
+            logger.info("[ROOT_YT] tab_id=%s", tab_id)
 
             playback_state = MediaState.IDLE
-            if tab_id:
-                time.sleep(1.5)
+            if not tab_id:
+                logger.info("[ROOT_YT] tab_id is None — no tab returned by connector")
+            else:
+                # Brief pause for the search results page to render
+                time.sleep(0.5)
+
+                # ── INSTRUMENTATION: URL before bootstrap ──────────────
                 try:
+                    _pre_bootstrap = asyncio.run(conn.execute_script(tab_id, "get_page_info"))
+                    if _pre_bootstrap.success and isinstance(_pre_bootstrap.message, dict):
+                        logger.info("[YT_INSTRUMENT] pre-bootstrap url=%s title=%s hasVideo=%s hasWatchFlexy=%s hasMoviePlayer=%s",
+                                    _pre_bootstrap.message.get("url"), _pre_bootstrap.message.get("title"),
+                                    _pre_bootstrap.message.get("hasVideo"), _pre_bootstrap.message.get("hasWatchFlexy"),
+                                    _pre_bootstrap.message.get("hasMoviePlayer"))
+                except Exception as _pbe:
+                    logger.warning("[YT_INSTRUMENT] pre-bootstrap page info failed: %s", _pbe)
+                # ────────────────────────────────────────────────────────
+
+                try:
+                    logger.info("[ROOT_YT] invoking bootstrap")
                     bootstrap_result = asyncio.run(conn.execute_script(tab_id, "youtube_bootstrap"))
+                    logger.info("[ROOT_YT] bootstrap result success=%s message=%s msg_type=%s", 
+                                bootstrap_result.success, bootstrap_result.message, 
+                                type(bootstrap_result.message).__name__)
                     if bootstrap_result.success and bootstrap_result.message == "navigating":
-                        # Retry play with backoff to handle SPA navigation timing
-                        for attempt in range(3):
-                            time.sleep(2.0)
+                        # ── INSTRUMENTATION: URL immediately after bootstrap ──
+                        try:
+                            _post_bootstrap = asyncio.run(conn.execute_script(tab_id, "get_page_info"))
+                            if _post_bootstrap.success and isinstance(_post_bootstrap.message, dict):
+                                logger.info("[YT_INSTRUMENT] post-bootstrap url=%s title=%s hasVideo=%s hasWatchFlexy=%s hasMoviePlayer=%s",
+                                            _post_bootstrap.message.get("url"), _post_bootstrap.message.get("title"),
+                                            _post_bootstrap.message.get("hasVideo"), _post_bootstrap.message.get("hasWatchFlexy"),
+                                            _post_bootstrap.message.get("hasMoviePlayer"))
+                        except Exception as _pbe2:
+                            logger.warning("[YT_INSTRUMENT] post-bootstrap page info failed: %s", _pbe2)
+                        # ───────────────────────────────────────────────────────
+
+                        # Poll for video element with shorter intervals since
+                        # bootstrap already verified the URL transition.
+                        for attempt in range(5):
+                            time.sleep(1.0)
+
+                            # ── INSTRUMENTATION: URL before each play attempt ──
+                            try:
+                                _pre_play = asyncio.run(conn.execute_script(tab_id, "get_page_info"))
+                                if _pre_play.success and isinstance(_pre_play.message, dict):
+                                    logger.info("[YT_INSTRUMENT] pre-play attempt=%d url=%s title=%s hasVideo=%s",
+                                                attempt + 1,
+                                                _pre_play.message.get("url"), _pre_play.message.get("title"),
+                                                _pre_play.message.get("hasVideo"))
+                            except Exception as _ppe:
+                                logger.warning("[YT_INSTRUMENT] pre-play page info failed: %s", _ppe)
+                            # ────────────────────────────────────────────────────
+
+                            logger.info("[ROOT_YT] invoking play attempt=%d", attempt + 1)
                             play_result = asyncio.run(conn.execute_script(tab_id, "play"))
+                            logger.info("[ROOT_YT] play_result success=%s msg_type=%s msg=%s", 
+                                        play_result.success, 
+                                        type(play_result.message).__name__ if hasattr(play_result, 'message') else 'N/A',
+                                        str(play_result.message)[:200] if hasattr(play_result, 'message') else 'N/A')
                             if play_result.success and isinstance(play_result.message, dict):
                                 msg = play_result.message
+                                _status = msg.get("status")
+                                logger.info("[ROOT_YT] play_loop status=%s attempt=%d", _status, attempt + 1)
                                 if msg.get("status") == "playing":
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=playing")
                                     playback_state = MediaState.PLAYING
                                     if self._session:
                                         self._session.current_time = msg.get("currentTime")
@@ -78,32 +142,43 @@ class YouTubeProvider(MediaProvider):
                                         self._session.muted = msg.get("muted")
                                     break
                                 elif msg.get("status") == "blocked":
-                                    logger.warning("[YT] autoplay blocked by browser")
-                                    playback_state = MediaState.PAUSED
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=blocked")
+                                    playback_state = MediaState.READY
                                     break
-                                elif msg.get("status") == "no media" and attempt < 2:
-                                    logger.info("[YT] video element not yet available (attempt %d/3)", attempt + 1)
+                                elif msg.get("status") == "no media" and attempt < 4:
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=no_media_retry attempt=%d", attempt + 1)
                                     continue
+                                elif msg.get("status") == "no media":
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=no_media_exhausted attempt=%d", attempt + 1)
+                                    break
                                 elif msg.get("status", "").startswith("error:"):
-                                    logger.warning("[YT] play script error: %s", msg.get("name", "unknown"))
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_error status=%s", msg.get("status"))
                                     break
                                 else:
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=unknown_status status=%s", msg.get("status"))
                                     break
-                            elif play_result.success and play_result.message == "navigating":
-                                # This can happen if bootstrap didn't finish navigating before the play script runs
-                                # Treat as still navigating, continue retrying
-                                logger.info("[YT] play script returned 'navigating', retrying (attempt %d/3)", attempt + 1)
+                            elif play_result.success and isinstance(play_result.message, str) and play_result.message == "navigating":
+                                logger.info("[ROOT_YT] PLAY_LOOP_EXIT=navigating_retry attempt=%d", attempt + 1)
                                 continue
                             elif not play_result.success:
-                                logger.warning("[YT] play script failed: %s", play_result.error)
+                                logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_failed error=%s", getattr(play_result, 'error', 'unknown'))
                                 break
                             else:
-                                logger.warning("[YT] play script returned unexpected message type: %s", type(play_result.message))
+                                logger.info("[ROOT_YT] PLAY_LOOP_EXIT=unexpected_msg msg=%s", str(play_result.message)[:200] if hasattr(play_result, 'message') else 'N/A')
                                 break
                     else:
-                        logger.warning("[YT] bootstrap did not navigate (message=%s)", bootstrap_result.message)
+                        logger.info("[ROOT_YT] BOOTSTRAP_EXIT=did_not_navigate msg=%s", bootstrap_result.message)
                 except Exception as exc:
                     logger.warning("[YT] bootstrap/play failed: %s", exc)
+
+            # Extract artist/title from query for context resolution
+            # e.g., "thunder by imagine dragons" → title="thunder", artist="imagine dragons"
+            _artist = ""
+            _title = clean_query
+            if " by " in clean_query.lower():
+                _parts = clean_query.rsplit(" by ", 1)
+                _title = _parts[0].strip()
+                _artist = _parts[1].strip()
 
             self._tab_id = tab_id
             self._session = MediaSession(
@@ -111,6 +186,8 @@ class YouTubeProvider(MediaProvider):
                 tab_id=tab_id,
                 state=playback_state,
                 query=clean_query,
+                title=_title,
+                artist=_artist,
                 url=url,
                 domain_hint="youtube.com",
                 media_type=self._detect_type(clean_query),
@@ -119,16 +196,28 @@ class YouTubeProvider(MediaProvider):
 
             message = (
                 f"Playing on YouTube: {clean_query}" if playback_state == MediaState.PLAYING else
-                "Autoplay blocked. Click play once." if playback_state == MediaState.PAUSED else
+                "Video ready on YouTube." if playback_state == MediaState.READY else
                 f"Opened on YouTube: {clean_query}"
             )
             return MediaResult(
-                success=playback_state in (MediaState.PLAYING, MediaState.PAUSED),
+                success=playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
+                message=message,
+                session=self._session,
+                player="youtube",
+            )
+            logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=%s has_session=%s message=%s", 
+                        playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
+                        playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
+                        self._session is not None,
+                        message)
+            return MediaResult(
+                success=playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
                 message=message,
                 session=self._session,
                 player="youtube",
             )
         except Exception as exc:
+            logger.info("[ROOT_YT] RETURN=R5 outer_exception exc=%s", exc)
             logger.warning("[YT] play failed: %s", exc)
             return MediaResult(success=False, error=str(exc), player="youtube")
 
@@ -248,7 +337,7 @@ class YouTubeProvider(MediaProvider):
                     elif msg.get("status") == "stopped":
                         new_state = MediaState.STOPPED
                     elif msg.get("status") == "blocked":
-                        new_state = MediaState.PAUSED
+                        new_state = MediaState.READY
                     elif msg.get("status") == "no media":
                         new_state = MediaState.IDLE
 
@@ -270,7 +359,7 @@ class YouTubeProvider(MediaProvider):
                         elif result.message == "stopped":
                             new_state = MediaState.STOPPED
                         elif result.message == "blocked":
-                            new_state = MediaState.PAUSED
+                            new_state = MediaState.READY
                         elif result.message == "no media":
                             new_state = MediaState.IDLE
                         self._session.state = new_state

@@ -80,6 +80,29 @@ class ConversationOrchestrator:
             # We just ensure the response layer knows about it.
             pass
 
+        # Provider selection during EXECUTABLE_READY: resolve "youtube"/"spotify"
+        # without requiring AWAITING_CONFIRMATION (confidence >= 0.8 skips confirmation)
+        if self._state == OrchestrationState.EXECUTABLE_READY and self._pending_action:
+            text_lower = (primary.normalized_text or "").strip(".,!?;: ")
+            if text_lower in self.SELECTION_TRIGGERS:
+                pending = self._pending_action
+                updated = PendingAction(
+                    action=pending.action,
+                    target=pending.target,
+                    classification=pending.classification,
+                    requires_confirmation=False,
+                    provider=text_lower,
+                    media_type=pending.media_type,
+                )
+                self._state = OrchestrationState.EXECUTABLE_READY
+                self._pending_action = updated
+                return OrchestrationResponse(
+                    state=OrchestrationState.EXECUTABLE_READY,
+                    response_text=f"Proceeding with {pending.action} {pending.target} on {text_lower}.",
+                    intent_type=IntentType.EXECUTABLE,
+                    pending_action=updated,
+                )
+
         # 3. Routing based on intent type
         if intent_type == IntentType.CONVERSATIONAL or intent_type == IntentType.INFORMATIONAL or intent_type == IntentType.EDUCATIONAL:
             self._reset_state()
@@ -115,15 +138,28 @@ class ConversationOrchestrator:
         action = primary.proposed_action or ""
         target = primary.proposed_target or ""
         
+        # Extract provider and media_type from target if present
+        provider = None
+        media_type = None
+        clean_target = target
+        for sep in [" on ", " in ", " using "]:
+            if sep in target.lower():
+                parts = target.rsplit(sep, 1)
+                clean_target = parts[0].strip()
+                provider = parts[1].strip().lower()
+                break
+
         # Check confirmation requirements
         requires_conf, reason = self._check_confirmation_required(action, target, primary.confidence)
         
         pending = PendingAction(
             action=action,
-            target=target,
+            target=clean_target,
             classification=classification,
             requires_confirmation=requires_conf,
-            reason=reason
+            reason=reason,
+            provider=provider,
+            media_type=media_type
         )
 
         if requires_conf:
@@ -158,16 +194,18 @@ class ConversationOrchestrator:
             # If user provided a specific selection, update the target
             if text_lower in self.SELECTION_TRIGGERS:
                 target = pending.target
+                selected_provider = pending.provider
                 if " on " not in target.lower() and " in " not in target.lower():
-                    # Minimal update: append selection if not already present
+                    selected_provider = text_lower
                     target = f"{target} on {text_lower}"
                 
-                # Update the pending action with the new target
                 pending = PendingAction(
                     action=pending.action,
                     target=target,
                     classification=pending.classification,
-                    requires_confirmation=False
+                    requires_confirmation=False,
+                    provider=selected_provider,
+                    media_type=pending.media_type
                 )
 
             return OrchestrationResponse(

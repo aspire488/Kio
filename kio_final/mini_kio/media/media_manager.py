@@ -11,6 +11,11 @@ from mini_kio.media.media_context import MediaContext
 from mini_kio.media.media_registry import MediaRegistry
 from mini_kio.media.media_discovery import MediaDiscovery
 from mini_kio.media.media_recommender import MediaRecommender
+from mini_kio.memory.memory_store import MemoryStore
+from mini_kio.media.intelligence.media_reference_resolver import MediaReferenceResolver
+from mini_kio.media.intelligence.media_followup_engine import MediaFollowUpEngine, FollowUpType
+from mini_kio.media.intelligence.media_opportunity_engine import MediaOpportunityEngine
+from mini_kio.media.intelligence.media_offer_manager import MediaOfferManager
 from mini_kio.media.providers.youtube_provider import YouTubeProvider
 from mini_kio.media.providers.spotify_provider import SpotifyProvider
 from mini_kio.media.providers.browser_provider import BrowserProvider
@@ -32,12 +37,12 @@ _FUZZY_MAP: dict[str, str] = {
 }
 
 _CONTENT_TYPE_PRIORITY: dict[str, list[str]] = {
-    "music": ["spotify", "youtube"],
+    "music": ["youtube"],
     "video": ["youtube", "browser"],
     "educational": ["youtube", "browser"],
     "trailer": ["youtube"],
     "tutorial": ["youtube", "browser"],
-    "podcast": ["spotify", "youtube"],
+    "podcast": ["youtube"],
     "audiobook": ["local", "youtube"],
     "livestream": ["youtube"],
     "sports": ["youtube"],
@@ -122,6 +127,11 @@ class MediaManager:
         self._context = MediaContext()
         self._discovery = MediaDiscovery()
         self._recommender = MediaRecommender()
+        self._memory_store = MemoryStore(session_id="media_intelligence")
+        self._offer_manager = MediaOfferManager(self._memory_store)
+        self._reference_resolver = MediaReferenceResolver(self._context)
+        self._followup_engine = MediaFollowUpEngine(self._context, self._offer_manager)
+        self._opportunity_engine = MediaOpportunityEngine(self._context)
         self._providers: dict[str, type] = {}
         self._provider_instances: dict[str, object] = {}
         self._init_providers()
@@ -139,7 +149,9 @@ class MediaManager:
             cls = self._providers.get(name)
             if cls:
                 self._provider_instances[name] = cls()
-        return self._provider_instances.get(name)
+        result = self._provider_instances.get(name)
+        logger.info("[MM_TRACE] get_provider name=%s found=%s provider=%s", name, result is not None, type(result).__name__ if result else None)
+        return result
 
     def _get_connector(self):
         from mini_kio.core.command_router import _get_connector
@@ -209,6 +221,10 @@ class MediaManager:
         )
 
     def play(self, query: str = "", platform: str = "") -> dict:
+        logger.info("[MM] action=play query=%s platform=%s", query, platform)
+        logger.info("[MM_TRACE] enter query=%s platform=%s", query, platform)
+
+        # ── Step 0: Resume active ──────────────────────────────
         if not query and not platform:
             active = self._registry.get_active()
             if active:
@@ -218,25 +234,41 @@ class MediaManager:
                     if p:
                         result = p.resume()
                         self._register_session(prov, result)
+                        logger.info("[MM_TRACE] resuming active session result=%s", result)
                         return self._to_dict(result)
+            logger.info("[MM_TRACE] no query/platform and no active session — gate3")
             return {"success": True, "message": "Play on YouTube or Spotify?", "_gate3_eligible": True}
 
+        # ── Step 1: Media type detection ───────────────────────
         mt = _detect_media_type(query)
+        logger.info("[MM_TRACE] media_type=%s", mt)
 
+        # ── Step 2: Platform-specific path ─────────────────────
         if platform:
+            logger.info("[MM_TRACE] platform_path platform=%s", platform)
             prov = self._get_provider(platform)
             if not prov:
+                logger.info("[MM_TRACE] platform_path provider_not_found")
                 return {"success": False, "message": f"No provider available: {platform}"}
             try:
+                logger.info("[MM_TRACE] invoking provider.play() platform=%s", platform)
                 result = prov.play(query, media_type=mt, platform=platform)
+                logger.info("[MM_TRACE] provider returned success=%s state=%s", result.success, result.session.state if result.session else "no_session")
                 if self._playing(result):
+                    logger.info("[MM_TRACE] registering PLAYING session")
                     self._register_session(platform, result)
+                elif result.success and result.session:
+                    logger.info("[MM_TRACE] registering non-PLAYING session (state=%s)", result.session.state.value)
+                    self._register_session(platform, result)
+                logger.info("[MM_TRACE] returning platform_result")
                 return self._to_dict(result)
             except Exception as exc:
+                logger.info("[MM_TRACE] platform_path exception: %s", exc)
                 return {"success": False, "message": f"Playback on {platform} failed: {exc}"}
 
-        # Automatic selection — try priority chain until PLAYING
+        # ── Step 3: Automatic selection — priority chain ───────
         priority = _CONTENT_TYPE_PRIORITY.get(mt, ["youtube"])
+        logger.info("[MM_TRACE] auto_selection priority=%s", priority)
         last_result = None
         last_provider = ""
 
@@ -245,20 +277,27 @@ class MediaManager:
                 return -1
             if r.session and r.session.state == MediaState.PLAYING:
                 return 2
-            if r.session and r.session.state == MediaState.PAUSED:
+            if r.session and r.session.state in (MediaState.READY, MediaState.PAUSED):
                 return 1
             return 0
 
         for provider_name in priority:
+            logger.info("[MM_TRACE] attempting provider=%s", provider_name)
             prov = self._get_provider(provider_name)
             if not prov:
+                logger.info("[MM_TRACE] provider_obj=None skipping name=%s", provider_name)
                 continue
+            logger.info("[MM_TRACE] provider_obj=%s", type(prov).__name__)
             try:
+                logger.info("[MM_TRACE] invoking provider.play()")
                 result = prov.play(query, media_type=mt)
+                logger.info("[MM_TRACE] provider returned=%s success=%s state=%s", type(result).__name__, result.success, result.session.state if result and result.session else "no_session")
                 if self._playing(result):
+                    logger.info("[MM_TRACE] PLAYING result — registering and returning")
                     self._register_session(provider_name, result)
                     return self._to_dict(result)
                 if _result_score(result) > _result_score(last_result):
+                    logger.info("[MM_TRACE] saving as best result (score=%d)", _result_score(result))
                     last_result = result
                     last_provider = provider_name
             except Exception as exc:
@@ -266,12 +305,15 @@ class MediaManager:
                 continue
 
         if last_result:
+            logger.info("[MM_TRACE] returning best_result provider=%s", last_provider)
             self._register_session(last_provider, last_result)
             return self._to_dict(last_result)
 
+        logger.info("[MM_TRACE] returning gate3")
         return {"success": True, "message": "Play on YouTube or Spotify?", "_gate3_eligible": True}
 
     def pause(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=pause")
         active = self._registry.get_active_by_player()
         if active:
             pname, _ = active
@@ -296,6 +338,7 @@ class MediaManager:
         return {"success": True, "message": "No media to pause."}
 
     def resume(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=resume")
         active = self._registry.get_active_by_player()
         if active:
             pname, session = active
@@ -320,6 +363,7 @@ class MediaManager:
         return {"success": True, "message": "No media to resume."}
 
     def stop(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=stop")
         active = self._registry.get_active_by_player()
         if active:
             pname, _ = active
@@ -335,6 +379,7 @@ class MediaManager:
         return {"success": True, "message": "No media to stop."}
 
     def next_track(self) -> dict:
+        logger.info("[MM] action=next")
         active = self._registry.get_active_by_player()
         if active:
             pname, _ = active
@@ -347,6 +392,7 @@ class MediaManager:
         return {"success": False, "message": "No active media session for next track."}
 
     def previous_track(self) -> dict:
+        logger.info("[MM] action=previous")
         active = self._registry.get_active_by_player()
         if active:
             pname, _ = active
@@ -359,6 +405,7 @@ class MediaManager:
         return {"success": False, "message": "No active media session for previous track."}
 
     def mute(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=mute")
         prov = self._get_provider("browser")
         if prov:
             result = prov.volume(level=0.0)
@@ -367,6 +414,7 @@ class MediaManager:
         return {"success": True, "message": "No media to mute."}
 
     def unmute(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=unmute")
         prov = self._get_provider("browser")
         if prov:
             result = prov.volume(level=0.7)
@@ -375,6 +423,7 @@ class MediaManager:
         return {"success": True, "message": "No media to unmute."}
 
     def volume_up(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=volume_up")
         prov = self._get_provider("browser")
         if prov:
             result = prov.volume(direction="up")
@@ -383,6 +432,7 @@ class MediaManager:
         return {"success": True, "message": "No media to adjust."}
 
     def volume_down(self, domain_hint: str = "") -> dict:
+        logger.info("[MM] action=volume_down")
         prov = self._get_provider("browser")
         if prov:
             result = prov.volume(direction="down")
@@ -391,6 +441,7 @@ class MediaManager:
         return {"success": True, "message": "No media to adjust."}
 
     def seek(self, seconds: int) -> dict:
+        logger.info("[MM] action=seek seconds=%d", seconds)
         active = self._registry.get_active_by_player()
         if active:
             pname, _ = active
@@ -417,6 +468,11 @@ class MediaManager:
         return {"success": False, "message": "No provider for search."}
 
     def resolve_query(self, text: str) -> Optional[str]:
+        ref = self._reference_resolver.resolve(text)
+        if ref.success and ref.resolved_entity:
+            return ref.resolved_entity.name
+        if ref.success and ref.query_override:
+            return ref.query_override
         return self._context.resolve_reference(text)
 
     def get_context(self) -> MediaContext:
@@ -436,6 +492,69 @@ class MediaManager:
         if seconds is not None:
             return self.seek(seconds)
         return None
+
+    def process_followup(self, text: str) -> Optional[dict]:
+        fu = self._followup_engine.resolve_followup(text)
+        if not fu.is_follow_up:
+            return None
+        if fu.follow_up_type == FollowUpType.TRANSPORT:
+            cmd = fu.transport_command
+            if cmd.value == "pause":
+                return self.pause()
+            if cmd.value == "resume":
+                return self.resume()
+            if cmd.value == "stop":
+                return self.stop()
+            if cmd.value == "next":
+                return self.next_track()
+            if cmd.value == "previous":
+                return self.previous_track()
+            if cmd.value == "mute":
+                return self.mute()
+            if cmd.value == "unmute":
+                return self.unmute()
+            return {"success": True, "message": f"{cmd.value}."}
+        if fu.follow_up_type == FollowUpType.VOLUME:
+            from mini_kio.media.intelligence.media_followup_engine import MediaFollowUpEngine as _MFE
+            delta = _MFE.parse_volume_delta(text)
+            if delta is not None and delta > 0:
+                return self.volume_up()
+            if delta is not None and delta < 0:
+                return self.volume_down()
+            return {"success": True, "message": "Volume adjusted."}
+        if fu.follow_up_type == FollowUpType.OFFER_RESPONSE:
+            if fu.offer_response:
+                return self.accept_intelligence_offer()
+            return {"success": True, "message": "Offer skipped."}
+        return None
+
+    def process_opportunity(self, query: str) -> Optional[dict]:
+        opp = self._opportunity_engine.detect(query)
+        if not opp:
+            return None
+        return {
+            "entity_name": opp.entity_name,
+            "opportunity_type": opp.opportunity_type.value,
+            "search_query": opp.search_query,
+            "display_question": opp.to_display_question(),
+        }
+
+    def has_intelligence_offer(self) -> bool:
+        return self._offer_manager.has_pending_offer()
+
+    def get_intelligence_offer_display(self) -> Optional[str]:
+        offer = self._offer_manager.get_active_offer()
+        return offer.to_display() if offer else None
+
+    def accept_intelligence_offer(self) -> Optional[dict]:
+        offer = self._offer_manager.accept_active_offer()
+        if not offer:
+            return None
+        entity = self._offer_manager.get_accepted_entity(offer)
+        if not entity:
+            return None
+        provider_hint = entity.provider.value if entity.provider.value != "unknown" else ""
+        return self.play(entity.name, platform=provider_hint)
 
     def correct_fuzzy(self, text: str) -> str:
         return _correct_fuzzy(text)

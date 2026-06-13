@@ -1,0 +1,35 @@
+KIO MEDIA CHECKPOINT
+Date: 2026-06-13
+
+STATUS:
+- Browser connector authentication fixed
+- WebSocket connection established
+- Provider selection continuation fixed
+- YouTube tab reuse working
+- YouTube bootstrap working
+- Search -> watch page navigation working
+- Video element detection working
+- Autoplay issue resolved
+- MediaState.PLAYING confirmed
+
+EVIDENCE:
+play young sheldon -> PLAYING
+play filtercopy -> PLAYING
+
+Last successful log:
+
+[ROOT_YT] PLAY_LOOP_EXIT=playing
+MediaState.PLAYING
+
+KNOWN REMAINING ISSUES:
+- Verify playback across 5-10 additional searches
+- Remove debug instrumentation after validation
+- Memory retrieval regression
+- Educational routing regression
+- Telegram native-app fallback
+
+DO NOT REOPEN AUTOPLAY INVESTIGATION UNLESS:
+[ROOT_YT] PLAY_LOOP_EXIT=blocked
+or
+[ROOT_YT] RETURN=R2 conn_not_connected
+reappears consistently.

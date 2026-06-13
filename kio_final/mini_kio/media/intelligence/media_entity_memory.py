@@ -10,93 +10,31 @@ from __future__ import annotations
 import json
 import time
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from collections import deque
 
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
+)
+
 
 # ─────────────────────────── enums ───────────────────────────
 
-class EntityType(str, Enum):
-    MOVIE        = "movie"
-    TV_SHOW      = "tv_show"
-    ACTOR        = "actor"
-    MUSIC_ARTIST = "music_artist"
-    SONG         = "song"
-    ALBUM        = "album"
-    PLAYLIST     = "playlist"
-    SPORTS_PLAYER = "sports_player"
-    SPORTS_TEAM  = "sports_team"
-    GAME         = "game"
-    YOUTUBER     = "youtuber"
-    STREAMER     = "streamer"
-    BRAND        = "brand"
-    COMPANY      = "company"
-    UNKNOWN      = "unknown"
 
 
-class MediaProvider(str, Enum):
-    SPOTIFY  = "spotify"
-    YOUTUBE  = "youtube"
-    BROWSER  = "browser"
-    UNKNOWN  = "unknown"
+
+
 
 
 # ─────────────────────────── dataclasses ───────────────────────────
 
-@dataclass
-class ResolvedEntity:
-    name: str
-    entity_type: EntityType
-    provider: MediaProvider = MediaProvider.UNKNOWN
-    provider_id: Optional[str] = None      # spotify track id, youtube video id, etc.
-    url: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    confidence: float = 1.0
-    resolved_at: float = field(default_factory=time.time)
-
-    def to_dict(self) -> Dict:
-        d = asdict(self)
-        d["entity_type"] = self.entity_type.value
-        d["provider"] = self.provider.value
-        return d
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> "ResolvedEntity":
-        d = dict(d)
-        d["entity_type"] = EntityType(d.get("entity_type", "unknown"))
-        d["provider"] = MediaProvider(d.get("provider", "unknown"))
-        return cls(**d)
 
 
-@dataclass
-class MediaSession:
-    """Snapshot of a playback moment."""
-    session_id: str
-    entity: ResolvedEntity
-    started_at: float = field(default_factory=time.time)
-    ended_at: Optional[float] = None
-    position_seconds: float = 0.0
-    completed: bool = False
-    mood: Optional[str] = None
-    activity: Optional[str] = None
 
-    def duration(self) -> float:
-        end = self.ended_at or time.time()
-        return end - self.started_at
 
-    def to_dict(self) -> Dict:
-        d = asdict(self)
-        d["entity"] = self.entity.to_dict()
-        return d
-
-    @classmethod
-    def from_dict(cls, d: Dict) -> "MediaSession":
-        d = dict(d)
-        d["entity"] = ResolvedEntity.from_dict(d["entity"])
-        return cls(**d)
 
 
 @dataclass
@@ -147,7 +85,7 @@ class MediaEntityMemory:
 
     def __init__(self, persist_path: Optional[str] = None):
         self._store: Dict[str, MemoryEntry] = {}
-        self._history: deque[MediaSession] = deque(maxlen=self.HISTORY_MAX)
+        self._history: deque[HistoricalMediaSession] = deque(maxlen=self.HISTORY_MAX)
         self._lock = threading.RLock()
         self._persist_path = Path(persist_path) if persist_path else None
         if self._persist_path and self._persist_path.exists():
@@ -243,17 +181,17 @@ class MediaEntityMemory:
 
     # ── session history ───────────────────────────────────────
 
-    def push_session(self, session: MediaSession) -> None:
+    def push_session(self, session: HistoricalMediaSession) -> None:
         with self._lock:
             self._history.appendleft(session)
             self.set_last_entity(session.entity)
             self.set("last_session_id", session.session_id, self.TTL_LAST_SESSION)
 
-    def get_recent_sessions(self, n: int = 20) -> List[MediaSession]:
+    def get_recent_sessions(self, n: int = 20) -> List[HistoricalMediaSession]:
         with self._lock:
             return list(self._history)[:n]
 
-    def get_sessions_from_yesterday(self) -> List[MediaSession]:
+    def get_sessions_from_yesterday(self) -> List[HistoricalMediaSession]:
         now = time.time()
         yesterday_start = now - 86400 * 2
         yesterday_end   = now - 86400
@@ -263,7 +201,7 @@ class MediaEntityMemory:
                 if yesterday_start <= s.started_at <= yesterday_end
             ]
 
-    def get_sessions_by_artist(self, artist: str) -> List[MediaSession]:
+    def get_sessions_by_artist(self, artist: str) -> List[HistoricalMediaSession]:
         artist_lower = artist.lower()
         with self._lock:
             return [
@@ -307,7 +245,7 @@ class MediaEntityMemory:
                     self._store[k] = entry
             for s in data.get("history", []):
                 try:
-                    self._history.append(MediaSession.from_dict(s))
+                    self._history.append(HistoricalMediaSession.from_dict(s))
                 except Exception:
                     pass
         except Exception:
@@ -352,7 +290,7 @@ class TestMediaEntityMemory(unittest.TestCase):
 
     def test_session_history(self):
         e = self._make_entity()
-        s = MediaSession(session_id="s1", entity=e)
+        s = HistoricalMediaSession(session_id="s1", entity=e)
         self.mem.push_session(s)
         recent = self.mem.get_recent_sessions(5)
         self.assertEqual(len(recent), 1)
@@ -361,7 +299,7 @@ class TestMediaEntityMemory(unittest.TestCase):
     def test_sessions_yesterday(self):
         e = self._make_entity()
         yesterday = time.time() - 86400 - 1800
-        s = MediaSession(session_id="y1", entity=e, started_at=yesterday)
+        s = HistoricalMediaSession(session_id="y1", entity=e, started_at=yesterday)
         self.mem._history.append(s)
         results = self.mem.get_sessions_from_yesterday()
         self.assertEqual(len(results), 1)
@@ -393,7 +331,7 @@ class TestMediaEntityMemory(unittest.TestCase):
         mem1 = MediaEntityMemory(persist_path=tmp_path_str)
         mem1.set("key1", "val1", ttl=3600)
         e = self._make_entity()
-        mem1.push_session(MediaSession(session_id="s_persist", entity=e))
+        mem1.push_session(HistoricalMediaSession(session_id="s_persist", entity=e))
         mem1.save()
 
         mem2 = MediaEntityMemory(persist_path=tmp_path_str)
@@ -407,7 +345,7 @@ class TestMediaEntityMemory(unittest.TestCase):
         e2 = self._make_entity("Thunder",  EntityType.SONG, "Imagine Dragons")
         e3 = self._make_entity("Shape of You", EntityType.SONG, "Ed Sheeran")
         for i, e in enumerate([e1, e2, e3]):
-            self.mem.push_session(MediaSession(session_id=f"s{i}", entity=e))
+            self.mem.push_session(HistoricalMediaSession(session_id=f"s{i}", entity=e))
         results = self.mem.get_sessions_by_artist("Imagine Dragons")
         self.assertEqual(len(results), 2)
 

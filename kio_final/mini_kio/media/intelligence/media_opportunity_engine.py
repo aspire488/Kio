@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from media_entity_memory import (
-    EntityType, MediaEntityMemory, MediaProvider, ResolvedEntity
+from mini_kio.media.media_context import MediaContext
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity
 )
-from media_offer_manager import (
+from mini_kio.media.intelligence.media_offer_manager import (
     MediaOffer, MediaOfferManager, OfferStatus, OfferTrigger
 )
 
@@ -152,8 +153,8 @@ class MediaOpportunityEngine:
         6. On acceptance: MediaManager.play(offer_manager.get_accepted_entity(offer))
     """
 
-    def __init__(self, memory: MediaEntityMemory):
-        self._mem = memory
+    def __init__(self, media_context: MediaContext):
+        self._media_context = media_context
 
     # ── detection ────────────────────────────────────────────
 
@@ -394,9 +395,28 @@ import unittest
 class TestMediaOpportunityEngine(unittest.TestCase):
 
     def setUp(self):
-        self.mem = MediaEntityMemory()
-        self.eng = MediaOpportunityEngine(self.mem)
-        self.mgr = MediaOfferManager(self.mem)
+        class MockMediaContext:
+            def __init__(self):
+                self.last_resolved_entity = None
+            def get_last_entity(self):
+                return self.last_resolved_entity
+            def get_last_artist(self):
+                return None
+
+        class MockMemoryStore:
+            def __init__(self):
+                self._facts = {}
+            def set_fact(self, key, value):
+                self._facts[key] = value
+            def get_fact(self, key):
+                return self._facts.get(key)
+            def get_all_facts(self):
+                return self._facts
+
+        self.mock_media_context = MockMediaContext()
+        self.mock_memory_store = MockMemoryStore()
+        self.eng = MediaOpportunityEngine(self.mock_media_context)
+        self.mgr = MediaOfferManager(self.mock_memory_store)
 
     def _make_entity(self, name, etype=EntityType.MOVIE):
         return ResolvedEntity(name=name, entity_type=etype, provider=MediaProvider.YOUTUBE)

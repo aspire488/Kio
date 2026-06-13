@@ -46,6 +46,11 @@ class SessionState:
         self._load_pending_action()
 
     def _load_pending_action(self) -> None:
+        # Clear stale records before loading
+        try:
+            self._pending_action_repo.clear_expired(self.session_id)
+        except Exception:
+            logger.debug("Failed to clear expired pending actions", exc_info=True)
         pending_model = self._pending_action_repo.load(self.session_id)
         if pending_model:
             self.context.set_pending_search(pending_model.query, pending_model.topic)

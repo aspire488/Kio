@@ -13,8 +13,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from media_entity_memory import (
-    EntityType, MediaEntityMemory, MediaProvider, MediaSession, ResolvedEntity
+from media_entity_memory import MediaEntityMemory
+from mini_kio.media.media_intelligence_models import (
+    EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
 )
 
 
@@ -106,13 +107,13 @@ class MediaPreferenceModel:
             self._ingest_session(session)
         self._normalize_all()
 
-    def ingest_session(self, session: MediaSession) -> None:
+    def ingest_session(self, session: HistoricalMediaSession) -> None:
         """Call after every completed session for online update."""
         self._ingest_session(session)
         self._normalize_all()
         self._total_sessions += 1
 
-    def _ingest_session(self, session: MediaSession) -> None:
+    def _ingest_session(self, session: HistoricalMediaSession) -> None:
         e = session.entity
         now = session.started_at
 
@@ -274,13 +275,13 @@ class TestMediaPreferenceModel(unittest.TestCase):
         return mem, model
 
     def _make_session(self, name, artist, genres=None, provider=MediaProvider.SPOTIFY,
-                      mood=None, activity=None) -> MediaSession:
+                      mood=None, activity=None) -> HistoricalMediaSession:
         e = ResolvedEntity(
             name=name, entity_type=EntityType.SONG, provider=provider,
             metadata={"artist": artist, "genres": genres or []}
         )
-        return MediaSession(session_id=f"s_{name}", entity=e,
-                            mood=mood, activity=activity)
+        return HistoricalMediaSession(session_id=f"s_{name}", entity=e,
+                                      mood=mood, activity=activity)
 
     def test_artist_preference_builds(self):
         mem, model = self._setup()
