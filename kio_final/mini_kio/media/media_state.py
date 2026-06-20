@@ -28,6 +28,8 @@ class MediaState(str, Enum):
 
 class MediaType(str, Enum):
     MUSIC = "music"
+    VIDEO = "video"
+    TRAILER = "trailer"
     MUSIC_VIDEO = "music_video"
     MOVIE_TRAILER = "movie_trailer"
     TV_TRAILER = "tv_trailer"

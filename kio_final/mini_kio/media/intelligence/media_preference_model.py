@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from media_entity_memory import MediaEntityMemory
+from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
 from mini_kio.media.media_intelligence_models import (
     EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
 )

@@ -102,14 +102,14 @@ def _extract_url_name(target: str) -> str:
 
 def format_open_app(target: str, success: bool, message: str) -> str:
     if not success:
-        return _format_error(message)
+        return _format_error(_ensure_str(message))
     display = target.strip().capitalize()
     return f"Opened {display}."
 
 
 def format_close_app(target: str, success: bool, details: Dict[str, Any]) -> str:
     if not success:
-        msg = details.get("message", "")
+        msg = _ensure_str(details.get("message", ""))
         if "not running" in msg.lower() or "already closed" in msg.lower() or "was already closed" in msg.lower():
             return f"{target.capitalize()} was already closed."
         if "ambiguous" in msg.lower():
@@ -136,7 +136,7 @@ def format_capability(
     target: str, success: bool, details: Dict[str, Any]
 ) -> str:
     if not success:
-        msg = details.get("message", "")
+        msg = _ensure_str(details.get("message", ""))
         if "not found" in msg.lower():
             return f"Couldn't open that page."
         if "not support" in msg.lower():
@@ -162,10 +162,18 @@ def format_generic_success(target: str, message: str) -> str:
     return "Done."
 
 
+def _ensure_str(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("status", "")) or str(value)
+    return str(value)
+
+
 def format_result(
     action: str, target: str, success: bool, details: Dict[str, Any]
 ) -> str:
-    message = details.get("message", "")
+    message = _ensure_str(details.get("message", ""))
     if _is_natural(message) and not _contains_dev_terms(message):
         _DIAG["response_already_natural"] += 1
         return message
@@ -177,15 +185,16 @@ def format_result(
 def _dispatch_format(
     action: str, target: str, success: bool, details: Dict[str, Any]
 ) -> str:
+    msg = _ensure_str(details.get("message", ""))
     if action in ("open_app", "open"):
-        return format_open_app(target, success, details.get("message", ""))
+        return format_open_app(target, success, msg)
     if action in ("close_app", "close"):
         return format_close_app(target, success, details)
     if action in ("search_web", "search"):
-        return format_search(target, success, details.get("message", ""))
+        return format_search(target, success, msg)
     if action == "execute_capability":
         return format_capability(target, success, details)
-    return format_generic_success(target, details.get("message", ""))
+    return format_generic_success(target, msg)
 
 
 def _format_error(message: str) -> str:

@@ -7,8 +7,10 @@ Answers factual queries using KIO's existing retrieval stack when all cloud
 LLM providers fail. No LLM required for synthesis — uses deterministic
 extraction to produce a useful answer from retrieval results.
 
-Provider chain (mirrors existing KIO retrieval stack):
-  Exa → Tavily → DuckDuckGo → Jina Reader → Wikipedia
+Provider chain (verified live providers only):
+  DuckDuckGo (freshness-aware) → Wikipedia (evergreen fallback)
+  
+No dead providers (Exa, Tavily, Jina) remain in the chain.
 
 Each provider is attempted once. First non-empty result wins.
 Results are deterministically summarized (no LLM, no embeddings).
@@ -51,10 +53,7 @@ class RetrievalSynthesizer:
     def __init__(self, timeout_s: float = 6.0) -> None:
         self._timeout_s = timeout_s
         self._stats: dict[str, int] = {
-            "exa_hit": 0, "exa_fail": 0,
-            "tavily_hit": 0, "tavily_fail": 0,
             "ddg_hit": 0, "ddg_fail": 0,
-            "jina_hit": 0, "jina_fail": 0,
             "wikipedia_hit": 0, "wikipedia_fail": 0,
             "total_synthesized": 0,
             "all_failed": 0,
@@ -62,7 +61,7 @@ class RetrievalSynthesizer:
 
     def synthesize(self, query: str) -> Optional[str]:
         """
-        Attempt all retrieval providers in order.
+        Attempt live retrieval providers in order.
         Returns synthesized text or None if all fail.
         """
         if not query or not query.strip():
@@ -70,31 +69,7 @@ class RetrievalSynthesizer:
 
         q = query.strip()
 
-        # ── Provider 1: Exa ────────────────────────────────────────────────
-        result = None
-        try:
-            result = self._try_exa(q)
-        except Exception as exc:
-            logger.debug(f"[RS] Exa provider call failed within synthesize: {exc}")
-        if result:
-            self._stats["exa_hit"] += 1
-            self._stats["total_synthesized"] += 1
-            return result
-        self._stats["exa_fail"] += 1
-
-        # ── Provider 2: Tavily ─────────────────────────────────────────────
-        result = None
-        try:
-            result = self._try_tavily(q)
-        except Exception as exc:
-            logger.debug(f"[RS] Tavily provider call failed within synthesize: {exc}")
-        if result:
-            self._stats["tavily_hit"] += 1
-            self._stats["total_synthesized"] += 1
-            return result
-        self._stats["tavily_fail"] += 1
-
-        # ── Provider 3: DuckDuckGo ─────────────────────────────────────────
+        # ── Provider 1: DuckDuckGo (freshness-aware) ───────────────────────
         result = None
         try:
             result = self._try_duckduckgo(q)
@@ -106,19 +81,7 @@ class RetrievalSynthesizer:
             return result
         self._stats["ddg_fail"] += 1
 
-        # ── Provider 4: Jina Reader ────────────────────────────────────────
-        result = None
-        try:
-            result = self._try_jina(q)
-        except Exception as exc:
-            logger.debug(f"[RS] Jina provider call failed within synthesize: {exc}")
-        if result:
-            self._stats["jina_hit"] += 1
-            self._stats["total_synthesized"] += 1
-            return result
-        self._stats["jina_fail"] += 1
-
-        # ── Provider 5: Wikipedia ──────────────────────────────────────────
+        # ── Provider 2: Wikipedia (evergreen fallback) ─────────────────────
         result = None
         try:
             result = self._try_wikipedia(q)
@@ -320,8 +283,8 @@ def _synthesize(raw_text: str, source: str = "") -> Optional[str]:
 
         if source:
             source_clean = source[:80].strip()
-            return f"{excerpt}\n\nSource: {source_clean}" # Changed format
-        return excerpt
+            return f"Here's what I found:\n\n{excerpt}\n\nSource: {source_clean}"
+        return f"Here's what I found:\n\n{excerpt}"
     except Exception as exc:
         logger.debug(f"[RS] Error during synthesis: {exc}")
         return None

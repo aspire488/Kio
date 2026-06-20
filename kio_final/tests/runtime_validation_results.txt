@@ -1,0 +1,540 @@
+================================================================================
+KIO RUNTIME VALIDATION — 6-SCENARIO PRODUCTION PASS
+================================================================================
+[RUNTIME] state=ready pid=11708
+
+
+
+================================================================================
+SCENARIO 1: MOVIES — Interstellar
+================================================================================
+
+----------------------------------------------------------------------
+TURN 1: USER: Tell me about Interstellar
+----------------------------------------------------------------------
+  [BEFORE] active_entity=None domain=None pending_action= artifact=None
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Interstellar 
+    Quick rundown
+    Interstellar is a science fiction film directed by Christopher Nolan, set in a dystopian future where astronauts travel through space in search of a new home for humanity. The film began development in 2006 and was originally set to be directed by Steven Spielberg. It premiered at the TCL Chinese Theatre on October 26, 2014, and became a commercial success, grossing over 774 million dollars worldwide.
+    
+    Worth knowing
+    The film has an ensemble cast led by Matthew McConaughey, Anne Hathaway, and Jessica Chastain, and features extensive practical and miniature effects. Theoretical physicist Kip Thorne served as an executive producer and scientific consultant on the film, and wrote the tie-in book The Science of Interstellar. The film received generally positive reviews from critics, and was nominated for five awards at the 87th Academy Awards, winning Best Visual Effects.
+
+  [LEN=907]
+
+----------------------------------------------------------------------
+TURN 2: USER: Who directed it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Christopher Nolan
+    Quick rundown 
+    Christopher Nolan is a renowned filmmaker known for his complex and thought-provoking movies. He has directed a wide range of films, including the sci-fi epic Interstellar. With a career spanning over two decades, Nolan has established himself as a major figure in contemporary Hollywood.
+    
+    Worth knowing
+    He was knighted in 2024 for his contributions to film and has won numerous awards, including two Academy Awards. Nolan's films have earned over 6 billion dollars worldwide, making him one of the highest-grossing film directors of all time. He is also known for his innovative filmmaking techniques and his enthusiasm for preserving traditional film stock.
+
+  [LEN=692]
+
+----------------------------------------------------------------------
+TURN 3: USER: Who composed it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Hans Zimmer
+    
+    Quick rundown
+    Hans Zimmer composed the music for Interstellar, a film directed by Christopher Nolan. The score was produced by Christopher Nolan, Hans Zimmer, and Alex Gibson. The soundtrack album features a variety of tracks, including suites and alternate versions of the score.
+    
+    Worth knowing
+    * The score was recorded at Lyndhurst Hall, Air Studios, and Temple Church with the help of several musicians, including organ soloist Roger Sayer and violin soloist Ann Marie Simpson.
+    * The soundtrack album includes a poem, "Do Not Go Gentle Into That Good Night" by Dylan Thomas, recited by several actors from the film.
+    * The score features a mix of electronic and orchestral elements, with Zimmer using a combination of traditional instruments and digital tools to create the sound for the film.
+
+  [LEN=808]
+
+----------------------------------------------------------------------
+TURN 4: USER: Show trailer
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Play Interstellar on YouTube or Spotify?
+
+  [LEN=40]
+
+----------------------------------------------------------------------
+TURN 5: USER: Show soundtrack
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Play Interstellar on YouTube or Spotify?
+
+  [LEN=40]
+
+----------------------------------------------------------------------
+TURN 6: USER: Show movie clips
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Play Interstellar on YouTube or Spotify?
+
+  [LEN=40]
+
+----------------------------------------------------------------------
+TURN 7: USER: Behind the scenes
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action= artifact=
+
+  BOT RESPONSE:
+    Error: Command failed.
+
+  [LEN=22]
+
+
+================================================================================
+SCENARIO 2: SPORTS — FIFA World Cup 2026
+================================================================================
+
+----------------------------------------------------------------------
+TURN 8: USER: FIFA World Cup 2026 latest updates
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action= artifact=
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    FIFA World Cup
+    
+    Quick rundown
+    The 2026 FIFA World Cup is currently underway with the US men's national team securing a spot in the round of 32 and winning Group D. The tournament is heating up with teams competing for spots in the knockout round. The standings and fixtures are constantly changing as the teams complete their group stage matches.
+    
+    Worth knowing
+    * The US team has won Group D with a 2-0 victory over Australia and will play in the round of 32 on July 1
+    * Mexico has won Group A and will advance to the round of 32
+    * Brazil and Morocco have secured three points in Group C with wins over Scotland and Haiti respectively
+
+  [LEN=634]
+
+----------------------------------------------------------------------
+TURN 9: USER: Latest standings
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    FIFA World Cup
+    
+    Quick rundown
+    The 2026 FIFA World Cup is underway with several teams securing spots in the round of 32, including the USA which won Group D. The standings are continuously being updated as teams play their matches, with some groups still having a lot to be decided. The knockout stage is starting to take shape, with some teams already being eliminated.
+    
+    Worth knowing
+    * The USA has won Group D after its 2-0 victory over Australia, marking the first time since 2010 that the USA has won its group at the World Cup.
+    * Mexico has won Group A due to its head-to-head results, with its final game against Czechia not affecting its standing but still important for the Czechs.
+    * Brazil moved to the top of Group C due to goal difference, while Haiti will be heading home after the group stage following losses to Scotland and Brazil.
+
+  [LEN=845]
+
+----------------------------------------------------------------------
+TURN 10: USER: Latest results
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    FIFA World Cup 
+    
+    Quick rundown
+    The 2026 FIFA World Cup is underway, with the USA becoming the second nation to secure a spot in the round of 32 after winning Group D. The USA's 2-0 victory over Australia and Paraguay's win over Türkiye solidified their position. The tournament is still in its early stages, with many teams vying for a spot in the knockout round.
+    
+    Worth knowing
+    * The USA has won its group at the World Cup for the first time since 2010
+    * Mexico has won Group A, while Brazil is at the top of Group C due to goal difference
+    * Germany is in a strong position in Group E, with a plus-6 goal differential after its first game against Curaçao
+
+  [LEN=655]
+
+----------------------------------------------------------------------
+TURN 11: USER: Latest highlights
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    Play FIFA World Cup on YouTube or Spotify?
+
+  [LEN=42]
+
+----------------------------------------------------------------------
+TURN 12: USER: Who is leading the group?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    FIFA World Cup Group Leaders
+    
+    Quick rundown
+    The current leaders of the FIFA World Cup groups are emerging as the tournament progresses. Mexico has won Group A, while the United States has secured first place in Group D. Other groups are still up for grabs, with teams like Canada, Switzerland, Brazil, and Germany in strong positions.
+    
+    Worth knowing
+    * Mexico has won Group A due to its head-to-head results and win over South Korea
+    * The United States has won Group D after its 2-0 victory over Australia and Paraguay's win over Türkiye
+    * Brazil has moved to the top of Group C due to its goal difference after securing three points with a win over Haiti
+
+  [LEN=654]
+
+----------------------------------------------------------------------
+TURN 13: USER: Who scored in the latest match?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+
+  BOT RESPONSE:
+    FIFA World Cup Latest Results
+    
+    Quick rundown
+    The 2026 FIFA World Cup is underway with teams competing in various groups, and the USA has secured first place in Group D after winning against Australia. The US team improved to 2-0-0 in Group D play and will advance to the knockout round. The tournament is still in its early stages, with many teams having only played one or two matches.
+    
+    Worth knowing
+    The USA won Group D due to its 2-0 victory over Australia and Paraguay's 1-0 win over Turkey on Friday.
+    Mexico has won Group A after defeating South Korea, and Canada and Switzerland are likely to advance from Group B.
+    Brazil and Morocco have secured three points each in Group C, with Brazil taking the top spot due to goal difference.
+
+  [LEN=738]
+
+
+================================================================================
+SCENARIO 3: MUSIC — Believer
+================================================================================
+
+----------------------------------------------------------------------
+TURN 14: USER: Tell me about Believer by Imagine Dragons
+----------------------------------------------------------------------
+  [BEFORE] active_entity=FIFA World Cup domain=SPORTS pending_action=play_media artifact=highlights
+  [AFTER]  active_entity=Believer By Imagine Dragons domain=MUSIC pending_action=play_media artifact=music video
+
+  BOT RESPONSE:
+    Believer By Imagine Dragons 
+    Imagine Dragons song
+    
+    Quick rundown
+    Believer is a song by American pop rock band Imagine Dragons, released as the lead single from their third studio album Evolve. The song was inspired by lead singer Dan Reynolds' experiences with ankylosing spondylitis and reflects on finding strength in pain. It features a catchy sing-along chorus and has been widely used in advertisements and trailers.
+    
+    Worth knowing
+    The song peaked at number four on the US Billboard Hot 100 and topped various charts, including the Billboard Hot Rock & Alternative Songs chart for 29 weeks. The music video features a boxing match between Dan Reynolds and Dolph Lundgren, marking Lundgren's first music video appearance. The song has received over two billion views on YouTube and over two billion streams on Spotify, making it one of the best-selling singles of all time.
+
+  [LEN=877]
+
+----------------------------------------------------------------------
+TURN 15: USER: Who sings it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Believer By Imagine Dragons domain=MUSIC pending_action=play_media artifact=music video
+  [AFTER]  active_entity=Believer By Imagine Dragons domain=MUSIC pending_action=play_media artifact=music video
+
+  BOT RESPONSE:
+    Dan Reynolds
+    
+    Quick rundown
+    Dan Reynolds is the lead singer of Imagine Dragons and was inspired to write the song Believer due to his experiences with ankylosing spondylitis, a disease he developed. The song is about pain and rising above it, and its music video features a boxing match between Reynolds and Dolph Lundgren. The song was a huge commercial success, topping various charts and receiving over two billion views on YouTube.
+    
+    Worth knowing
+    The song Believer was written by Imagine Dragons members along with Justin Tranter, Alex da Kid, and its producers Mattman & Robin, and was released as the lead single from the band's third studio album Evolve. The song's lyrics discuss depression and anxiety, and its catchy chorus and big thundering pop production made it a standout track. The song peaked at number four on the US Billboard Hot 100 and became the band's third top ten single, and it was widely used in advertisements and film and television trailers throughout 201
+
+  [LEN=985]
+
+----------------------------------------------------------------------
+TURN 16: USER: Show live performance
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Believer By Imagine Dragons domain=MUSIC pending_action=play_media artifact=music video
+  [AFTER]  active_entity=Believer By Imagine Dragons domain=MUSIC pending_action= artifact=
+
+  BOT RESPONSE:
+    Error: Command failed.
+
+  [LEN=22]
+
+
+================================================================================
+SCENARIO 4: BOOKS — Atomic Habits
+================================================================================
+
+----------------------------------------------------------------------
+TURN 17: USER: Tell me about Atomic Habits
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Believer By Imagine Dragons domain=MUSIC pending_action= artifact=
+  [AFTER]  active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+
+  BOT RESPONSE:
+    James Clear 
+    
+    Quick rundown
+    James Clear's book Atomic Habits argues that small changes can compound into remarkable outcomes when built on four behavior-change laws. The book teaches a four-step system for building habits and argues that 1% daily improvements can lead to significant changes over time. The author emphasizes the importance of identity-based change in forming durable habits.
+    
+    Worth knowing
+    The book was published in 2018 and has been widely read and reviewed. The four laws of behavior change outlined in the book are make it obvious, make it attractive, make it easy, and make it satisfying. The author uses examples and research to illustrate the effectiveness of these laws in building good habits and breaking bad ones.
+
+  [LEN=740]
+
+----------------------------------------------------------------------
+TURN 18: USER: Who wrote it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+  [AFTER]  active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+
+  BOT RESPONSE:
+    James Clear
+    Quick rundown
+    James Clear is the author of the bestselling book Atomic Habits, which has sold over 25 million copies worldwide. He is known for his self-improvement strategies and has been featured in prominent publications. His work focuses on helping people build good habits and break bad ones.
+    
+    Worth knowing
+    His book Atomic Habits is a number one New York Times bestseller
+    His work has been featured in places like Time magazine and the New York Times
+    He has an official app called Atoms based on his bestselling book that has already helped over 25 million people
+
+  [LEN=581]
+
+----------------------------------------------------------------------
+TURN 19: USER: Play audiobook
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+  [AFTER]  active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+
+  BOT RESPONSE:
+    Play Atomic Habits on YouTube or Spotify?
+
+  [LEN=41]
+
+----------------------------------------------------------------------
+TURN 20: USER: Show author interview
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+  [AFTER]  active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+
+  BOT RESPONSE:
+    Error: Command failed.
+
+  [LEN=22]
+
+
+================================================================================
+SCENARIO 5: TV — The Bear
+================================================================================
+
+----------------------------------------------------------------------
+TURN 21: USER: Tell me about The Bear
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Atomic Habits domain=BOOKS pending_action= artifact=
+  [AFTER]  active_entity=The Bear domain=TV pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    The Bear
+    
+    Quick rundown  
+    The Bear is an American comedy‑drama created by Christopher Storer that follows award‑winning chef Carmy as he returns to Chicago to revive his late brother’s Italian beef sandwich shop. Since its 2022 debut on FX on Hulu, the show has been praised for its realistic kitchen portrayal, psychological depth, and blend of drama with occasional humor.
+    
+    Worth knowing  
+    • The series was renewed for a fifth and final season in July 2025, slated
+
+  [LEN=466]
+
+----------------------------------------------------------------------
+TURN 22: USER: Who created it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=The Bear domain=TV pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=The Bear domain=TV pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    CHRISTOPHER STORER
+    
+    Quick rundown
+    Christopher Storer is an American screenwriter, director, and producer best known for creating the Emmy‑winning comedy‑drama series The Bear. He previously rose to prominence through his collaborations with Bo Burnham, co‑directing the specials what. and Make Happy, and producing the film Eighth Grade.
+    
+    Worth knowing
+    • He grew up in Park Ridge, Illinois, where he met the owner of the real‑life sandwich shop that inspired The Bear.  
+    • His sister Courtney Storer, a professional chef, serves as the series’ culinary supervisor.
+
+  [LEN=564]
+
+
+================================================================================
+SCENARIO 6: CROSS-DOMAIN ISOLATION
+================================================================================
+
+----------------------------------------------------------------------
+TURN 23: USER: Tell me about Believer
+----------------------------------------------------------------------
+  [BEFORE] active_entity=The Bear domain=TV pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Believer domain=MUSIC pending_action=play_media artifact=music video
+
+  BOT RESPONSE:
+    Believer Imagine Dragons song
+    
+    Quick rundown
+    Believer is a song by Imagine Dragons released in 2017 as the lead single from their third studio album Evolve. The song was inspired by lead singer Dan Reynolds' experiences with ankylosing spondylitis and reflects on painful moments in his life. It topped various charts and became one of the best-selling singles of all time.
+    
+    Worth knowing
+    The song features a boxing match between Dan Reynolds and Dolph Lundgren in its music video. Believer has received over two billion views on YouTube and over two billion streams on Spotify. The song peaked at number four on the US Billboard Hot 100 and stayed at the top of the Billboard Hot Rock & Alternative Songs chart for 29 weeks.
+
+  [LEN=725]
+
+----------------------------------------------------------------------
+TURN 24: USER: Tell me about Interstellar
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Believer domain=MUSIC pending_action=play_media artifact=music video
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Interstellar (film)
+    
+    Quick rundown  
+    A 2014 epic science‑fiction movie directed by Christopher Nolan, starring Matthew McConaughey and Anne Hathaway, that follows a team of astronauts traveling through a wormhole to
+
+  [LEN=215]
+
+----------------------------------------------------------------------
+TURN 25: USER: Who directed it?
+----------------------------------------------------------------------
+  [BEFORE] active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+  [AFTER]  active_entity=Interstellar domain=MOVIES pending_action=play_media artifact=trailer
+
+  BOT RESPONSE:
+    Christopher Nolan
+    Quick rundown
+    Christopher Nolan is a British and American filmmaker known for directing Interstellar. He has established himself as a major figure of 21st-century Hollywood, with his films earning over 6 billion dollars worldwide. Nolan has received numerous awards for his work, including two Academy Awards and a Golden Globe Award.
+    
+    Worth knowing
+    He was appointed as a CBE in 2019 and was knighted in 2024 for his contributions to film
+    His films often explore metaphysical themes and feature unconventional narrative structures and practical special effects
+    Nolan has co-written several of his films with his brother Jonathan and runs the production company Syncopy Inc with his wife Emma Thomas
+
+  [LEN=716]
+
+
+================================================================================
+VALIDATION RESULTS
+================================================================================
+
+--- SCENARIO 1: INTERSTELLAR ---
+  Turn 1 (Tell me about Interstellar):
+    [PASS] Entity in response
+    Length: 907 chars
+  Turn 2 (Who directed it?):
+    [PASS] Christopher Nolan mentioned
+    [PASS] No trailer playback triggered
+  Turn 3 (Who composed it?):
+    [PASS] Hans Zimmer mentioned
+  Turn 4 (Show trailer):
+    [PASS] Interstellar referenced
+  Turn 5 (Show soundtrack):
+    [PASS] Interstellar referenced
+  Turn 6 (Show movie clips):
+    [PASS] Interstellar referenced
+  Turn 7 (Behind the scenes):
+    [WARN] Turn 7: No Interstellar reference
+
+--- SCENARIO 2: FIFA WORLD CUP 2026 ---
+  Turn 8:
+    [PASS] FIFA context preserved
+  Turn 9:
+    [PASS] FIFA context preserved
+  Turn 10:
+    [PASS] FIFA context preserved
+  Turn 11:
+    [PASS] FIFA context preserved
+  Turn 12:
+    [PASS] FIFA context preserved
+  Turn 13:
+    [PASS] FIFA context preserved
+
+--- SCENARIO 3: BELIEVER ---
+  Turn 14:
+    [PASS] Believer context preserved
+  Turn 15:
+    [PASS] Believer context preserved
+  Turn 16:
+
+--- SCENARIO 4: ATOMIC HABITS ---
+  Turn 17 (Tell me about Atomic Habits):
+    [PASS] Atomic Habits in response
+  Turn 18 (Who wrote it?):
+    [PASS] James Clear identified as author
+  Turn 19:
+    [PASS] Atomic Habits context preserved
+  Turn 20:
+    [WARN] Turn 20: Atomic Habits context lost
+
+--- SCENARIO 5: THE BEAR ---
+  Turn 21 (Tell me about The Bear):
+    [PASS] The Bear in response
+  Turn 22 (Who created it?):
+    [PASS] Christopher Storer identified as creator
+
+--- SCENARIO 6: CROSS-DOMAIN ISOLATION ---
+  Turn 24 (Tell me about Interstellar after Believer):
+  Turn 25 (Who directed it?):
+    [PASS] No Believer leakage
+    [PASS] Christopher Nolan identified for Interstellar
+
+
+================================================================================
+FINAL SUMMARY
+================================================================================
+
+Turns executed: 25
+Issues (FAIL): 1
+Warnings: 2
+
+--- ISSUES ---
+  [FAIL] Turn 16: Believer entity lost
+
+--- WARNINGS ---
+  [WARN] Turn 7: No Interstellar reference
+  [WARN] Turn 20: Atomic Habits context lost
+
+--- RESPONSE LENGTHS ---
+  Turn  1: len=  907  Interstellar 
+  Turn  2: len=  692  Christopher Nolan
+  Turn  3: len=  808  Hans Zimmer
+  Turn  4: len=   40  Play Interstellar on YouTube or Spotify?
+  Turn  5: len=   40  Play Interstellar on YouTube or Spotify?
+  Turn  6: len=   40  Play Interstellar on YouTube or Spotify?
+  Turn  7: len=   22  Error: Command failed.
+  Turn  8: len=  634  FIFA World Cup
+  Turn  9: len=  845  FIFA World Cup
+  Turn 10: len=  655  FIFA World Cup 
+  Turn 11: len=   42  Play FIFA World Cup on YouTube or Spotify?
+  Turn 12: len=  654  FIFA World Cup Group Leaders
+  Turn 13: len=  738  FIFA World Cup Latest Results
+  Turn 14: len=  877  Believer By Imagine Dragons 
+  Turn 15: len=  985  Dan Reynolds
+  Turn 16: len=   22  Error: Command failed.
+  Turn 17: len=  740  James Clear 
+  Turn 18: len=  581  James Clear
+  Turn 19: len=   41  Play Atomic Habits on YouTube or Spotify?
+  Turn 20: len=   22  Error: Command failed.
+  Turn 21: len=  466  The Bear
+  Turn 22: len=  564  CHRISTOPHER STORER
+  Turn 23: len=  725  Believer Imagine Dragons song
+  Turn 24: len=  215  Interstellar (film)
+  Turn 25: len=  716  Christopher Nolan
+
+--- VERDICT ---
+  ❌  NO-GO — 1 issue(s) remain
+  ⚠️   2 warning(s) — investigate
+
+================================================================================
+VALIDATION COMPLETE
+================================================================================

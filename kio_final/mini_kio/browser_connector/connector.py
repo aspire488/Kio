@@ -267,7 +267,38 @@ class Connector:
                 logger.info("[BROWSER_NAVIGATE_TAB] tab_id=%s url=%s", existing.tab_id, url)
                 return await self._dispatch(msg)
 
-        logger.info("[BROWSER_DEDUP_MISS] target=%s", url)
+        # P5 fallback: check ALL Chrome tabs (not just owned) for domain match
+        if domain:
+            try:
+                all_tabs_res = await self.list_tabs()
+                if all_tabs_res.success and all_tabs_res.tabs:
+                    for existing in all_tabs_res.tabs:
+                        try:
+                            existing_host = (urlparse(existing.url).hostname or "").lower()
+                        except Exception:
+                            continue
+                        target_host = domain.lower().strip().rstrip("/")
+                        if (existing_host == target_host or
+                            existing_host.endswith("." + target_host) or
+                            target_host.endswith("." + existing_host)):
+                            # Adopt this tab as owned and navigate
+                            self._registry.add(existing)
+                            logger.info("[BROWSER_DEDUP_REUSE] target=%s tab_id=%s host=%s",
+                                        url, existing.tab_id, existing_host)
+                            command_id = new_command_id()
+                            msg = Message(type=MessageType.NAVIGATE_TAB,
+                                          command_id=command_id,
+                                          tab_id=existing.tab_id, url=url)
+                            err = validate_command(msg)
+                            if err:
+                                return TabResult(success=False, command_id=command_id,
+                                                 error=err)
+                            logger.info("[BROWSER_NAVIGATE_TAB] tab_id=%s url=%s", existing.tab_id, url)
+                            return await self._dispatch(msg)
+            except Exception:
+                logger.warning("[BROWSER_DEDUP_LIST_FAILED] target=%s", url, exc_info=True)
+
+        logger.info("[BROWSER_DEDUP_NEW_TAB] target=%s", url)
         command_id = new_command_id()
         msg = Message(type=MessageType.OPEN_TAB, command_id=command_id,
                       url=url)
@@ -352,19 +383,20 @@ class Connector:
         msg = Message(type=MessageType.LIST_TABS, command_id=command_id)
         return await self._dispatch(msg)
 
-    async def execute_script(self, tab_id: int, script: str) -> TabResult:
+    async def execute_script(self, tab_id: int, script: str, args: Optional[list] = None) -> TabResult:
         """Execute JavaScript in a browser tab.
 
         Args:
             tab_id: Chrome tab ID to inject into.
             script: JavaScript code to execute (IIFE returning a value).
+            args: Optional arguments to pass to the script.
 
         Returns:
             TabResult with message containing the script return value.
         """
         command_id = new_command_id()
         msg = Message(type=MessageType.EXECUTE_SCRIPT, command_id=command_id,
-                       tab_id=tab_id, script=script)
+                       tab_id=tab_id, script=script, args=args)
         err = validate_command(msg)
         if err:
             return TabResult(success=False, command_id=command_id, error=err)

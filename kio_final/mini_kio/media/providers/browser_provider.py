@@ -6,6 +6,7 @@ from typing import Optional
 
 from mini_kio.browser_connector.connector import Connector
 from mini_kio.core import config
+from mini_kio.core.async_utils import safe_run_async
 from mini_kio.media.media_session import MediaResult, MediaSession
 from mini_kio.media.media_state import MediaState, PlayerType, MediaType
 from mini_kio.media.providers import MediaProvider
@@ -47,7 +48,7 @@ class BrowserProvider(MediaProvider):
         if not conn:
             return None
         try:
-            tab = asyncio.run(conn._resolve_media_tab(domain_hint))
+            tab = safe_run_async(conn._resolve_media_tab(domain_hint))
             if tab:
                 return tab.tab_id
         except Exception:
@@ -88,7 +89,7 @@ class BrowserProvider(MediaProvider):
             return MediaResult(success=False, error="No active browser media", player="browser")
         action = "seek_forward" if seconds >= 0 else "seek_backward"
         try:
-            result = asyncio.run(conn.execute_script(tab_id, action))
+            result = safe_run_async(conn.execute_script(tab_id, action))
             if result.success:
                 if self._session:
                     self._session.touch()
@@ -102,11 +103,31 @@ class BrowserProvider(MediaProvider):
         tab_id = self._resolve_tab()
         if not conn or not tab_id:
             return MediaResult(success=False, error="No active browser media", player="browser")
+
+        if level is not None:
+            try:
+                result = safe_run_async(conn.execute_script(tab_id, "set_volume", args=[level]))
+                if result.success:
+                    actual_vol = None
+                    if isinstance(result.message, dict):
+                        actual_vol = result.message.get("volume")
+                    
+                    if actual_vol is not None and abs(actual_vol - level) < 0.01:
+                        return MediaResult(success=True, message=f"volume_verified to {int(level*100)}% [VOLUME_VERIFY]", player="browser")
+                    
+                    return MediaResult(success=True, message=f"Volume set to {int(level*100)}%", player="browser")
+                return MediaResult(success=False, error=result.error, player="browser")
+            except Exception as exc:
+                return MediaResult(success=False, error=str(exc), player="browser")
+
         action = "volume_up" if direction != "down" else "volume_down"
         try:
-            result = asyncio.run(conn.execute_script(tab_id, action))
+            result = safe_run_async(conn.execute_script(tab_id, action))
             if result.success:
-                return MediaResult(success=True, message=result.message or "Volume adjusted", player="browser")
+                status = result.message
+                if isinstance(result.message, dict):
+                    status = result.message.get("status", "volume_changed")
+                return MediaResult(success=True, message=status or "Volume adjusted", player="browser")
             return MediaResult(success=False, error=result.error, player="browser")
         except Exception as exc:
             return MediaResult(success=False, error=str(exc), player="browser")
@@ -140,20 +161,18 @@ class BrowserProvider(MediaProvider):
         if not script:
             return MediaResult(success=False, error=f"Unknown action: {action}", player="browser")
         try:
-            result = asyncio.run(conn.execute_script(tab_id, script))
+            result = safe_run_async(conn.execute_script(tab_id, script))
             if result.success:
                 new_state = MediaState.IDLE
-                if result.message:
-                    if result.message == "playing":
-                        new_state = MediaState.PLAYING
-                    elif result.message == "paused":
-                        new_state = MediaState.PAUSED
-                    elif result.message == "stopped":
-                        new_state = MediaState.STOPPED
-                    elif result.message == "muted":
-                        pass
-                    elif result.message == "unmuted":
-                        pass
+                status = result.message
+                if isinstance(result.message, dict):
+                    status = result.message.get("status", action)
+                if status == "playing":
+                    new_state = MediaState.PLAYING
+                elif status == "paused":
+                    new_state = MediaState.PAUSED
+                elif status == "stopped":
+                    new_state = MediaState.STOPPED
                 self._session = MediaSession(
                     player=PlayerType.BROWSER,
                     tab_id=tab_id,
@@ -161,7 +180,7 @@ class BrowserProvider(MediaProvider):
                     media_type=MediaType.BROWSER_MEDIA,
                 )
                 self._session.touch()
-                return MediaResult(success=True, message=result.message or f"{action.capitalize()}d", player="browser", session=self._session)
+                return MediaResult(success=True, message=status or f"{action.capitalize()}d", player="browser", session=self._session)
             return MediaResult(success=False, error=result.error, player="browser")
         except Exception as exc:
             return MediaResult(success=False, error=str(exc), player="browser")

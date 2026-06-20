@@ -1,4 +1,4 @@
-﻿// KIO Browser Connector V1 - Full Command Support
+// KIO Browser Connector V1 - Full Command Support
 // WebSocket ↔ Chrome Extension bridge
 
 const WS_URL = "ws://127.0.0.1:9877";
@@ -224,14 +224,15 @@ const SCRIPTS = {
 
     // ── Play Attempt ────────────────────────────────────────────────
     diag.player_status = 'play_attempted';
+    const _before_muted = v.muted;
+    const _before_volume = v.volume;
     v.muted = true;
     console.log('[PLAY_SCRIPT] PLAY_START',
-      { readyState: v.readyState, duration: v.duration, src: v.currentSrc ? 'set' : 'empty' });
+      { readyState: v.readyState, duration: v.duration, src: v.currentSrc ? 'set' : 'empty', before_muted: _before_muted, before_volume: _before_volume });
 
     try {
       const p = v.play();
 
-      // Log promise lifecycle
       p.then(() => {
         console.log('[PLAY_SCRIPT] PLAY_RESOLVED');
       }).catch(err => {
@@ -243,6 +244,11 @@ const SCRIPTS = {
 
       await p;
 
+      // Restore audio state that was changed for autoplay bypass
+      v.muted = _before_muted;
+      v.volume = _before_volume;
+      console.log('[PLAY_SCRIPT] audio_restored', { before_muted: _before_muted, before_volume: _before_volume, now_muted: v.muted, now_volume: v.volume });
+
       // Success
       console.log('[PLAY_SCRIPT] play_succeeded');
       diag.player_status = 'playing';
@@ -252,6 +258,9 @@ const SCRIPTS = {
         duration: v.duration,
         volume: v.volume,
         muted: v.muted,
+        _audio_before_muted: _before_muted,
+        _audio_before_volume: _before_volume,
+        _audio_restored: true,
         ...diag,
       });
 
@@ -349,44 +358,133 @@ const SCRIPTS = {
       muted: v.muted,
     });
   },
+  set_volume: (level) => {
+    try {
+      const player = document.getElementById('movie_player');
+      if (player && typeof player.setVolume === 'function') {
+        player.setVolume(level * 100);
+        return JSON.stringify({ success: true, volume: player.getVolume() });
+      }
+      const video = document.querySelector('video');
+      if (video) {
+        video.volume = level;
+        return JSON.stringify({ success: true, volume: video.volume });
+      }
+    } catch (e) {
+      console.warn("[KIO_VOLUME] Failed to set volume:", e);
+    }
+    return JSON.stringify({ success: false, error: 'no player found' });
+  },
   seek_forward: () => {
     const v = document.querySelector('video,audio');
     if (!v) return JSON.stringify({ status: 'no media' });
+    const _before_muted = v.muted;
+    const _before_volume = v.volume;
     v.currentTime = Math.min(v.duration || 0, v.currentTime + 10);
+    if (v.muted !== _before_muted) v.muted = _before_muted;
+    if (v.volume !== _before_volume) v.volume = _before_volume;
     return JSON.stringify({
       status: 'seeked',
       currentTime: v.currentTime,
       duration: v.duration,
       volume: v.volume,
       muted: v.muted,
+      _audio_before_muted: _before_muted,
+      _audio_before_volume: _before_volume,
+      _audio_restored: v.muted === _before_muted && v.volume === _before_volume,
     });
   },
   seek_backward: () => {
     const v = document.querySelector('video,audio');
     if (!v) return JSON.stringify({ status: 'no media' });
+    const _before_muted = v.muted;
+    const _before_volume = v.volume;
     v.currentTime = Math.max(0, v.currentTime - 10);
+    if (v.muted !== _before_muted) v.muted = _before_muted;
+    if (v.volume !== _before_volume) v.volume = _before_volume;
     return JSON.stringify({
       status: 'seeked',
       currentTime: v.currentTime,
       duration: v.duration,
       volume: v.volume,
       muted: v.muted,
+      _audio_before_muted: _before_muted,
+      _audio_before_volume: _before_volume,
+      _audio_restored: v.muted === _before_muted && v.volume === _before_volume,
+    });
+  },
+  next_track: () => {
+    const url_before = location.href;
+    const btn = document.querySelector('.ytp-next-button') || document.querySelector('a[aria-label="Next (Shift+N)"]') || document.querySelector('a[aria-label="Next video"]');
+    let clicked = false;
+    let button_found = false;
+    if (btn) {
+      button_found = true;
+      btn.click();
+      clicked = true;
+    } else {
+      // Fallback to YouTube keyboard shortcut Shift+N
+      const ev = new KeyboardEvent('keydown', { key: 'N', code: 'KeyN', shiftKey: true, bubbles: true });
+      document.dispatchEvent(ev);
+      clicked = true;
+    }
+    const url_after = location.href;
+    return JSON.stringify({ status: 'navigating', action: 'next', button_found, clicked, url_before, url_after });
+  },
+  previous_track: () => {
+    const url_before = location.href;
+    const btn = document.querySelector('.ytp-prev-button') || document.querySelector('a[aria-label="Back (Shift+P)"]') || document.querySelector('a[aria-label="Previous video"]');
+    let clicked = false;
+    let button_found = false;
+    if (btn) {
+      button_found = true;
+      btn.click();
+      clicked = true;
+    } else {
+      // Fallback to YouTube keyboard shortcut Shift+P
+      const ev = new KeyboardEvent('keydown', { key: 'P', code: 'KeyP', shiftKey: true, bubbles: true });
+      document.dispatchEvent(ev);
+      clicked = true;
+    }
+    const url_after = location.href;
+    return JSON.stringify({ status: 'navigating', action: 'previous', button_found, clicked, url_before, url_after });
+  },
+  get_page_info: () => {
+    return JSON.stringify({
+      url: location.href,
+      title: document.title,
+      hasVideo: !!document.querySelector('video'),
+      hasMoviePlayer: !!document.getElementById('movie_player'),
+      hasWatchFlexy: !!document.querySelector('ytd-watch-flexy'),
     });
   },
   youtube_bootstrap: async () => {
     const _startUrl = window.location.href;
-    // Try multiple selectors to find a video result link.
-    // Order: most specific first, generic last.
+    
+    // If we're already on a watch page, we might just need to wait a bit
+    if (_startUrl.includes('/watch?v=')) {
+        console.log('[KIO_BOOTSTRAP] already on watch page');
+        return 'navigating';
+    }
+
     const s = [
-      'a#video-title[href*="/watch?"]',
       'ytd-video-renderer a#video-title',
-      'a#video-title',
+      'ytd-grid-video-renderer a#video-title',
+      'ytd-rich-grid-media a#video-title',
+      'a#video-title[href*="/watch?"]',
+      'a[href*="/watch?v="]',
+      'h3 a[href*="/watch?"]',
       'a#thumbnail[href*="/watch?"]',
-      'ytd-video-renderer a#thumbnail',
       'a.yt-simple-endpoint[href*="/watch?"]',
-      'ytd-video-renderer a.yt-simple-endpoint',
+      'ytd-reel-item-renderer a[href*="/watch?"]',
+      'ytd-video-renderer a[href*="/watch?"]',
+      'ytd-compact-video-renderer a[href*="/watch?"]',
+      'ytd-rich-item-renderer a#video-title',
+      'ytd-rich-item-renderer a#thumbnail[href*="/watch?"]',
     ];
+    
     let link = null;
+    // Try standard selectors
     for (const sel of s) {
       const a = document.querySelector(sel);
       if (a && a.href && a.href.includes('/watch?')) {
@@ -394,40 +492,61 @@ const SCRIPTS = {
         break;
       }
     }
+    
     if (!link) {
       console.log('[KIO_BOOTSTRAP] not found url=' + _startUrl);
-      return 'not found';
+      // Try ANY anchor with /watch? in href
+      const allLinks = document.querySelectorAll('a[href*="/watch?"]');
+      if (allLinks && allLinks.length > 0) {
+        link = allLinks[0];
+        console.log('[KIO_BOOTSTRAP] found via fallback selector, count=' + allLinks.length);
+      }
+    }
+    
+    if (!link) {
+      console.log('[KIO_BOOTSTRAP] not found url=' + _startUrl);
+      // Try to click the first thumbnail if title link failed
+      const thumb = document.querySelector('ytd-thumbnail a[href*="/watch?"]');
+      if (thumb) {
+          link = thumb;
+      }
+    }
+
+    if (!link) {
+        return 'not found';
     }
 
     const targetHref = link.href;
     console.log('[KIO_BOOTSTRAP] click url=' + _startUrl + ' target=' + targetHref);
     link.click();
 
-    // Poll for URL transition to the watch page.
-    // YouTube SPA navigation replaces history asynchronously.
-    for (let i = 0; i < 25; i++) {
+    for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 200));
       const _currentUrl = window.location.href;
-      if (_currentUrl.includes('/watch?')) {
+      if (_currentUrl.includes('/watch?v=') && _currentUrl !== _startUrl) {
         console.log('[KIO_BOOTSTRAP] spa transition detected url=' + _currentUrl + ' iteration=' + i);
         return 'navigating';
       }
     }
-    // Fallback: navigate directly if SPA didn't transition
     const _fallbackUrl = window.location.href;
     console.log('[KIO_BOOTSTRAP] spa timeout fallback url=' + _fallbackUrl + ' target=' + targetHref);
-    window.location.href = targetHref;
-    console.log('[KIO_BOOTSTRAP] fallback set newUrl=' + targetHref);
+    if (!_fallbackUrl.includes('/watch?v=')) {
+        window.location.href = targetHref;
+    }
     return 'navigating';
   },
-  get_page_info: () => {
-    return JSON.stringify({
-      url: window.location.href,
-      title: document.title,
-      hasVideo: !!document.querySelector('video'),
-      hasWatchFlexy: !!document.querySelector('ytd-watch-flexy'),
-      hasMoviePlayer: !!document.querySelector('#movie_player'),
-    });
+  get_player_state: () => {
+    // Attempt to get YouTube's internal player state (0-5)
+    // -1: unknown, 0: ended, 1: playing, 2: paused, 3: buffering, 5: cued
+    try {
+      const player = document.getElementById('movie_player');
+      if (player && typeof player.getPlayerState === 'function') {
+        return JSON.stringify({ playerState: player.getPlayerState() });
+      }
+    } catch (e) {
+      console.warn("[KIO_PLAYER_STATE] Failed to get player state:", e);
+    }
+    return JSON.stringify({ playerState: -1 }); // Unknown or not available
   },
 };
 
@@ -508,7 +627,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // ── WebSocket Connection ────────────────────────────────────────────
 
 function connect() {
-  // RACE FIX: Guard against CONNECTING state to avoid duplicate sockets
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
 
   log("INFO", "Connecting to " + WS_URL + (AUTH_TOKEN ? " (with token)" : " (bootstrap)"));
@@ -536,7 +654,6 @@ function connect() {
       return;
     }
 
-    // Handle commands from KIO
     if (msg.type in COMMAND_HANDLERS) {
       try {
         const response = await COMMAND_HANDLERS[msg.type](msg);
@@ -554,7 +671,6 @@ function connect() {
       return;
     }
 
-    // Handle protocol messages
     switch (msg.type) {
       case "connected":
         log("SUCCESS", "Authentication successful");
@@ -627,7 +743,6 @@ chrome.runtime.onStartup.addListener(async () => {
   connect();
 });
 
-// Listen for token from KIO or other extensions
 chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   if (msg.type === "set_token" && msg.token) {
     setToken(msg.token);
@@ -636,5 +751,4 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// Init - load token, then connect
 loadToken().then(() => connect());

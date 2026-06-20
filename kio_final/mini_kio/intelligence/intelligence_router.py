@@ -147,13 +147,11 @@ def _internal_knowledge_lookup(query: str) -> Optional[str]:
     """
     q = query.strip().lower()
 
-    # ── 3a: character_knowledge canonical identity ───────────────────────────
+    # ── 3a: KIO_character_knowledge canonical identity ─────────────────────
     try:
-        from mini_kio.llm.character_knowledge import (
+        from mini_kio.llm.KIO_character_knowledge import (
             CANONICAL_TRUTHS,
             IDENTITY,
-            resolve_capability,
-            resolve_limitation,
         )
 
         # Identity questions
@@ -169,23 +167,24 @@ def _internal_knowledge_lookup(query: str) -> Optional[str]:
                     f"Created by {IDENTITY.creator}."
                 )
 
-        # Capability questions
+        # Capability questions (inline — resolve_capability not yet implemented)
         _capability_triggers = ("what can you do", "your capabilities", "what are you capable")
         for trigger in _capability_triggers:
             if trigger in q:
-                caps = resolve_capability()
-                lines = [f"• {c.name}: {c.description}" for c in caps]
-                return "KIO's current capabilities:\n" + "\n".join(lines)
+                return (
+                    "KIO can open and close applications, search Google and YouTube, "
+                    "play media, open folders, and execute multi-step commands."
+                )
 
-        # Limitation questions
+        # Limitation questions (inline — resolve_limitation not yet implemented)
         _limitation_triggers = ("what are your limitations", "what can't you", "what cannot you")
         for trigger in _limitation_triggers:
             if trigger in q:
-                lims = resolve_limitation()
-                lines = []
-                for lim in lims:
-                    lines.append(f"• {lim.name}: {', '.join(lim.items[:2])}")
-                return "KIO's current limitations:\n" + "\n".join(lines)
+                return (
+                    "KIO operates within the capabilities available to the current runtime. "
+                    "It cannot access systems, accounts, or information "
+                    "that have not been made available to it."
+                )
 
         # Canonical truth lookup
         for truth in CANONICAL_TRUTHS:
@@ -193,7 +192,7 @@ def _internal_knowledge_lookup(query: str) -> Optional[str]:
                 return truth.statement
 
     except ImportError:
-        pass  # character_knowledge not available — continue to next source
+        pass  # KIO_character_knowledge not available — continue to next source
 
     # ── 3b: knowledge_fallback educational content ────────────────────────────
     try:

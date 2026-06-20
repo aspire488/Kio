@@ -18,6 +18,7 @@ Each provider is tried once; on failure the next is attempted.
 All exhausted → deterministic offline fallback.
 """
 
+import inspect
 import os
 import asyncio
 import logging
@@ -176,6 +177,24 @@ def _register_providers(gateway: LLMGateway) -> None:
             f"model={config.FIREWORKS_MODEL}"
         )
 
+    # Priority 8: Ollama — local LLM, always-on, no API key needed
+    if config.OLLAMA_ENABLED:
+        try:
+            from mini_kio.llm.ollama_provider import OllamaProvider
+            provider = OllamaProvider(
+                base_url=config.OLLAMA_BASE_URL,
+                model=config.OLLAMA_MODEL,
+                timeout_s=config.OLLAMA_TIMEOUT_S,
+                max_tokens=config.OLLAMA_MAX_TOKENS,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.OLLAMA.value)
+            logger.info(
+                f"Registered Ollama provider (priority {ProviderPriority.OLLAMA.value}): "
+                f"model={config.OLLAMA_MODEL}"
+            )
+        except Exception as exc:
+            logger.warning(f"Ollama provider skipped: {exc}")
+
     # Optional: FreeLLM experimental backend (off by default)
     if _ENABLE_FREELLM and config.FREELLMAPI_ENABLED:
         try:
@@ -210,13 +229,17 @@ def _get_config_label(name: str, provider) -> str:
     (which may be closed after a PTB run_polling restart).
     """
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            healthy = loop.run_until_complete(provider.health_check())
-        finally:
-            loop.close()
-            asyncio.set_event_loop(None)
+        hc = provider.health_check()
+        if inspect.iscoroutine(hc) or inspect.iscoroutinefunction(getattr(provider, 'health_check', None)):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                healthy = loop.run_until_complete(asyncio.ensure_future(hc))
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+        else:
+            healthy = bool(hc)
     except Exception:
         healthy = False
     if not healthy:

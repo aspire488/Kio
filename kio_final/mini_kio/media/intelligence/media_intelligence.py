@@ -21,27 +21,27 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from media_entity_memory import MediaEntityMemory
+from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
 from mini_kio.media.media_intelligence_models import (
     EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
 )
 from mini_kio.memory.memory_store import MemoryStore
-from media_offer_manager import (
+from mini_kio.media.intelligence.media_offer_manager import (
     MediaOffer, MediaOfferManager, OfferTrigger
 )
-from media_opportunity_engine import (
+from mini_kio.media.intelligence.media_opportunity_engine import (
     DetectedOpportunity, MediaOpportunityEngine, OpportunityCheckResult
 )
-from media_recommendation_engine import (
+from mini_kio.media.intelligence.media_recommendation_engine import (
     MediaRecommendationEngine, RecommendationResult, RecommendationStrategy
 )
-from media_reference_resolver import (
+from mini_kio.media.intelligence.media_reference_resolver import (
     MediaReferenceResolver, ReferenceResolution, ReferenceType, VariantType
 )
-from media_followup_engine import (
+from mini_kio.media.intelligence.media_followup_engine import (
     FollowUpResolution, FollowUpType, MediaFollowUpEngine, TransportCommand
 )
-from media_preference_model import MediaPreferenceModel
+from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel
 
 
 # ─────────────────────────── enums ───────────────────────────

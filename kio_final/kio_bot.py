@@ -26,7 +26,7 @@ from telegram.ext import (
 )
 
 from mini_kio.core.command_router import route
-from mini_kio.core.config import TELEGRAM_TOKEN, ALLOWED_USER_IDS
+from mini_kio.core.config import TELEGRAM_TOKEN, TELEGRAM_PROXY, ALLOWED_USER_IDS
 from mini_kio.core.runtime import bootstrap_runtime
 
 logger = logging.getLogger(__name__)
@@ -152,13 +152,22 @@ _restart_counter = 0
 
 def _build_app() -> Application:
     """Build a fresh PTB Application instance with all handlers."""
-    app = (
+    builder = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .connect_timeout(30)
         .read_timeout(30)
         .write_timeout(30)
         .pool_timeout(30)
+    )
+    if TELEGRAM_PROXY:
+        logger.info("[TELEGRAM_PROXY] configured: %s", TELEGRAM_PROXY)
+        builder = builder.proxy(TELEGRAM_PROXY)
+    else:
+        logger.info("[TELEGRAM_PROXY] not configured")
+
+    app = (
+        builder
         .post_init(_lifecycle_post_init)
         .post_stop(_lifecycle_post_stop)
         .post_shutdown(_lifecycle_post_shutdown)
@@ -188,6 +197,21 @@ def run_bot(runtime=None) -> None:
     print("=" * 50)
     print("KIO TELEGRAM BOT")
     print("=" * 50)
+
+    # Pre-flight connectivity check
+    import socket as _socket
+    _tg_test_host = "api.telegram.org"
+    try:
+        _tg_addrs = _socket.getaddrinfo(_tg_test_host, 443)
+        _tg_resolved = ", ".join(str(a[4][0]) for a in _tg_addrs[:3])
+        logger.info("[TELEGRAM_PREFLIGHT] %s resolves to: %s", _tg_test_host, _tg_resolved)
+    except Exception as _e:
+        logger.warning("[TELEGRAM_PREFLIGHT] DNS resolution failed: %s", _e)
+
+    if TELEGRAM_PROXY:
+        print(f"Telegram proxy: {TELEGRAM_PROXY}")
+    else:
+        print("Telegram proxy: none (direct)")
 
     if runtime is None:
         runtime = bootstrap_runtime()

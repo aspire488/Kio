@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from mini_kio.media.media_session import MediaCandidate
-from mini_kio.media.media_intelligence_models import ResolvedEntity, EntityType
+from mini_kio.media.media_intelligence_models import ResolvedEntity, EntityType, MediaArtifactType
+
+MAX_RECENT_EVENTS = 5
 
 
 @dataclass
@@ -26,10 +28,34 @@ class MediaContext:
     last_candidates: list[MediaCandidate] = field(default_factory=list)
     last_selected_candidate: Optional[MediaCandidate] = None
 
-    # New fields for intelligence context
+    # New fields for intelligence context (Rule 1)
+    topic: Optional[str] = None
+    entity: Optional[str] = None
+    event: Optional[str] = None
+    match_status: Optional[str] = None
+    last_completed_match: Optional[str] = None
+    media_candidate: Optional[str] = None
+
     last_resolved_entity: Optional[ResolvedEntity] = None
     current_mood: Optional[str] = None
     current_activity: Optional[str] = None
+
+    # Recent surfaced events from information queries (for follow-up resolution)
+    recent_events: list[dict] = field(default_factory=list)
+
+    # Sports intelligence mode: STANDINGS / FIXTURES / RESULTS / HIGHLIGHTS / GENERAL
+    sports_mode: str = ""
+
+    # Source quality metadata for retrieval provenance
+    source_provider: Optional[str] = None
+    source_confidence: float = 0.0
+    source_event_type: Optional[str] = None
+
+    # Pending media context for follow-up resolution
+    pending_media_query: str = ""
+    pending_action: str = ""
+    artifact_type: Optional[str] = None
+    pending_media_topic: str = ""
 
     def set_current(self, candidate: MediaCandidate):
         self.last_selected_candidate = candidate
@@ -79,6 +105,11 @@ class MediaContext:
 
     def get_activity(self) -> Optional[str]:
         return self.current_activity
+
+    def store_event(self, event: dict) -> None:
+        self.recent_events.append(event)
+        if len(self.recent_events) > MAX_RECENT_EVENTS:
+            self.recent_events.pop(0)
 
     def resolve_reference(self, text: str) -> Optional[str]:
         tl = text.lower().strip()
@@ -169,11 +200,27 @@ class MediaContext:
             "current_tutorial": self.current_tutorial,
             "current_topic": self.current_topic,
             "current_playlist": self.current_playlist,
+            "current_podcast": self.current_podcast,
+            "current_audiobook": self.current_audiobook,
             "last_query": self.last_query,
             "last_provider": self.last_provider,
             "last_media_type": self.last_media_type,
+            "topic": self.topic,
+            "entity": self.entity,
+            "event": self.event,
+            "match_status": self.match_status,
+            "last_completed_match": self.last_completed_match,
+            "media_candidate": self.media_candidate,
             "last_resolved_entity": self.last_resolved_entity.to_dict() if self.last_resolved_entity else None,
             "current_mood": self.current_mood,
             "current_activity": self.current_activity,
+            "recent_events": self.recent_events,
+            "source_provider": self.source_provider,
+            "source_confidence": self.source_confidence,
+            "source_event_type": self.source_event_type,
+            "pending_media_query": self.pending_media_query,
+            "pending_action": self.pending_action,
+            "artifact_type": self.artifact_type,
+            "pending_media_topic": self.pending_media_topic,
         }
         return d

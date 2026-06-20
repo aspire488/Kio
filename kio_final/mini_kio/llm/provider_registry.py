@@ -61,6 +61,7 @@ class ProviderPriority(int, Enum):
     HUGGINGFACE = 5
     OPENROUTER = 6
     TOGETHER_AI = 7
+    OLLAMA = 8
 
 
 _PERMANENT_ERROR_PATTERNS = (

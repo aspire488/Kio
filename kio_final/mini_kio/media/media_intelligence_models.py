@@ -8,6 +8,28 @@ from typing import Any, Dict, List, Optional
 
 # ─────────────────────────── enums ───────────────────────────
 
+class MediaArtifactType(str, Enum):
+    HIGHLIGHTS = "highlights"
+    TRAILER = "trailer"
+    TEASER = "teaser"
+    MUSIC_VIDEO = "music video"
+    GAMEPLAY = "gameplay"
+    INTERVIEW = "interview"
+    RECAP = "recap"
+    LIVE_COVERAGE = "live coverage"
+    REVEAL_TRAILER = "reveal trailer"
+    ANNOUNCEMENT = "announcement"
+    HANDS_ON = "hands-on"
+    DEMO = "demo"
+    NEWS_SUMMARY = "news summary"
+    AUDIOBOOK = "audiobook"
+    BOOK_REVIEW = "book review"
+    BOOK_SUMMARY = "book summary"
+    ADAPTATION_TRAILER = "adaptation trailer"
+    AUTHOR_INTERVIEW = "author interview"
+    READING = "reading"
+
+
 class EntityType(str, Enum):
     MOVIE        = "movie"
     TV_SHOW      = "tv_show"
@@ -23,6 +45,8 @@ class EntityType(str, Enum):
     STREAMER     = "streamer"
     BRAND        = "brand"
     COMPANY      = "company"
+    BOOK         = "book"
+    AUTHOR       = "author"
     UNKNOWN      = "unknown"
 
 

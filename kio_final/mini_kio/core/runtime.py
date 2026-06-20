@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from mini_kio.core.config import TELEGRAM_TOKEN
+from mini_kio.core.config import TELEGRAM_TOKEN, DISCORD_BOT_TOKEN
 
 logger = logging.getLogger(__name__)
 _CURRENT_RUNTIME: "KioRuntime | None" = None
@@ -1149,6 +1149,7 @@ def dispatch_channel_input(
     # Must happen BEFORE command_router + classifier + ai_fallback
     continuity_reply = None
     # Ensure gate3 pipeline exists and is session-scoped
+    session_id = _compute_session_id(channel, user_id)
     if not hasattr(runtime, '_gate3_pipeline'):
         from mini_kio.llm.intent_classifier import IntentClassifier
         from mini_kio.llm.intent_validator import IntentValidator
@@ -1157,7 +1158,6 @@ def dispatch_channel_input(
         from mini_kio.llm.input_normalizer import InputNormalizer
         from mini_kio.llm.conversation_responder import ConversationResponder
 
-        session_id = _compute_session_id(channel, user_id)
         runtime._gate3_pipeline = {
             'classifier': IntentClassifier(),
             'validator': IntentValidator(),
@@ -1166,20 +1166,47 @@ def dispatch_channel_input(
             'normalizer': InputNormalizer(),
             'responder': ConversationResponder(session_id=session_id),
         }
+    # Gate 5: Wire unified SessionState into ContinuityResolver and MediaIntelligenceAdapter
+    _session_state = runtime._gate3_pipeline['responder']._state
+    from mini_kio.core.continuity_resolver import ContinuityResolver
+    ContinuityResolver.set_session_state(_session_state)
+    try:
+        from mini_kio.media.media_manager import MediaManager
+        mm = MediaManager.get_instance()
+        if mm and hasattr(mm, '_intelligence_adapter') and mm._intelligence_adapter:
+            mm._intelligence_adapter.set_session_state(_session_state)
+    except Exception:
+        pass
 
-    from mini_kio.llm.conversation_responder import _handle_continuity_pre_route
-    responder = runtime._gate3_pipeline['responder']
-    session_id = _compute_session_id(channel, user_id)
-    continuity_reply = _handle_continuity_pre_route(
-        command_raw, responder._state, None, None, session_id
-    )
-    if continuity_reply:
-        emit_runtime_trace("continuity_pre_route_used", normalized=command)
-        return {
-            "success": True,
-            "message": continuity_reply,
-            "channel": channel,
-        }
+    # Sports info commands must bypass continuity — prevents stale context pollution
+    _lower_cmd = command.strip().lower()
+    _sports_continuity_skip = any(kw in _lower_cmd for kw in
+        ["standings", "table", "group ", "groups", "fixtures", "results",
+         "scores", "world cup", "league table", "points table"])
+
+    # Single-word media commands must bypass continuity and route directly to handle_command
+    _media_commands = {"resume", "play", "pause", "stop", "next", "previous",
+                       "mute", "unmute", "shuffle", "repeat"}
+    _first_word = _lower_cmd.split()[0] if _lower_cmd.split() else ""
+    _skip_continuity = _first_word in _media_commands or _sports_continuity_skip
+
+    if _sports_continuity_skip:
+        logger.info("[CONTINUITY_SKIPPED] reason=fresh_sports_information_query query=%s", _lower_cmd)
+
+    if not _skip_continuity:
+        from mini_kio.llm.conversation_responder import _handle_continuity_pre_route
+        responder = runtime._gate3_pipeline['responder']
+        session_id = _compute_session_id(channel, user_id)
+        continuity_reply = _handle_continuity_pre_route(
+            command_raw, responder._state, None, None, session_id
+        )
+        if continuity_reply:
+            emit_runtime_trace("continuity_pre_route_used", normalized=command)
+            return {
+                "success": True,
+                "message": continuity_reply,
+                "channel": channel,
+            }
 
     # ── Gate 3: Deterministic fast-path ────────────────────────────────
     try:
@@ -1201,6 +1228,27 @@ def dispatch_channel_input(
     # ── Gate 3: Orchestration pipeline for non-deterministic input ─────
     if result.get("_gate3_eligible"):
         result = _route_via_orchestration(command, channel=channel, user_id=user_id)
+        # Fix C: Sync ContinuityResolver after Gate 3 handles a contentful
+        # entity query (e.g. "Interstellar").  Only sync when the result has a
+        # meaningful contentful subject — NEVER overwrite with raw command text
+        # (which would poison memory with garbage like "Who sings it?").
+        if result.get("success"):
+            try:
+                from mini_kio.media.media_manager import MediaManager
+                mm = MediaManager.get_instance()
+                if mm and mm._intelligence_adapter:
+                    last_e = mm._intelligence_adapter._mem.get_last_entity()
+                    if last_e and last_e.name:
+                        from mini_kio.core.continuity_resolver import ContinuityResolver, DomainContinuationType
+                        ContinuityResolver.set_state_subject(last_e.name, DomainContinuationType.MEDIA)
+                        ContinuityResolver.set_state_domain(DomainContinuationType.MEDIA)
+                        logger.info("[GATE3_SYNC] updated continuity from memory subject=%s", last_e.name)
+                    else:
+                        logger.debug("[GATE3_SKIP_SYNC] no entity in memory — skipping continuity sync")
+                else:
+                    logger.debug("[GATE3_SKIP_SYNC] no intelligence adapter — skipping continuity sync")
+            except Exception as exc:
+                logger.debug("[GATE3_SYNC] sync failed: %s", exc)
     elif hasattr(runtime, '_gate3_pipeline'):
         # Bridge confirmation responses back into orchestrator.
         # When orchestrator is awaiting confirmation, "yes"/"youtube"/"spotify"
@@ -1229,6 +1277,12 @@ def dispatch_channel_input(
     target = str(result.get("target", ""))
     formatted = format_result(action, target, bool(result.get("success")), result)
     result["message"] = formatted
+
+    # Gate 5: Refresh SessionState TTL after successful dispatch
+    try:
+        _session_state.refresh_ttl()
+    except Exception:
+        pass
 
     remember_runtime_context(
         "channel_input",
@@ -1383,6 +1437,10 @@ def bootstrap_runtime() -> KioRuntime:
         emit_runtime_trace("runtime_channel_config", telegram_configured=True)
     else:
         emit_runtime_trace("runtime_channel_config", telegram_configured=False)
+    if DISCORD_BOT_TOKEN:
+        emit_runtime_trace("runtime_channel_config", discord_configured=True)
+    else:
+        emit_runtime_trace("runtime_channel_config", discord_configured=False)
 
     runtime.mark_ready()
 
@@ -1483,13 +1541,23 @@ def run_runtime() -> None:
     """
     Runtime-first entrypoint.
 
-    Telegram remains a prototype channel and is loaded only after runtime
-    bootstrap chooses to attach it.
+    Supports Telegram and/or Discord transports.
+    Channels are loaded independently — failure of one does not affect the other.
     """
     runtime = bootstrap_runtime()
 
+    # Start Discord in a daemon thread if configured
+    if DISCORD_BOT_TOKEN:
+        try:
+            from mini_kio.platform.discord_transport import start_discord_thread
+            start_discord_thread()
+        except Exception as exc:
+            logger.error("[DISCORD] failed to start: %s", exc)
+            emit_runtime_trace("runtime_channel_failure", channel="discord", error=str(exc))
+
     if not TELEGRAM_TOKEN:
-        emit_runtime_trace("runtime_ready_no_channel", runtime=get_runtime_snapshot())
+        if not DISCORD_BOT_TOKEN:
+            emit_runtime_trace("runtime_ready_no_channel", runtime=get_runtime_snapshot())
         host_runtime(runtime)
         return
 

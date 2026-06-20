@@ -150,4 +150,8 @@ class MemoryStore:
             self._global["facts"].clear()
 
     def close(self):
-        pass
+        try:
+            from mini_kio.backend.db import close_db
+            close_db()
+        except Exception:
+            pass

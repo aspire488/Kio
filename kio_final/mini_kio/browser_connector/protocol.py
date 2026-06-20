@@ -46,6 +46,7 @@ class Message:
     success: Optional[bool] = None
     error: Optional[str] = None
     script: Optional[str] = None
+    args: Optional[list] = None
     message: Optional[str] = None
     tabs: Optional[list[dict]] = None
 

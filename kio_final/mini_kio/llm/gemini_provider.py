@@ -30,7 +30,11 @@ class GeminiProvider(LLMProvider):
         self._fallback_model_name = fallback_model_name
         self._model = None
         self._fallback_model = None
-        if genai and api_key:
+        if genai is None:
+            logger.warning("Gemini provider: google-generativeai package not installed")
+        elif not api_key:
+            logger.warning("Gemini provider: API key is empty")
+        else:
             try:
                 genai.configure(api_key=api_key)
                 self._model = genai.GenerativeModel(self._model_name)
@@ -42,7 +46,8 @@ class GeminiProvider(LLMProvider):
                     except Exception:
                         logger.warning(f"Gemini provider: fallback model {self._fallback_model_name} unavailable")
                         self._fallback_model = None
-            except Exception:
+            except Exception as exc:
+                logger.warning("Gemini provider: initialization failed: %s: %s", type(exc).__name__, str(exc)[:120])
                 self._model = None
 
     @property
@@ -50,6 +55,12 @@ class GeminiProvider(LLMProvider):
         return "gemini"
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
+        if genai is None:
+            logger.warning("Gemini provider generate: package google-generativeai not installed")
+            return LLMResponse(
+                success=False, status=LLMStatus.ERROR, content="",
+                error_code="GEMINI_PACKAGE_NOT_INSTALLED", provider=self.provider_name,
+            )
         if self._model is None:
             logger.warning("Gemini provider generate: model is None (not configured)")
             return LLMResponse(

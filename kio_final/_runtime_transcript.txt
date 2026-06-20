@@ -1,0 +1,198 @@
+[RUNTIME] bootstrapped - state=ready
+
+============================================================
+QUERY: Interstellar
+RAW:   Interstellar
+------------------------------------------------------------
+TIME:  11365ms
+LEN:   753 chars
+
+? Interstellar (film)
+
+Interstellar (film) Interstellar is a 2014 epic science fiction film directed by Christopher Nolan, who co-wrote the screenplay with his brother Jonathan Nolan.
+It has an ensemble cast led by Matthew McConaughey, Anne Hathaway, Jessica Chastain, Bill Irwin, Ellen Burstyn, and Michael Caine.
+Set in a dystopian future where Earth is suffering from catastrophic blight and famine, the film follows a group of astronauts who travel through space in search of a new home for humanity.
+The film began development in 2006 from a treatment by producer Lynda Obst and theoretical physicist Kip Thorne, and was originally set to be directed by Steven Spielberg.
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: Atomic Habits
+RAW:   Atomic Habits
+------------------------------------------------------------
+TIME:  11375ms
+LEN:   975 chars
+
+? Atomic Habits by James Clear: 9780735211292 | PenguinRandomHouse.com: Books
+
+Atomic Habits by James Clear: 9780735211292 | PenguinRandomHouse.com: Books Skip to Main Content (Press Enter) ? Quiz: What Book Should You Read Next?
+? Quiz: What Book Should You Read Next?
+Best Seller Look Inside Loading Read Sample ## By James Clear ## By James Clear ## By James ClearRead by James Clear Hardcover $27.00 Published on Oct 16, 2018 | 320 Pages Add to Cart Buy from Other Retailers: Ebook Published on Oct 16, 2018 | 320 Pages Buy from Other Retailers: Audiobook Download Published on Oct 16, 2018 | 5 Hours 35 Minutes Buy from Other Retailers: See All Formats (2) + Hardcover ? Hardcover $27.00 Published on Oct 16, 2018 | 320 Pages Add to Cart Buy from Other Retailers: Ebook + Audio + ### Book Description The #1 New York Times bestseller.
+Over 25 million copies sold!Translated into 60+ languages!
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: FIFA World Cup
+RAW:   FIFA World Cup
+------------------------------------------------------------
+TIME:  11403ms
+LEN:   1845 chars
+
+? FIFA World Cup 2026?
+
+FIFA World Cup 2026? # Be there when history is madeBe there when history is made Access the FIFA World Cup 2026? through a Right-to-Ticket (RTT), available on the FIFA Collect Marketplace.Access the FIFA World Cup 2026? through a Right-to-Ticket (RTT), available on the FIFA Collect Marketplace.
+EXPLORE RTT FIFA World Cup 2026? 11 June - 19 July 2026 04 Days 16 Hours 50 mins 04 secs View matches Aramco - Power Rankings ### FIFA Power Rankings, powered by Aramco, to launch at FIFA World Cup 2026FIFA Power Rankings, powered by Aramco, to launch at FIFA World Cup 2026 https://www.fifa.com/en/articles/power-rankings-aramco As the FIFA World Cup 2026? begins next week, FIFA has announced the launch of the FIFA Power Rankings, powered by Aramco ? a pioneering system featuring a new data-led way to measure and showcase individual player performance throughout the tournament.As the FIFA World Cup 2026? begins next week, FIFA has announced the launch of the FIFA Power Rankings, powered by Aramco ? a pioneering system featuring a new data-led way to measure and showcase individual player performance throughout the tournament.
+Read more Next UpSwitzerland - Chong: Cura?ao hasn't slept since we qualified - FIFA Power Rankings, powered by Aramco, to launch at FIFA World Cup 2026 - Xhaka: We want to achieve something remarkable - Friendlies review: Germany and Portugal shine as Belgium win big - FIFA? Panini Collection App now available for fans - View the FIFA World Cup 2026 match schedule ### FIFA World Cup? MomentsFIFA World Cup? Moments new Juli?n ?lvarez ?? new Kylian Mbapp? ???? new Johan Cruyff ?? new Cristiano Ronaldo ?? new Argentina 2022 ?? new Gareth Bale ?? new Luka Modri? ?? new Lionel Messi ? new Toni Kroos ??? ---
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: Believer
+RAW:   Believer
+------------------------------------------------------------
+TIME:  1352ms
+LEN:   637 chars
+
+? Believer (Imagine Dragons song) - Wikipedia
+
+Believer (Imagine Dragons song) - Wikipedia "Believer" is a song by American pop rock band Imagine Dragons.
+The song was released on February 1, 2017, through Kidinakorner and Interscope Records as the lead single from the band's third studio album, Evolve(2017).
+It was written by the band members, Justin Tranter, Alex da Kid, and its producers Mattman & Robin.
+The music video features a boxing match between lead singer Dan Reynolds and Dolph Lundgren, marking the first music video that Lundgren appeared in.
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: The Bear
+RAW:   The Bear
+------------------------------------------------------------
+TIME:  4763ms
+LEN:   374 chars
+
+? The Bear (1988 film) - Wikipedia
+
+The Bear is a 1988 French adventure film directed by Jean-Jacques Annaud, featuring Bart the Bear and based on James Oliver Curwood's novel.
+It received praise for its realistic portrayal of wildlife.
+The film was released in North America by Tri-Star Pictures.
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: GTA VI
+RAW:   GTA VI
+------------------------------------------------------------
+TIME:  1772ms
+LEN:   39 chars
+
+I don't have information on Gta Vi yet.
+
+============================================================
+QUERY: Vaazha II
+RAW:   Vaazha II
+------------------------------------------------------------
+TIME:  1277ms
+LEN:   605 chars
+
+? Vaazha II: Biopic of a Billion Bros
+
+Vaazha II: Biopic of a Billion Bros Vaazha II: Biopic of a Billion Bros (lit.
+' Plantain II: Biopic of a Billion Bros') is a 2026 Indian Malayalam-language coming-of-age comedy-drama film directed by Savin SA (in his directorial debut) and written by Vipin Das.
+It is a spiritual sequel to Vaazha: Biopic of a Billion Boys(2024).
+The film stars Hashir H., Alan Bin Siraj, Ajin Joy and Vinayak V alongside Devaraj, Vijay Babu, Bijukuttan, Alphonse Puthren, and Sudheesh in supporting roles.
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: French Revolution
+RAW:   French Revolution
+------------------------------------------------------------
+TIME:  2309ms
+LEN:   717 chars
+
+? French Revolution
+
+French Revolution The French Revolution was a period of political and societal change in France that began with the Estates General of 1789 and ended with the Coup of 18 Brumaire on 9 November 1799.
+Many of the revolution's ideas are considered fundamental principles of liberal democracy, and its values remain central to modern French political discourse.
+It was caused by a combination of social, political, and economic factors which the existing regime proved unable to manage.
+Financial crisis and widespread social distress led to the convocation of the Estates General in May 1789, its first meeting since 1614.
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+QUERY: Quantum Tunneling
+RAW:   quantum tunneling
+------------------------------------------------------------
+TIME:  749ms
+LEN:   206 chars
+
+I couldn't process 'quantum tunneling' ? cloud intelligence is currently offline. I can still help with: opening apps, searching the web, playing media, and running diagnostics. Type 'help' for a full list.
+
+============================================================
+QUERY: Kubernetes
+RAW:   Kubernetes
+------------------------------------------------------------
+TIME:  1196ms
+LEN:   1519 chars
+
+? kubernetes/kubernetes
+
+# Repository: kubernetes/kubernetes Production-Grade Container Scheduling and Management - Stars: 123084 - Forks: 43225 - Watchers: 3256 - Open issues: 2742 - Primary language: Go - Languages: Go (97.5%), Shell (2.1%), PowerShell (0.2%), Makefile, Dockerfile, Python, Go Template, C, sed, HTML - License: Apache License 2.0 (Apache-2.0) - Topics: cncf, containers, go, kubernetes - Default branch: master - Homepage: https://kubernetes.io - Created: 2014-06-06T22:56:04Z - Last push: 2026-06-16T17:17:29Z - Contributors: 350 (top: k8s-ci-robot, liggitt, thockin, wojtek-t, brendandburns, smarterclayton, lavalamp, pohly, deads2k, mikedanese) - Releases: 803 - Latest release: v1.36.2 (2026-06-12T11:34:56Z) --- # Kubernetes (K8s) ![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/569) ![Go Report Card](https://goreportcard.com/report/github.com/kubernetes/kubernetes) !GitHub release (latest SemVer) --- Kubernetes, also known as K8s, is an open source system for managing [containerized applications] across multiple hosts.
+It provides basic mechanisms for the deployment, maintenance, and scaling of applications.
+Kubernetes builds upon a decade and a half of experience at Google running production workloads at scale using a system called [Borg], combined with best-of-breed ideas and practices from the community.
+Kubernetes is hosted by the Cloud Native Computing Foundation ([CNCF]).
+
+Would you like:
+1. Explain simply
+2. Key facts
+3. History
+4. Related topics
+
+============================================================
+VALIDATION SUMMARY
+============================================================
+
+Query                     Status               Latency    Length  
+----------------------------------------------------------------------
+Interstellar              OK                   11365ms    753     
+Atomic Habits             OK                   11375ms    975     
+FIFA World Cup            ISSUES:RAW_URL       11403ms    1845    
+Believer                  OK                   1352ms     637     
+The Bear                  OK                   4763ms     374     
+GTA VI                    ISSUES:TOO_SHORT     1772ms     39      
+Vaazha II                 OK                   1277ms     605     
+French Revolution         OK                   2309ms     717     
+Quantum Tunneling         OK                   749ms      206     
+Kubernetes                ISSUES:RAW_URL       1196ms     1519    
+
+
+Summary: 7 OK, 3 with issues
+Full transcript saved to: C:\Users\joelj\OneDrive\Desktop\Kio\kio_fixed_v3\kio_final\_runtime_transcript.txt

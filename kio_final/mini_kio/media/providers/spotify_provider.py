@@ -13,6 +13,7 @@ from typing import Optional
 
 from mini_kio.browser_connector.connector import Connector
 from mini_kio.core import config
+from mini_kio.core.async_utils import safe_run_async
 from mini_kio.media.media_session import MediaResult, MediaSession, MediaCandidate
 from mini_kio.media.media_state import MediaState, PlayerType, MediaType
 from mini_kio.media.providers import MediaProvider
@@ -481,7 +482,7 @@ class SpotifyProvider(MediaProvider):
             f"https://open.spotify.com/search/{urllib.parse.quote_plus(query)}"
         )
         try:
-            result = asyncio.run(conn.open_tab(web_url))
+            result = safe_run_async(conn.open_tab(web_url))
             if result.success:
                 tab_id = result.tab.tab_id if result.tab else None
                 logger.info("[SPOTIFY] opened web tab_id=%s", tab_id)

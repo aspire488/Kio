@@ -29,8 +29,10 @@ from typing import Any, Optional
 from mini_kio.core.execution_boundary import execute_action
 from mini_kio.core.app_operator import APP_REGISTRY, WEB_DOMAIN_ALIASES, WEB_URLS, _normalize_web_target_to_url
 from mini_kio.core import config
+from mini_kio.core.async_utils import safe_run_async
 from mini_kio.llm.identity_dataset import get_identity_answer
 from mini_kio.media.media_manager import MediaManager
+from mini_kio.media.intelligence.artifact_memory import parse_artifact_type
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +223,21 @@ def _resolve_contextual_references(command: str) -> str:
             _log_route("context_resolve", original=command, resolved=resolved)
             return resolved
 
-    # Handle "it", "that", "this" (non-media only at this point)
+    # Handle "it", "that", "this" — skip if MediaManager has an active entity
     if re.search(r"\b(it|that|this)\b", lower):
+        # Media entity guard: if MediaManager has a recent active entity, let Media Intelligence resolve pronouns
+        try:
+            from mini_kio.media.media_manager import MediaManager
+            mm = MediaManager.get_instance()
+            from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
+            mem = mm._intelligence_adapter._mem if mm and mm._intelligence_adapter else None
+            if mem:
+                last_e = mem.get_last_entity()
+                if last_e and last_e.name:
+                    logger.info("[CONTEXT_GUARD] media entity active='%s' — skipping pronoun replacement", last_e.name)
+                    return command
+        except Exception:
+            pass
         # Gate 5.1: Resolve capability registry FIRST for browser sessions
         from mini_kio.core.routing_utils import get_latest_capability
         cap = get_latest_capability()
@@ -245,11 +260,90 @@ def _resolve_contextual_references(command: str) -> str:
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
+def _is_standalone_entity_query(command: str) -> bool:
+    """Detect if command names a standalone entity that must not be continuity-corrupted.
+
+    A query is "standalone" when it has no pronoun/weak-reference words and names
+    something specific (capitalized word, interrogative + non-ref content).
+
+    Commands that are purely followup/artifact terms (e.g. "Show trailer",
+    "Latest standings", "Behind the scenes") need continuity context and are
+    NOT standalone — even if typed with a capital first letter by the user.
+    """
+    lower = command.lower().strip()
+    if not lower:
+        return False
+    # Strip punctuation from words so "it?" matches weak word "it"
+    _clean = re.sub(r'[^\w\s]', '', lower)
+    words = _clean.split()
+    # Pronouns and weak continuations are NOT standalone
+    weak = frozenset({"it", "that", "this", "they", "them", "he", "she", "again", "same", "more", "continue", "there"})
+    if set(words) & weak:
+        return False
+    # Followup/artifact/freshness commands need entity context — NOT standalone
+    followup_words = frozenset({"latest", "standings", "results", "fixtures", "highlights", "scores",
+                                 "show", "watch", "play", "trailer", "teaser", "gameplay",
+                                 "behind", "the", "scenes", "soundtrack", "interview",
+                                 "clips", "recap", "bts", "blooper",
+                                 "live", "performance", "music", "video", "lyrics", "acoustic",
+                                 "concert", "official", "update", "updates", "news",
+                                 "current", "recent", "today", "any", "group", "table",
+                                 "leader", "leading", "qualified", "eliminated", "audiobook",
+                                 "review", "summary", "author", "adaptation", "reading",
+                                 "behind-the-scenes"})
+    if words and all(w in followup_words for w in words):
+        return False
+    interrogatives = frozenset({"who", "what", "where", "when", "why", "how"})
+    first_word = words[0].lower()
+    # Capitalised first word → proper noun (likely a named entity)
+    orig_first = command.strip().split()[0] if command.strip() else ""
+    if orig_first and orig_first[0].isupper() and len(orig_first) > 1:
+        return True
+    # Interrogative + content words → specific entity question
+    if first_word in interrogatives and len(words) > 2:
+        return True
+    return False
+
+
 def handle_command(command: str) -> dict:
     """
     Route command to the correct operator.
     Always returns {"success": bool, "message": str}.
     """
+    # Fix D: Standalone entity queries bypass ContinuityResolver entirely to
+    # prevent stale memory (e.g. "Believer") from corrupting the current entity.
+    try:
+        if _is_standalone_entity_query(command):
+            from mini_kio.core.continuity_resolver import ContinuityResolver, DomainContinuationType
+            logger.info("[ENTITY_DIRECT] bypassing continuity for %r", command)
+            result = _dispatch_command(command)
+            if result is None:
+                result = {"success": False, "message": "_dispatch_command returned None", "_gate3_eligible": True}
+            ContinuityResolver.update_state(result, command, DomainContinuationType.UNKNOWN)
+            return result
+
+        from mini_kio.core.continuity_resolver import ContinuityResolver
+        from mini_kio.core.continuity_resolver import DomainContinuationType
+        resolved = ContinuityResolver.resolve(command)
+        if resolved.is_continuation:
+            logger.info("[CONTINUITY_ROUTE] domain=%s ref=%s original=%r resolved=%r",
+                        resolved.domain.value, resolved.context.reference_type if resolved.context else "",
+                        command, resolved.resolved_text)
+            command = resolved.resolved_text
+
+        result = _dispatch_command(command)
+        if result is None:
+            result = {"success": False, "message": "_dispatch_command returned None", "_gate3_eligible": True}
+
+        ContinuityResolver.update_state(result, command, resolved.domain)
+        return result
+    except Exception as e:
+        logger.exception("handle_command failed for %r", command)
+        return {"success": False, "message": f"Error: {e}", "_gate3_eligible": True}
+
+
+
+def _dispatch_command(command: str) -> dict:
     command = command.strip()
 
     if not command:
@@ -286,13 +380,55 @@ def handle_command(command: str) -> dict:
         _log_route("route", intent="forbidden_blocked", target=lower)
         return {"success": False, "message": "Error: Forbidden system target blocked by security policy."}
 
-    # ── GREETINGS ─────────────────────────────────────────────────────────
+    # ── GREETINGS & INTENT PRESERVATION ──────────────────────────────────
+    import random
+    greetings = ["hi", "hello", "hey", "yo", "hola", "sup", "wassup", "what's up", "whats up", "bro", "broo", "heyy", "good morning", "good evening"]
+    kio_names = ["kio", "bro", "joel"]
+    
+    # Rotating responses for greeting-only
+    greeting_responses = [
+        "Hey.", "Yo.", "What's up?", "Hello.", "How can I help?", 
+        "Ready.", "KIO here.", "Ready when you are.", "Good morning.", 
+        "Good evening.", "What's on your mind?", "At your service."
+    ]
+    
+    # 1. Strip greeting + name if at the start
+    words = lower_clean.split()
+    if words:
+        first = words[0].rstrip(",.!")
+        second = words[1].rstrip(",.!") if len(words) > 1 else ""
+        
+        stripped = False
+        if first in greetings:
+            if second in kio_names:
+                # "hi kio ..."
+                remaining = " ".join(words[2:])
+                stripped = True
+            else:
+                # "hi ..."
+                remaining = " ".join(words[1:])
+                stripped = True
+        elif first in kio_names:
+            # "kio ..."
+            remaining = " ".join(words[1:])
+            stripped = True
+            
+        if stripped:
+            if remaining:
+                logger.info("[GREETING_STRIP] original=%r remaining=%r", lower_clean, remaining)
+                # Recursively handle the remaining command
+                return handle_command(remaining)
+            else:
+                # Greeting only
+                return {"success": True, "message": random.choice(greeting_responses)}
+
+    # Fallback legacy greetings (exact matches)
     if lower_clean == "hello":
-        return {"success": True, "message": "Hello."}
+        return {"success": True, "message": random.choice(greeting_responses)}
     if lower_clean in ("hi", "hey"):
-        return {"success": True, "message": "Hi there."}
+        return {"success": True, "message": random.choice(greeting_responses)}
     if lower_clean in ("yo", "wassup", "what's up", "whats up"):
-        return {"success": True, "message": "KIO here."}
+        return {"success": True, "message": random.choice(greeting_responses)}
     if lower_clean in ("how are you", "how are you doing"):
         return {"success": True, "message": "Operational."}
     if lower_clean in ("bye", "bue"):
@@ -358,7 +494,7 @@ def handle_command(command: str) -> dict:
                                 import urllib.parse
                                 _url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(clean_query)}"
                                 try:
-                                    _result = asyncio.run(conn.open_tab(_url))
+                                    _result = safe_run_async(conn.open_tab(_url))
                                     if _result.success:
                                         logger.info("[BROWSER_CONNECTOR_SEARCH] query=%s", clean_query)
                                         return {"success": True, "message": f"Searched YouTube: {clean_query}"}
@@ -382,7 +518,7 @@ def handle_command(command: str) -> dict:
                         import urllib.parse
                         _url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(clean_query)}"
                         try:
-                            _result = asyncio.run(conn.open_tab(_url))
+                            _result = safe_run_async(conn.open_tab(_url))
                             if _result.success:
                                 logger.info("[BROWSER_CONNECTOR_SEARCH] query=%s", clean_query)
                                 return {"success": True, "message": f"Searched YouTube: {clean_query}"}
@@ -414,6 +550,17 @@ def handle_command(command: str) -> dict:
             target_lower = target.lower()
             words        = set(target_lower.split())
 
+            # Media artifact open: "open audiobook", "open trailer", "open gameplay"
+            # Route through media intelligence for entity-aware resolution
+            _artifact = parse_artifact_type(target_lower)
+            if _artifact is not None:
+                _log_route("route", intent="open_media_artifact", artifact=_artifact.value, target=target_lower)
+                _mgr = MediaManager.get_instance()
+                _last = _mgr._intelligence_adapter._mem.get_last_entity() if _mgr._intelligence_adapter else None
+                if _last and _last.name:
+                    return _mgr.play(f"{_last.name} {target}", platform="youtube")
+                return _mgr.play(target, platform="youtube")
+
             # Folder detection BEFORE launch_app
             if words & _FOLDER_KEYWORDS:
                 folder = target_lower.replace("folder", "").strip()
@@ -441,7 +588,7 @@ def handle_command(command: str) -> dict:
                     url = _normalize_web_target_to_url(target)
                     if url:
                         try:
-                            result = asyncio.run(conn.open_tab(url))
+                            result = safe_run_async(conn.open_tab(url))
                             if result.success:
                                 _log_route("route", intent="connector_open", target=target)
                                 from mini_kio.platform.window_activation import try_activate_browser
@@ -480,7 +627,7 @@ def handle_command(command: str) -> dict:
             conn = _get_connector()
             if conn and conn.is_connected():
                 try:
-                    result = asyncio.run(conn.focus_tab(target))
+                    result = safe_run_async(conn.focus_tab(target))
                     if result.success:
                         _log_route("route", intent="connector_focus", target=target)
                         from mini_kio.platform.window_activation import try_activate_browser
@@ -527,7 +674,7 @@ def handle_command(command: str) -> dict:
             conn = _get_connector()
             if conn and conn.is_connected():
                 try:
-                    result = asyncio.run(conn.list_tabs())
+                    result = safe_run_async(conn.list_tabs())
                     if result.success and result.tabs:
                         lines = []
                         for idx, t in enumerate(result.tabs, start=1):
@@ -578,7 +725,7 @@ def handle_command(command: str) -> dict:
                 conn = _get_connector()
                 if conn and conn.is_connected():
                     try:
-                        result = asyncio.run(conn.close_tab(target))
+                        result = safe_run_async(conn.close_tab(target))
                         if result.success:
                             _log_route("route", intent="connector_close", target=target)
                             # Clean up any browser session record for this target
@@ -651,8 +798,17 @@ def handle_command(command: str) -> dict:
             _log_route("route", intent="close_app", target=target)
             return execute_action("close_app", target)
 
-        # ── MEDIA COMMAND ROUTING ─────────────────────────────────────────────
+        # ── MEDIA TRANSPORT (must return early) ─────────────────────────────
         _mm = MediaManager.get_instance()
+        _words = lower.split()
+        
+        # Next / Previous (must route to MediaManager, never continuation)
+        if lower in ("next", "next video", "next track", "skip", "skip video"):
+            _log_route("route", intent="next_track")
+            return _mm.next_track()
+        if lower in ("previous", "prev", "previous video", "previous track", "go back"):
+            _log_route("route", intent="previous_track")
+            return _mm.previous_track()
 
         # ── Fuzzy Intent Correction ──────────────────────────────────────────
         _corrected = _mm.correct_fuzzy(lower)
@@ -660,23 +816,43 @@ def handle_command(command: str) -> dict:
             _log_route("route", intent="fuzzy_correction", original=lower, corrected=_corrected)
             lower = _corrected
 
+        # ── Artifact Typo Normalization ──────────────────────────────────────
+        _artifact_typos = {"hihlighs": "highlights", "higlights": "highlights",
+                           "hightlights": "highlights", "highlites": "highlights",
+                           "trailor": "trailer", "tralier": "trailer",
+                           "game play": "gameplay"}
+        for _typo, _correct in _artifact_typos.items():
+            if _typo in lower:
+                logger.info("[QUERY_NORMALIZED] typo=%s -> %s", _typo, _correct)
+                lower = lower.replace(_typo, _correct)
+
+        # ── Sports Typo Normalization (before routing) ───────────────────────
+        _sports_typos = {"fif ": "fifa ", "fif ": "fifa ",
+                         "worldcup": "world cup",
+                         "leage": "league", "leauge": "league",
+                         "uefaa": "uefa",
+                         "champions leauge": "champions league",
+                         "champions leage": "champions league",
+                         "premier leage": "premier league",
+                         "premier leauge": "premier league"}
+        _before = lower
+        for _typo, _correct in _sports_typos.items():
+            if _typo in lower:
+                lower = lower.replace(_typo, _correct)
+        if lower != _before:
+            logger.info("[QUERY_NORMALIZED] sports_typo='%s' -> '%s'", _before, lower)
+
         # ── Natural Language Seek ────────────────────────────────────────────
         _seek_result = _mm.process_nl_seek(lower)
         if _seek_result is not None:
             _log_route("route", intent="nl_seek", text=lower)
             return _seek_result
 
-        # ── Next / Previous (must route to MediaManager, never continuation) ─
-        if lower == "next":
-            _log_route("route", intent="next_track")
-            return _mm.next_track()
-
-        if lower == "previous":
-            _log_route("route", intent="previous_track")
-            return _mm.previous_track()
-
         # ── Resolve references (it / this / that) against Media Context ──────
-        _resolved = _mm.resolve_query(lower)
+        _resolved = None
+        # Only resolve references for media-like queries (short, no question marks)
+        if len(lower) < 40 and "?" not in lower and not lower.startswith(("what", "how", "why", "when", "where", "who", "tell me", "can you", "do you", "is there")):
+            _resolved = _mm.resolve_query(lower)
         if _resolved is not None and _resolved != lower:
             logger.info("[ROUTER] resolved reference '%s' -> '%s'", lower, _resolved)
             _log_route("route", intent="context_resolve", original=lower, resolved=_resolved)
@@ -685,18 +861,28 @@ def handle_command(command: str) -> dict:
             resolved = _resolved_play or _resolved
             return _mm.play(resolved, platform=_mm.get_context().get_provider_for_reference())
 
-        # ── Accept media offer (yes / play it after discovery or intelligence) ─
+        # ── Accept media offer (yes / play it after info query, discovery or intelligence) ─
         _accept_first = lower.split()[0] if lower else ""
-        if (_accept_first in ("yes", "yeah", "sure", "ok") or
+        if (_accept_first in ("yes", "yeah", "sure", "ok", "okay") or
               lower in ("play it", "play that", "watch it", "watch that",
+                        "show it", "show me", "go ahead", "do it",
                         "play video", "play the first one")):
-            # Try intelligence offer first
+            # Priority 1: Pending context from process_information_query
+            _ctx_pending = _mm.get_context().pending_action
+            if _ctx_pending == "play_media":
+                _pending_q = _mm.get_context().pending_media_query
+                if _pending_q:
+                    _log_route("route", intent="resolve_pending_media", query=_pending_q)
+                    _mm.get_context().pending_action = ""
+                    _mm.get_context().pending_media_query = ""
+                    return _mm.play(_pending_q)
+            # Priority 2: Intelligence offer
             if _mm.has_intelligence_offer():
                 _log_route("route", intent="accept_intelligence_offer")
                 result = _mm.accept_intelligence_offer()
                 if result:
                     return result
-            # Fall back to legacy discovery offer
+            # Priority 3: Legacy discovery offer
             last_offer = _mm.get_last_offer()
             if last_offer:
                 _log_route("route", intent="accept_media_offer")
@@ -705,11 +891,96 @@ def handle_command(command: str) -> dict:
                     return result
                 return {"success": True, "message": "The media offer is no longer available."}
             if _accept_first in ("yes", "yeah", "sure", "ok"):
-                return {"success": True, "message": "I don't have a pending offer to act on."}
+                # Don't return "no pending offer" — fall through to process_followup
+                pass
+
+        # ── Intelligence: Artifact + Context Follow-up (before info query routing) ─
+        _pending_action = _mm.get_context().pending_action
+        _pending_query = _mm.get_context().pending_media_query
+        _ctx_events = _mm.get_context().recent_events
+        if _pending_action == "play_media" and _pending_query:
+            # Do NOT trigger artifact play for interrogative queries ("who directed it",
+            # "what happened", etc.) — these are information requests, not artifact
+            # playback commands, even if the resolved query happens to contain keywords
+            # like "trailer" or "highlights".
+            _interrogatives = frozenset({"who", "what", "where", "when", "why", "how"})
+            _first_word = lower.split()[0] if lower.split() else ""
+            if _first_word not in _interrogatives:
+                _artifact_keywords = {"trailer", "highlights", "gameplay", "music video",
+                                      "trailer pls", "highlights pls", "gameplay pls",
+                                      "clips", "clip"}
+                if any(kw in lower for kw in _artifact_keywords):
+                    _log_route("route", intent="resolve_artifact_pending", text=lower, query=_pending_query)
+                    _result = _mm.play(_pending_query)
+                    # Only clear pending context if playback actually started
+                    _msg = (_result.get("message") or "").lower()
+                    if _result.get("success") and "youtube" not in _msg and "spotify" not in _msg and "what would you like" not in _msg:
+                        _mm.get_context().pending_action = ""
+                        _mm.get_context().pending_media_query = ""
+                    return _result
+        if _ctx_events:
+            _event_refs = ["what happened", "tell me about", "tell me more",
+                           "who scored", "how did", "the first", "the second",
+                           "the third", "that match", "that game",
+                           "play it", "show it", "highlights", "trailer"]
+            if any(p in lower for p in _event_refs):
+                _log_route("route", intent="context_event_followup", text=lower)
+                _efu = _mm.process_followup(lower)
+                if _efu is not None:
+                    return _efu
+
+        # ── Intelligence: Sports Information Queries (must come before general info) ─
+        _sports_info_keywords = ["standings", "table", "group ", "groups",
+                                 "fixtures", "fixture", "results", "match ",
+                                 " matches", "score", "scores", "points table",
+                                 "league table", "world cup"]
+        _is_sports_info = any(kw in lower for kw in _sports_info_keywords)
+        if _is_sports_info and not lower.startswith(("play ", "watch ")):
+            _log_route("route", intent="sports_information_query", text=lower)
+            logger.info("[SPORTS_ROUTE_MATCH] query=%s reason=sports_keyword_match", lower)
+            return _mm.process_information_query(command)
+
+        # ── Intelligence: Information-First Queries ───────────────────────────
+        _info_prefixes = ("latest ", "what's the latest ", "what is the latest ",
+                          "what's new ", "what is new ", "tell me about ",
+                          "news about ", "news on ", "scores", "score ")
+        _is_info = lower.startswith(_info_prefixes) or any(
+            kw in lower for kw in [" match", " score", " update", " news", " highlights"]
+        )
+        # Exclude play/watch commands from info routing
+        if _is_info and not lower.startswith(("play ", "watch ")):
+            _log_route("route", intent="information_query", text=lower)
+            return _mm.process_information_query(command)
+
+        # ── Intelligence: "play something similar" ──────────────────────────
+        if lower.startswith("play som") and ("similar" in lower or "like that" in lower or "like this" in lower):
+            _ctx = _mm.get_context()
+            _ctx_topic = _ctx.current_topic or _ctx.last_query
+            if _ctx_topic:
+                _sim_query = f"similar to {_ctx_topic}"
+                _log_route("route", intent="play_similar", topic=_ctx_topic)
+                return _mm.play(_sim_query, platform="youtube")
+            return {"success": True, "message": "I need context to find similar content."}
+
+        # ── Intelligence: "play another" / "play more" ──────────────────────
+        if lower.startswith("play another") or lower.startswith("play more"):
+            _ctx = _mm.get_context()
+            _ctx_topic = _ctx.current_topic or _ctx.current_artist or _ctx.last_query
+            if _ctx_topic:
+                _more_query = f"more like {_ctx_topic}"
+                _log_route("route", intent="play_more_like", topic=_ctx_topic)
+                return _mm.play(_more_query, platform="youtube")
 
         # ── PLAY ─────────────────────────────────────────────────────────────
         if lower.startswith("play "):
             query = command[5:].strip()
+            logger.info("[PLAY_DISPATCH_TRACE] raw_command=%r query=%r", command, query)
+            # Special: "play highlights" uses media context topic
+            if query.lower() in ("highlights", "highlights video", "highlights clip"):
+                _ctx_topic = _mm.get_context().current_topic
+                if _ctx_topic:
+                    _log_route("route", intent="play_contextual_highlights", topic=_ctx_topic)
+                    return _mm.play(_ctx_topic, platform="youtube")
             # Check for explicit platform separators
             for sep in [" on ", " in ", " using "]:
                 if sep in query:
@@ -725,6 +996,7 @@ def handle_command(command: str) -> dict:
             # Resolve references in bare play query
             resolved = _mm.resolve_query(query)
             final_query = resolved if resolved else query
+            logger.info("[PLAY_DISPATCH_TRACE] final_query=%r", final_query)
             return _mm.play(final_query)
 
         # ── WATCH ────────────────────────────────────────────────────────────
@@ -746,6 +1018,14 @@ def handle_command(command: str) -> dict:
             return _mm.play(final_query, platform="youtube")
 
         # ── SEARCH YOUTUBE ────────────────────────────────────────────────────
+        if lower.startswith("open "):
+            query = command[5:].strip()
+            # Open an audiobook, document, etc — route as play
+            resolved = _mm.resolve_query(query)
+            final_query = resolved if resolved else query
+            logger.info("[OPEN_DISPATCH] query=%s resolved=%s", query, final_query)
+            return _mm.play(final_query)
+
         if lower.startswith("search youtube "):
             query = command[15:].strip()
             return execute_action("search_youtube", query)
@@ -755,24 +1035,43 @@ def handle_command(command: str) -> dict:
             _resolved = _mm.resolve_query(query)
             _final = _resolved if _resolved else query
             return _mm.play(_final, platform="youtube")
-
-        # ── Intelligence: Follow-up Detection ────────────────────────────────
-        _intel_fu = _mm.process_followup(lower)
-        if _intel_fu is not None:
-            _log_route("route", intent="intelligence_followup", text=lower)
-            return _intel_fu
+        if lower in ("youtube", "spotify") and _mm.get_context().pending_action == "play_media":
+            _pending_q = _mm.get_context().pending_media_query
+            if _pending_q:
+                _log_route("route", intent="platform_confirm", platform=lower, query=_pending_q)
+                _mm.get_context().pending_action = ""
+                _mm.get_context().pending_media_query = ""
+                return _mm.play(_pending_q, platform=lower)
 
         # ── TRANSPORT CONTROLS ────────────────────────────────────────────────
+        # MUST come before intelligence followup — transport commands are terminal
         _words = lower.split()
         _media_main = _words[0] if _words else ""
 
-        if lower == "volume up":
+        # Parameterized volume commands (e.g., "set volume to 85", "volume 70")
+        volume_match = re.search(r"(?:set|increase|decrease)?\s*volume(?:\s*to)?\s*(\d+)", lower)
+        if volume_match:
+            try:
+                level = int(volume_match.group(1))
+                if 0 <= level <= 100:
+                    _log_route("route", intent="set_volume", level=level)
+                    return _mm.set_volume(level)
+                else:
+                    return {"success": False, "message": "Volume level must be between 0 and 100."}
+            except ValueError:
+                pass # Fall through to other volume commands if parsing fails
+
+        if lower in ("volume up", "increase volume", "turn it up", "louder"):
             return _mm.volume_up()
-        if lower == "volume down":
+        if lower in ("volume down", "decrease volume", "turn it down", "quieter", "lower volume"):
             return _mm.volume_down()
-        if lower == "seek forward":
+        if lower in ("seek forward", "seek ahead"):
             return _mm.seek_forward()
-        if lower == "seek backward":
+        if lower in ("seek backward", "seek back"):
+            return _mm.seek_backward()
+        if lower.startswith("seek forward "):
+            return _mm.seek_forward()
+        if lower.startswith("seek backward "):
             return _mm.seek_backward()
         if _media_main in ("resume", "continue"):
             return _mm.resume()
@@ -786,8 +1085,18 @@ def handle_command(command: str) -> dict:
             return _mm.mute()
         if _media_main == "unmute":
             return _mm.unmute()
+        if lower in ("next", "next video", "next track", "skip"):
+            return _mm.next_track()
+        if lower in ("previous", "prev", "previous video", "previous track", "go back"):
+            return _mm.previous_track()
         if lower == "play":
             return _mm.play()
+
+        # ── Intelligence: Follow-up Detection ────────────────────────────────
+        _intel_fu = _mm.process_followup(lower)
+        if _intel_fu is not None:
+            _log_route("route", intent="intelligence_followup", text=lower)
+            return _intel_fu
 
         # ── SYSTEM ────────────────────────────────────────────────────────────
         if lower in ("shutdown", "shutdown computer", "shut down"):
@@ -853,6 +1162,53 @@ def handle_command(command: str) -> dict:
 
         if "help" in lower:
             return _show_help()
+
+        # ── INTERROGATIVE FOLLOWUP ROUTING ───────────────────────────────────
+        # Queries like "who composed the soundtrack", "who directed it" that
+        # reach this point are followup role questions about the current media
+        # entity.  Route them through Media Intelligence for entity-aware
+        # resolution instead of falling through to Gate 3 (which has no
+        # MediaEntityMemory context).
+        _interrogatives = frozenset({"who", "what", "where", "when", "why", "how"})
+        _first_w = lower.split()[0] if lower.split() else ""
+        if _first_w in _interrogatives and len(lower.split()) >= 2:
+            _log_route("route", intent="interrogative_followup", text=command)
+            return _mm.process_information_query(command)
+
+        # ── ENTITY INFORMATION QUERY ──────────────────────────────────────────
+        # Standalone proper noun queries (e.g. "The Bear", "Interstellar") that
+        # reach this point were not caught by info prefixes or followup detection.
+        # Route through Media Intelligence to resolve the entity.
+        _orig_first = command.strip().split()[0] if command.strip() else ""
+        _skip_entity = {"help", "ping", "status", "shutdown", "restart", "lock",
+                         "uptime", "ram", "cpu", "recovery", "recover"}
+        _two_word_stop = {"who", "what", "where", "when", "why", "how", "yes", "no",
+                          "play", "watch", "show", "tell", "do", "is", "are", "was",
+                          "the", "a", "an", "i", "you", "we", "they", "he", "she",
+                          "it", "that", "this", "there", "my", "your", "for", "to"}
+        if (_orig_first and _orig_first[0].isupper() and len(_orig_first) > 1
+                and _first_w not in _skip_entity
+                and _first_w not in _two_word_stop):
+            _log_route("route", intent="entity_information_query", text=command)
+            return _mm.process_information_query(command)
+        # Two-word stop cases: "The Bear" starts with "The" but is an entity
+        _second_cap = False
+        if len(words) >= 2:
+            _second_word_orig = command.strip().split()[1] if len(command.strip().split()) > 1 else ""
+            _second_cap = bool(_second_word_orig and _second_word_orig[0].isupper())
+        if _first_w in ("the", "a", "an") and _second_cap:
+            _log_route("route", intent="entity_information_query", text=command)
+            return _mm.process_information_query(command)
+
+        # ── "I loved X" / "I enjoyed X" ROUTING ─────────────────────────────────
+        # Statements like "I loved Atomic Habits", "I enjoy Imagine Dragons"
+        # should extract the entity and route through media intelligence to register
+        # the entity for followup continuity (recommendations, similar, etc.).
+        _i_loved = re.match(r"i\s+(loved|liked|enjoy(?:ed)?|watched|read|listen(?:ed)?\s+to)\s+(.+)", lower)
+        if _i_loved and len(_i_loved.group(2)) > 2:
+            entity_text = _i_loved.group(2).strip().strip(".,!?;:'\"")
+            _log_route("route", intent="entity_information_query", text=entity_text)
+            return _mm.process_information_query(entity_text)
 
         # ── AI FALLBACK ───────────────────────────────────────────────────────
         _log_route("route", intent="ai_fallback", text_len=len(command))
@@ -947,7 +1303,7 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
             close_success = False
             if conn and conn.is_connected():
                 try:
-                    close_result = asyncio.run(conn.close_tab(target))
+                    close_result = safe_run_async(conn.close_tab(target))
                     close_success = close_result.success
                     close_error = close_result.error or ""
                 except BaseException as exc:
@@ -986,7 +1342,7 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
                 focus_success = False
                 focus_error = ""
                 try:
-                    focus_result = asyncio.run(conn.focus_tab(target))
+                    focus_result = safe_run_async(conn.focus_tab(target))
                     focus_success = focus_result.success
                     focus_error = focus_result.error or ""
                 except BaseException as exc:
@@ -1037,7 +1393,7 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
                 open_success = False
                 open_error = ""
                 try:
-                    open_result = asyncio.run(conn.open_tab(url))
+                    open_result = safe_run_async(conn.open_tab(url))
                     open_success = open_result.success
                     open_error = open_result.error or ""
                 except BaseException as exc:
@@ -1137,16 +1493,16 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
 # Telegram-facing entry point
 # ---------------------------------------------------------------------------
 
-def route(text: str, user_id: int = 0) -> str:
+def route(text: str, user_id: int = 0, channel: str = "telegram") -> str:
     """
     Channel-facing dispatcher (compat wrapper).
     Returns a plain-text string.  Never raises.
     """
     try:
-        _log_route("route_entry", user_id=user_id, text_len=len(text))
+        _log_route("route_entry", user_id=user_id, channel=channel, text_len=len(text))
         from mini_kio.core.runtime import dispatch_channel_input, format_channel_reply
 
-        result = dispatch_channel_input(text, channel="telegram", user_id=user_id)
+        result = dispatch_channel_input(text, channel=channel, user_id=user_id)
         return format_channel_reply(result)
     except BaseException as exc:
         logger.exception(f"route() crashed: {exc}")

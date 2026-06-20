@@ -1,0 +1,17 @@
+KIO AUDIT
+Generated: 06/20/2026 17:25:23
+
+Python Files:
+6004
+
+Tests:
+389
+
+Database Files:
+1
+
+Total Files:
+11825
+
+Repo Size:
+349.04 MB

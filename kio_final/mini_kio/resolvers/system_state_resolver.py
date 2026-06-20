@@ -2,6 +2,7 @@ import logging
 import asyncio
 import re
 from typing import Optional
+from mini_kio.core.async_utils import safe_run_async
 from mini_kio.resolvers.base import BaseResolver
 from mini_kio.llm.session_state import SessionState
 from mini_kio.llm.trace_context import TraceContext
@@ -24,13 +25,7 @@ class SystemStateResolver(BaseResolver):
                 if conn and conn.is_connected():
                     trace.add_step("SystemStateResolver: querying TabRegistry")
                     try:
-                        # Attempt sync run for TabRegistry
-                        from mini_kio.core.routing_utils import _run_sync
-                        # Actually we can't easily import _run_sync if it doesn't exist.
-                        # Let's use nest_asyncio if needed, like in Responder.
-                        import nest_asyncio
-                        nest_asyncio.apply()
-                        result = asyncio.run(conn.list_tabs())
+                        result = safe_run_async(conn.list_tabs())
                         if result.success and result.tabs:
                             titles = [t.title or t.url for t in result.tabs]
                             return f"Open browser tabs: {', '.join(titles)}."

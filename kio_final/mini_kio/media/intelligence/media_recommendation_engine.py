@@ -13,11 +13,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from media_entity_memory import (
+from mini_kio.media.intelligence.media_entity_memory import (
     EntityType, MediaEntityMemory, MediaProvider, ResolvedEntity
 )
-from media_preference_model import MediaPreferenceModel, ScoredCandidate
-from media_reference_resolver import (
+from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel, ScoredCandidate
+from mini_kio.media.intelligence.media_reference_resolver import (
     MediaReferenceResolver, ReferenceResolution, ReferenceType
 )
 
@@ -173,9 +173,11 @@ class MediaRecommendationEngine:
     def _build_request(self, utterance: str, ref: ReferenceResolution) -> RecommendationRequest:
         text = utterance.lower()
 
-        # Similar to last track
-        if re.search(r"\b(something similar|more like (this|that)|similar (songs?|tracks?|music))\b", text):
+        # Similar to last track or watch next
+        if re.search(r"\b(something similar|more like (this|that)|similar)\b", text):
             return self._similar_request(utterance)
+        if re.search(r"\b(what should i (watch|listen to?)\s+(next|today)|what to (watch|listen)|(watch|listen) next|next to (watch|listen))\b", text):
+            return self._next_request(utterance)
 
         # Mood
         if ref.reference_type == ReferenceType.MOOD and ref.mood:
@@ -248,18 +250,109 @@ class MediaRecommendationEngine:
             search_query="trending music 2024",
         )
 
+    def _next_request(self, utterance: str) -> RecommendationRequest:
+        """Handle 'what should I watch/listen to next' patterns."""
+        last = self._mem.get_last_entity()
+        if last:
+            if last.entity_type in (EntityType.MOVIE, EntityType.TV_SHOW):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"movies like {last.name} similar films recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type == EntityType.SONG:
+                artist = last.metadata.get("artist", "")
+                similar_list = _SIMILAR_ARTISTS.get(artist.lower(), [])
+                query = f"{similar_list[0]} top songs" if similar_list else f"music similar to {last.name} songs"
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_ARTIST,
+                    seed_entity=last,
+                    seed_artist=artist,
+                    search_query=query,
+                    provider_hint=MediaProvider.SPOTIFY,
+                )
+            if last.entity_type in (EntityType.BOOK, EntityType.AUTHOR):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"books like {last.name} similar reads recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type == EntityType.GAME:
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"games like {last.name} similar titles recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type in (EntityType.SPORTS_PLAYER, EntityType.SPORTS_TEAM):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"sports {last.name} similar teams recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+        return RecommendationRequest(
+            utterance=utterance,
+            strategy=RecommendationStrategy.TRENDING,
+            search_query="trending movies 2026",
+        )
+
     def _similar_request(self, utterance: str) -> RecommendationRequest:
         last = self._mem.get_last_track() or self._mem.get_last_entity()
         artist = None
-        query  = "similar popular music"
+        query  = "trending popular music 2026"
 
         if last:
+            if last.entity_type in (EntityType.MOVIE, EntityType.TV_SHOW):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"movies like {last.name} similar films recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type in (EntityType.BOOK, EntityType.AUTHOR):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"books like {last.name} similar reads recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type == EntityType.GAME:
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"games like {last.name} similar titles recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
+            if last.entity_type in (EntityType.SPORTS_PLAYER, EntityType.SPORTS_TEAM):
+                return RecommendationRequest(
+                    utterance=utterance,
+                    strategy=RecommendationStrategy.SIMILAR_GENRE,
+                    seed_entity=last,
+                    search_query=f"sports {last.name} similar teams recommendations",
+                    provider_hint=MediaProvider.UNKNOWN,
+                )
             artist = last.metadata.get("artist", "")
-            similar_list = _SIMILAR_ARTISTS.get(artist.lower(), [])
-            if similar_list:
-                query = f"{similar_list[0]} top songs"
+            if artist:
+                similar_list = _SIMILAR_ARTISTS.get(artist.lower(), [])
+                if similar_list:
+                    query = f"{similar_list[0]} top songs"
+                else:
+                    query = f"{artist} related artists music"
             else:
-                query = f"{artist} related artists music"
+                # Use entity name as seed
+                name = last.name if last else ""
+                query = f"music similar to {name} songs" if name else "trending popular music 2026"
 
         return RecommendationRequest(
             utterance=utterance,

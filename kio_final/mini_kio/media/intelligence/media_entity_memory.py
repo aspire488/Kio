@@ -120,7 +120,23 @@ class MediaEntityMemory:
         """Update all relevant last_* keys from a single entity."""
         with self._lock:
             et = entity.entity_type
-            self.set("last_entity", entity.to_dict(), self.TTL_LAST_SESSION)
+            
+            # PHASE 4: Context Isolation
+            # ONLY update last_entity if it's a clear media entity
+            # Browser apps (Telegram, Chrome) or general companies should NOT overwrite the "Reference Subject"
+            media_entities = {
+                EntityType.SONG, EntityType.ALBUM, EntityType.MUSIC_ARTIST,
+                EntityType.MOVIE, EntityType.TV_SHOW, EntityType.ACTOR,
+                EntityType.SPORTS_PLAYER, EntityType.SPORTS_TEAM,
+                EntityType.GAME, EntityType.PLAYLIST, EntityType.YOUTUBER,
+                EntityType.STREAMER, EntityType.BOOK, EntityType.AUTHOR,
+                EntityType.UNKNOWN,
+            }
+            
+            if et in media_entities:
+                self.set("last_entity", entity.to_dict(), self.TTL_LAST_SESSION)
+                print(f"[MEDIA_CONTEXT] entity={entity.name}") # Required log
+            
             if et == EntityType.SONG:
                 self.set("last_track", entity.to_dict(), self.TTL_LAST_TRACK)
                 if artist := entity.metadata.get("artist"):

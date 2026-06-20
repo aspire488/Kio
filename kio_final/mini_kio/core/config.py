@@ -20,8 +20,17 @@ def _reset_env_loaded():
 
 _ensure_env_loaded()
 
+# ── Discord Configuration ────────────────────────────────────────
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+DISCORD_APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID", "").strip()
+DISCORD_ENABLED = bool(DISCORD_BOT_TOKEN)
+
 # ── Telegram Configuration ────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+# Proxy for Telegram Bot API. Supports socks5://, http://, https://
+# Falls back to HTTPS_PROXY / https_proxy env var if not set.
+_raw_tg_proxy = os.getenv("TELEGRAM_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip() or os.getenv("https_proxy", "").strip()
+TELEGRAM_PROXY = _raw_tg_proxy if _raw_tg_proxy else None
 
 allowed_users = os.getenv("ALLOWED_USER_IDS", "")
 ALLOWED_USER_IDS = [
@@ -109,6 +118,13 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/ap
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat-v3-0324:free")
 OPENROUTER_TIMEOUT_S = float(os.getenv("OPENROUTER_TIMEOUT_S", "12.0"))
 OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "1024"))
+
+# ── Ollama Configuration (local LLM fallback) ─────────────────────
+OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "true").lower() == "true"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "30.0"))
+OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "1024"))
 
 # ── Exa Search Configuration ──────────────────────────────────────
 EXA_API_KEY = os.getenv("EXA_API_KEY", "")
