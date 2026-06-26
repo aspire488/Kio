@@ -1,14 +1,51 @@
 import asyncio
 import logging
-import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
-import requests
-from mini_kio.core.config import GEMINI_ENABLED, GEMINI_TIMEOUT_S, GEMINI_MAX_TOKENS
+from mini_kio.core import config as kio_config
 from mini_kio.core.llm_router import ask_llm
 
 logger = logging.getLogger(__name__)
+
+# ── AuraClient singleton (lazy) ────────────────────────────────────
+_aura_client: Optional["AuraClient"] = None
+
+
+def _get_aura_client():
+    global _aura_client
+    if _aura_client is None:
+        from mini_kio.aura import AuraClient
+        _aura_client = AuraClient()
+    return _aura_client
+
+
+# ── AURA response extraction ───────────────────────────────────────
+
+def _extract_aura_context(result: dict) -> list[dict[str, Any]]:
+    """Extract context items from an AURA retrieve() response dict.
+
+    Accepts multiple response shapes:
+      {"context": [{"text": ..., "score": ...}, ...]}
+      {"results": [{"text": ..., "score": ...}, ...]}
+      {"response": [{"text": ..., "score": ...}, ...]}
+    Returns empty list on any mismatch.
+    """
+    items: list[dict[str, Any]] = []
+    for key in ("context", "results", "response", "memories", "documents"):
+        raw = result.get(key)
+        if isinstance(raw, list):
+            items = raw
+            break
+    if not items:
+        # Single-document response
+        text_val = result.get("text") or result.get("content") or result.get("response")
+        if isinstance(text_val, str):
+            items = [{"text": text_val, "score": 1.0}]
+    return items
+
+
+# ── Sanitizer ──────────────────────────────────────────────────────
 
 _EXECUTION_CLAIM_RE = re.compile(
     r"\b(I'll\s+(?:open|close|execute|launch|run|start|stop|kill)\s+|"
@@ -24,6 +61,7 @@ _AUTHORITY_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def _sanitize_llm_output(text: str) -> str:
     """Remove execution claims, authority hallucinations, and reasoning blocks."""
     if text.startswith("KIO:"):
@@ -33,43 +71,58 @@ def _sanitize_llm_output(text: str) -> str:
     text = _AUTHORITY_CLAIM_RE.sub("", text)
     return text.strip().strip('"').strip("'")
 
+
+# ── Main entry point ───────────────────────────────────────────────
+
+
 def ask_llm_sync(query: str, system_prompt: Optional[str] = None, timeout: float = 20.0, max_tokens: int = 400, task_type: str = "chat") -> Optional[str]:
-    """Synchronous wrapper for LLM requests."""
-    _aura_url = os.environ.get("AURA_URL")
-    if _aura_url:
+    """Synchronous wrapper for LLM requests.
+
+    Attempts AURA context retrieval first when AURA_ENABLED=true.
+    Falls back to the provided system_prompt (local context) on any failure.
+    """
+    # ── AURA context retrieval ──────────────────────────────────────
+    if kio_config.AURA_ENABLED and kio_config.AURA_BASE_URL:
         try:
-            logger.info("[AURA_RETRIEVE] query=%s", query)
-            resp = requests.post(
-                f"{_aura_url}/retrieval/query",
-                json={"query": query, "top_k": 10},
-                timeout=2,
-            )
-            logger.info("[AURA_RETRIEVE] status=%s", resp.status_code)
-            if resp.ok:
-                results = resp.json().get("results", [])
-                logger.info("[AURA_RETRIEVE] retrieved=%d", len(results))
-                memories = [
-                    m for m in results
-                    if m.get("score", 0) >= 0.40
-                ]
-                memories = sorted(
-                    memories,
-                    key=lambda x: x.get("score", 0),
-                    reverse=True,
-                )[:3]
-                logger.info("[AURA_RETRIEVE] injected=%d", len(memories))
-                logger.info("[AURA_RETRIEVE] top_scores=%s",
-                    [round(m.get("score", 0), 3) for m in memories]
-                )
-                if memories:
-                    mem_lines = [
-                        f"* ({m.get('score', 0):.2f}) {m['text']}"
-                        for m in memories
-                    ]
-                    aura_context = "\n\nRelevant Memories:\n" + "\n".join(mem_lines)
-                    system_prompt = (system_prompt or "") + aura_context
+            aura = _get_aura_client()
+            if aura._enabled:
+                health = asyncio.run(aura.health())
+                if health is not None:
+                    result = asyncio.run(aura.retrieve(query))
+                    if result is not None:
+                        items = _extract_aura_context(result)
+                        memories = [
+                            m for m in items
+                            if m.get("score", 1.0) >= 0.40
+                        ]
+                        memories = sorted(
+                            memories,
+                            key=lambda x: x.get("score", 1.0),
+                            reverse=True,
+                        )[:3]
+                        if memories:
+                            mem_lines = [
+                                f"* ({m.get('score', 1.0):.2f}) {m.get('text', '')}"
+                                for m in memories
+                            ]
+                            aura_context = "\n\nRelevant Context:\n" + "\n".join(mem_lines)
+                            system_prompt = (system_prompt or "") + aura_context
+                            logger.info(
+                                "[AURA_RETRIEVE] status=aura count=%d",
+                                len(memories),
+                            )
+                        else:
+                            logger.info("[AURA_RETRIEVE] status=aura count=0 (below threshold)")
+                    else:
+                        logger.info("[AURA_RETRIEVE] status=fallback reason=retrieve_failed")
+                else:
+                    logger.info("[AURA_RETRIEVE] status=fallback reason=health_failed")
+            else:
+                logger.info("[AURA_RETRIEVE] status=fallback reason=client_disabled")
         except Exception:
             logger.exception("[AURA_FALLBACK] retrieval failed")
+    else:
+        logger.info("[AURA_RETRIEVE] status=local reason=disabled")
 
     # Build prompt
     if system_prompt and "Current User Input:" in system_prompt:
@@ -83,8 +136,6 @@ def ask_llm_sync(query: str, system_prompt: Optional[str] = None, timeout: float
         try:
             content = asyncio.run(ask_llm(prompt, timeout=timeout, max_tokens=max_tokens, task_type=task_type))
         except RuntimeError:
-            # Called from an async context where asyncio.run() is forbidden.
-            # Fall back to scheduling on the running loop via thread-safe bridge.
             try:
                 loop = asyncio.get_running_loop()
                 future = asyncio.run_coroutine_threadsafe(
