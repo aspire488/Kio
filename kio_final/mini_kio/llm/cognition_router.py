@@ -3,9 +3,11 @@ cognition_router.py — NVIDIA Cognition Router
 
 Routes CognitiveIntent values to the correct NVIDIA model via ask_llm().
 AGENT intent generates step-by-step execution plans.
+REASONING intent checks AURA first (if enabled), then falls back to ask_llm().
 
 Instrumentation:
   [NVIDIA_COGNITION] intent=<intent> model=<model>
+  [AURA_REASON] status=aura|fallback
   [AGENT_PLAN] steps=N
 """
 
@@ -18,6 +20,18 @@ from mini_kio.core import config
 from mini_kio.core.cognitive_intent import CognitiveIntent
 
 logger = logging.getLogger(__name__)
+
+# ── AuraClient singleton (lazy) ────────────────────────────────────
+_aura_client: Optional["AuraClient"] = None
+
+
+def _get_aura_client():
+    global _aura_client
+    if _aura_client is None:
+        from mini_kio.aura import AuraClient
+        _aura_client = AuraClient()
+    return _aura_client
+
 
 # ── Intent → task_type mapping ─────────────────────────────────────
 # Maps CognitiveIntent to the task_type string that ask_llm() expects.
@@ -70,6 +84,8 @@ async def process_cognition(
     """Route CognitiveIntent to the correct NVIDIA model via ask_llm().
 
     For AGENT intent, generates a step-by-step execution plan.
+    For REASONING intent, attempts AURA first (if enabled), then falls
+    back to the standard ask_llm() path.
     For all other intents, calls NVIDIA directly.
     """
     from mini_kio.core.llm_router import ask_llm
@@ -87,6 +103,31 @@ async def process_cognition(
     if intent == CognitiveIntent.AGENT:
         return await _handle_agent(query)
 
+    # ── REASONING: try AURA remote reasoner first ───────────────────
+    if intent == CognitiveIntent.REASONING and config.AURA_ENABLED:
+        aura = _get_aura_client()
+        if aura._enabled:
+            try:
+                health = await aura.health()
+                if health is not None:
+                    result = await aura.reason(query)
+                    if result is not None:
+                        text = _extract_aura_reasoning(result)
+                        logger.info(
+                            "[AURA_REASON] status=aura intent=reasoning",
+                        )
+                        return text
+                logger.info(
+                    "[AURA_REASON] status=fallback reason=%s",
+                    "health" if health is None else "empty_response",
+                )
+            except Exception as exc:
+                logger.info(
+                    "[AURA_REASON] status=fallback reason=%s",
+                    type(exc).__name__,
+                )
+
+    # ── Standard ask_llm() path (fallback for REASONING, primary for others) ─
     response = await ask_llm(
         query=query,
         timeout=timeout,
@@ -100,6 +141,18 @@ async def process_cognition(
         logger.warning("[NVIDIA_COGNITION] failed intent=%s", intent.value)
 
     return response
+
+
+def _extract_aura_reasoning(result: dict) -> str:
+    """Extract the reasoning text from an AURA response dict.
+
+    Tries common response keys in priority order.
+    """
+    for key in ("response", "content", "text", "answer", "reasoning", "result"):
+        value = result.get(key)
+        if value and isinstance(value, str):
+            return value
+    return str(result)
 
 
 async def _handle_agent(query: str) -> Optional[str]:
