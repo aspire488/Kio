@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 import json
 import logging
 import os
-import requests
 import sys
 import threading
 import time
@@ -20,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from mini_kio.core import config as kio_config
 from mini_kio.core.config import TELEGRAM_TOKEN, DISCORD_BOT_TOKEN
 
 logger = logging.getLogger(__name__)
@@ -1079,99 +1079,74 @@ def _route_via_orchestration(text: str, *, channel: str = "unknown", user_id: in
     }
 
 
+# ── AuraClient singleton (lazy) ────────────────────────────────────
+_aura_client: Any = None
+
+
+def _get_aura_client():
+    global _aura_client
+    if _aura_client is None:
+        from mini_kio.aura import AuraClient
+        _aura_client = AuraClient()
+    return _aura_client
+
+
+def _aura_store_worker(store_type: str, data: dict) -> None:
+    """Background worker: sends data to AURA via AuraClient.store().
+
+    Fire-and-forget: all exceptions are silently logged as debug.
+    """
+    import asyncio
+    try:
+        aura = _get_aura_client()
+        if not aura._enabled:
+            return
+        health = asyncio.run(aura.health())
+        if health is None:
+            logger.debug("[AURA_FALLBACK] %s: health failed", store_type)
+            return
+        result = asyncio.run(aura.store(data))
+        if result is not None:
+            logger.info("[AURA_STORE] stored %s", store_type)
+        else:
+            logger.debug("[AURA_FALLBACK] %s: store returned None", store_type)
+    except Exception as exc:
+        logger.debug("[AURA_FALLBACK] %s store failed: %s", store_type, exc)
+
+
 def aura_store_memory(role: str, content: str) -> None:
-    """Fire-and-forget AURA memory store in a background thread."""
+    """Fire-and-forget AURA memory store via AuraClient.store()."""
     if not content or not content.strip():
         return
-    content = content[:4000]
-    _aura_url = os.environ.get("AURA_URL")
-    if not _aura_url:
+    if not kio_config.AURA_ENABLED or not kio_config.AURA_BASE_URL:
         return
     threading.Thread(
         target=_aura_store_worker,
-        args=(_aura_url, role, content),
+        args=("memory", {"type": "memory", "role": role, "content": content[:4000], "source": "kio"}),
         daemon=True,
     ).start()
-
-
-def _aura_store_worker(aura_url: str, role: str, content: str) -> None:
-    try:
-        resp = requests.post(
-            f"{aura_url}/memory/store",
-            json={"role": role, "content": content, "source": "kio"},
-            timeout=1,
-        )
-        if resp.ok:
-            logger.info("[AURA_STORE] stored %s message", role)
-        elif resp.status_code == 404:
-            logger.debug("[AURA_FALLBACK] /memory/store not available (404)")
-    except Exception as exc:
-        logger.debug("[AURA_FALLBACK] memory store failed: %s", exc)
 
 
 def aura_emit_event(event_type: str, payload: dict, session_id: str = "", correlation_id: str = "") -> None:
-    """Fire-and-forget event emission to AURA Phase 2 Event System."""
-    _aura_url = os.environ.get("AURA_URL")
-    if not _aura_url:
+    """Fire-and-forget event emission to AURA via AuraClient.store()."""
+    if not kio_config.AURA_ENABLED or not kio_config.AURA_BASE_URL:
         return
     threading.Thread(
-        target=_aura_event_worker,
-        args=(_aura_url, event_type, payload, session_id, correlation_id),
+        target=_aura_store_worker,
+        args=("event", {"type": "event", "event_type": event_type, "source": "kio", "payload": payload, "session_id": session_id, "correlation_id": correlation_id}),
         daemon=True,
     ).start()
-
-
-def _aura_event_worker(aura_url: str, event_type: str, payload: dict, session_id: str, correlation_id: str) -> None:
-    try:
-        resp = requests.post(
-            f"{aura_url}/events/store",
-            json={
-                "event_type": event_type,
-                "source": "kio",
-                "payload": payload,
-                "session_id": session_id,
-                "correlation_id": correlation_id,
-            },
-            timeout=1,
-        )
-        if resp.ok:
-            logger.info("[AURA_EVENT] emitted %s", event_type)
-        elif resp.status_code == 404:
-            logger.debug("[AURA_FALLBACK] /events/store not available (404)")
-    except Exception as exc:
-        logger.debug("[AURA_FALLBACK] event emission failed: %s", exc)
 
 
 def aura_emit_observation(observation_type: str, content: dict, context: dict = None) -> None:
-    """Fire-and-forget observation emission to AURA Phase 2 Observation Pipeline."""
-    _aura_url = os.environ.get("AURA_URL")
-    if not _aura_url:
+    """Fire-and-forget observation emission to AURA via AuraClient.store()."""
+    if not kio_config.AURA_ENABLED or not kio_config.AURA_BASE_URL:
         return
     threading.Thread(
-        target=_aura_observation_worker,
-        args=(_aura_url, observation_type, content, context or {}),
+        target=_aura_store_worker,
+        args=("observation", {"type": "observation", "source": "kio", "observation_type": observation_type, "content": content, "context": context or {}}),
         daemon=True,
     ).start()
-
-
-def _aura_observation_worker(aura_url: str, observation_type: str, content: dict, context: dict) -> None:
-    try:
-        resp = requests.post(
-            f"{aura_url}/observations/ingest",
-            json={
-                "source": "kio",
-                "observation_type": observation_type,
-                "content": content,
-                "context": context,
-            },
-            timeout=1,
-        )
-        if resp.ok:
-            logger.info("[AURA_OBSERVE] ingested %s", observation_type)
-        elif resp.status_code == 404:
-            logger.debug("[AURA_FALLBACK] /observations/ingest not available (404)")
-    except Exception as exc:
-        logger.debug("[AURA_FALLBACK] observation ingestion failed: %s", exc)
 
 
 def dispatch_channel_input(
