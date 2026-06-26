@@ -126,6 +126,39 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_TIMEOUT_S = float(os.getenv("OLLAMA_TIMEOUT_S", "30.0"))
 OLLAMA_MAX_TOKENS = int(os.getenv("OLLAMA_MAX_TOKENS", "1024"))
 
+# ── NVIDIA NIM Configuration ─────────────────────────────────────
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_ENABLED = bool(NVIDIA_API_KEY.strip())
+NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+# Legacy model names (backward compat — used by nvidia_provider._TASK_MODEL_MAP)
+NVIDIA_PRIMARY_MODEL = os.getenv("NVIDIA_PRIMARY_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
+NVIDIA_CODE_MODEL = os.getenv("NVIDIA_CODE_MODEL", "openai/gpt-oss-120b")
+NVIDIA_VISION_MODEL = os.getenv("NVIDIA_VISION_MODEL", "qwen/qwen3.5-397b-a17b")
+NVIDIA_FALLBACK_MODEL = os.getenv("NVIDIA_FALLBACK_MODEL", "meta/llama-3.1-8b-instruct")
+
+# Per-intent cognition model overrides (Phase 3)
+# Default: chat/qa/reasoning/planning -> primary (Maverick)
+_NVIDIA_PRIMARY = NVIDIA_PRIMARY_MODEL
+NVIDIA_CHAT_MODEL = os.getenv("NVIDIA_CHAT_MODEL", _NVIDIA_PRIMARY)
+NVIDIA_QA_MODEL = os.getenv("NVIDIA_QA_MODEL", _NVIDIA_PRIMARY)
+NVIDIA_REASONING_MODEL = os.getenv("NVIDIA_REASONING_MODEL", _NVIDIA_PRIMARY)
+NVIDIA_PLANNING_MODEL = os.getenv("NVIDIA_PLANNING_MODEL", _NVIDIA_PRIMARY)
+
+# Default: architecture/code/debug/agent -> code (GPT-OSS)
+_NVIDIA_CODE = NVIDIA_CODE_MODEL
+NVIDIA_ARCHITECTURE_MODEL = os.getenv("NVIDIA_ARCHITECTURE_MODEL", _NVIDIA_CODE)
+NVIDIA_DEBUG_MODEL = os.getenv("NVIDIA_DEBUG_MODEL", _NVIDIA_CODE)
+NVIDIA_AGENT_MODEL = os.getenv("NVIDIA_AGENT_MODEL", _NVIDIA_CODE)
+
+# Default: vision/ocr/screen -> vision (Qwen)
+_NVIDIA_VISION = NVIDIA_VISION_MODEL
+NVIDIA_OCR_MODEL = os.getenv("NVIDIA_OCR_MODEL", _NVIDIA_VISION)
+NVIDIA_SCREEN_MODEL = os.getenv("NVIDIA_SCREEN_MODEL", _NVIDIA_VISION)
+
+NVIDIA_TIMEOUT_S = float(os.getenv("NVIDIA_TIMEOUT_S", "15.0"))
+NVIDIA_MAX_TOKENS = int(os.getenv("NVIDIA_MAX_TOKENS", "1024"))
+
 # ── Exa Search Configuration ──────────────────────────────────────
 EXA_API_KEY = os.getenv("EXA_API_KEY", "")
 EXA_ENABLED = bool(EXA_API_KEY.strip())
@@ -157,3 +190,8 @@ BROWSER_CONNECTOR_MOCK = os.getenv("BROWSER_CONNECTOR_MOCK", "").strip().lower()
 
 # ── Browser Configuration ─────────────────────────────────────────
 DEFAULT_BROWSER = os.getenv("DEFAULT_BROWSER", "chrome").lower()
+
+# ── AURA Communication Layer ───────────────────────────────────────
+AURA_ENABLED = os.getenv("AURA_ENABLED", "false").lower() == "true"
+AURA_BASE_URL = os.getenv("AURA_BASE_URL", "").rstrip("/")
+AURA_TIMEOUT = float(os.getenv("AURA_TIMEOUT", "10.0"))

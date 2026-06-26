@@ -1,21 +1,31 @@
 """
 llm_router.py — Direct Provider Orchestration
 
-Gate 5.7: Removed FreeLLM from production cognition path.
-KIO directly orchestrates providers in priority order:
+Two-phase routing:
 
+  Phase 1 — NVIDIA PRIMARY: Deterministic NVIDIA-first routing.
+  All standard cognition task types (chat, reasoning, planning, coding,
+  debugging, vision) route to NVIDIA NIM first. Model selection is
+  task-aware: chat/reasoning/planning → Maverick, coding/debugging →
+  GPT-OSS, vision → Qwen.
+
+  Phase 2 — FAILOVER CHAIN: When NVIDIA fails, KIO falls through to the
+  multi-provider failover chain. Primary + hot failover registered at
+  startup; the rest are lazy-loaded on first use.
+
+Provider order (Phase 2 failover chain):
     0: Gemini (Google AI direct)
     1: Groq (direct OpenAI-compatible API)
-    2: OpenRouter (multi-model gateway)
-    3: Together AI
-    4: Cerebras
+    2: NVIDIA NIM
+    3: Cerebras
+    4: SambaNova
+    5: Fireworks
+    6: Hugging Face
+    7: OpenRouter
+    8: Together AI
+    9: Ollama (local)
 
 FreeLLM is optional experimental backend (ENABLE_FREELLM=true).
-KIO fully boots without freellm server, npm, or localhost gateway.
-
-Chain-based failover through LLMGateway.
-Each provider is tried once; on failure the next is attempted.
-All exhausted → deterministic offline fallback.
 """
 
 import inspect
@@ -30,14 +40,20 @@ from mini_kio.llm.llm_gateway import LLMGateway
 from mini_kio.llm.gemini_provider import GeminiProvider
 from mini_kio.llm.direct_providers import DirectHTTPProvider
 from mini_kio.llm.huggingface_provider import HuggingFaceProvider
+from mini_kio.llm.nvidia_provider import NvidiaProvider
 from mini_kio.llm.models import LLMRequest
 from mini_kio.llm.provider_registry import ProviderPriority
 
 logger = logging.getLogger(__name__)
 
 _GATEWAY: Optional[LLMGateway] = None
+_LAZY_LOCKED = False
 
-# ── FreeLLM gating — OFF by default, strictly optional ────────────
+_NVIDIA_PRIMARY_TASKS = frozenset({
+    "chat", "reasoning", "planning",
+    "coding", "debugging", "vision",
+})
+
 _ENABLE_FREELLM = os.getenv("ENABLE_FREELLM", "false").lower() == "true"
 
 
@@ -45,29 +61,47 @@ def _get_gateway() -> LLMGateway:
     global _GATEWAY
     if _GATEWAY is None:
         _GATEWAY = LLMGateway()
-        _register_providers(_GATEWAY)
+        _register_primary_providers(_GATEWAY)
     return _GATEWAY
 
 
-def _register_providers(gateway: LLMGateway) -> None:
-    """Register all configured providers in priority order."""
+def _register_primary_providers(gateway: LLMGateway) -> None:
+    """Register only PRIMARY + HOT FAILOVER providers at startup.
 
-    # Priority 0: Gemini direct (primary cognition provider)
-    if config.GEMINI_ENABLED:
-        provider = GeminiProvider(
-            api_key=config.GEMINI_API_KEY,
-            timeout_s=config.GEMINI_TIMEOUT_S,
-            max_tokens=config.GEMINI_MAX_TOKENS,
-            model_name=config.GEMINI_MODEL,
-            fallback_model_name=config.GEMINI_FALLBACK_MODEL,
+    Primary:
+      - NVIDIA
+
+    Hot failover (registered at startup):
+      - Groq
+      - Cerebras
+
+    Lazy-loaded (on first use):
+      - Gemini, OpenRouter, Together, Fireworks, SambaNova,
+        HuggingFace, Ollama
+    """
+    # ── PRIMARY: NVIDIA ──────────────────────────────────────────────
+    if config.NVIDIA_ENABLED:
+        provider = NvidiaProvider(
+            api_key=config.NVIDIA_API_KEY,
+            base_url=config.NVIDIA_BASE_URL,
+            primary_model=config.NVIDIA_PRIMARY_MODEL,
+            code_model=config.NVIDIA_CODE_MODEL,
+            vision_model=config.NVIDIA_VISION_MODEL,
+            fallback_model=config.NVIDIA_FALLBACK_MODEL,
+            timeout_s=config.NVIDIA_TIMEOUT_S,
+            max_tokens=config.NVIDIA_MAX_TOKENS,
         )
-        gateway.register_provider(provider, priority=ProviderPriority.GEMINI.value)
+        gateway.register_provider(provider, priority=ProviderPriority.NVIDIA.value)
         logger.info(
-            f"Registered Gemini provider (priority {ProviderPriority.GEMINI.value}): "
-            f"model={config.GEMINI_MODEL}"
+            "Registered NVIDIA provider (priority %d): "
+            "primary=%s, code=%s, vision=%s",
+            ProviderPriority.NVIDIA.value,
+            config.NVIDIA_PRIMARY_MODEL,
+            config.NVIDIA_CODE_MODEL,
+            config.NVIDIA_VISION_MODEL,
         )
 
-    # Priority 1: Groq (direct OpenAI-compatible API)
+    # ── HOT FAILOVER 1: Groq ─────────────────────────────────────────
     if config.GROQ_ENABLED:
         provider = DirectHTTPProvider(
             name="groq",
@@ -79,57 +113,11 @@ def _register_providers(gateway: LLMGateway) -> None:
         )
         gateway.register_provider(provider, priority=ProviderPriority.GROQ.value)
         logger.info(
-            f"Registered Groq provider (priority {ProviderPriority.GROQ.value}): "
-            f"model={config.GROQ_MODEL}"
+            "Registered Groq provider (priority %d): model=%s",
+            ProviderPriority.GROQ.value, config.GROQ_MODEL,
         )
 
-    # Priority 2: Hugging Face (via OpenAI-compatible endpoint)
-    if config.HUGGINGFACE_ENABLED:
-        provider = HuggingFaceProvider(
-            api_key=config.HUGGINGFACE_API_KEY,
-            timeout_s=config.HUGGINGFACE_TIMEOUT_S,
-            max_tokens=config.HUGGINGFACE_MAX_TOKENS,
-            model_name=config.HUGGINGFACE_MODEL,
-        )
-        gateway.register_provider(provider, priority=ProviderPriority.HUGGINGFACE.value)
-        logger.info(
-            f"Registered Hugging Face provider (priority {ProviderPriority.HUGGINGFACE.value}): "
-            f"model={config.HUGGINGFACE_MODEL}"
-        )
-
-    # Priority 3: OpenRouter (multi-model gateway)
-    if config.OPENROUTER_ENABLED:
-        provider = DirectHTTPProvider(
-            name="openrouter",
-            base_url=config.OPENROUTER_BASE_URL,
-            api_key=config.OPENROUTER_API_KEY,
-            model=config.OPENROUTER_MODEL,
-            timeout_s=config.OPENROUTER_TIMEOUT_S,
-            max_tokens=config.OPENROUTER_MAX_TOKENS,
-        )
-        gateway.register_provider(provider, priority=ProviderPriority.OPENROUTER.value)
-        logger.info(
-            f"Registered OpenRouter provider (priority {ProviderPriority.OPENROUTER.value}): "
-            f"model={config.OPENROUTER_MODEL}"
-        )
-
-    # Priority 4: Together AI
-    if config.TOGETHER_AI_ENABLED:
-        provider = DirectHTTPProvider(
-            name="together_ai",
-            base_url=config.TOGETHER_AI_BASE_URL,
-            api_key=config.TOGETHER_AI_API_KEY,
-            model=config.TOGETHER_AI_MODEL,
-            timeout_s=config.TOGETHER_AI_TIMEOUT_S,
-            max_tokens=config.TOGETHER_AI_MAX_TOKENS,
-        )
-        gateway.register_provider(provider, priority=ProviderPriority.TOGETHER_AI.value)
-        logger.info(
-            f"Registered Together AI provider (priority {ProviderPriority.TOGETHER_AI.value}): "
-            f"model={config.TOGETHER_AI_MODEL}"
-        )
-
-    # Priority 5: Cerebras
+    # ── HOT FAILOVER 2: Cerebras ─────────────────────────────────────
     if config.CEREBRAS_ENABLED:
         provider = DirectHTTPProvider(
             name="cerebras",
@@ -141,44 +129,115 @@ def _register_providers(gateway: LLMGateway) -> None:
         )
         gateway.register_provider(provider, priority=ProviderPriority.CEREBRAS.value)
         logger.info(
-            f"Registered Cerebras provider (priority {ProviderPriority.CEREBRAS.value}): "
-            f"model={config.CEREBRAS_MODEL}"
+            "Registered Cerebras provider (priority %d): model=%s",
+            ProviderPriority.CEREBRAS.value, config.CEREBRAS_MODEL,
         )
 
-    # Priority 3: SambaNova
-    if config.SAMBANOVA_ENABLED:
-        provider = DirectHTTPProvider(
-            name="sambanova",
-            base_url=config.SAMBANOVA_BASE_URL,
-            api_key=config.SAMBANOVA_API_KEY,
-            model=config.SAMBANOVA_MODEL,
-            timeout_s=config.SAMBANOVA_TIMEOUT_S,
-            max_tokens=config.SAMBANOVA_MAX_TOKENS,
-        )
-        gateway.register_provider(provider, priority=ProviderPriority.SAMBANOVA.value)
-        logger.info(
-            f"Registered SambaNova provider (priority {ProviderPriority.SAMBANOVA.value}): "
-            f"model={config.SAMBANOVA_MODEL}"
-        )
+    _log_startup_summary(gateway)
 
-    # Priority 4: Fireworks
-    if config.FIREWORKS_ENABLED:
-        provider = DirectHTTPProvider(
-            name="fireworks",
-            base_url=config.FIREWORKS_BASE_URL,
-            api_key=config.FIREWORKS_API_KEY,
-            model=config.FIREWORKS_MODEL,
-            timeout_s=config.FIREWORKS_TIMEOUT_S,
-            max_tokens=config.FIREWORKS_MAX_TOKENS,
-        )
-        gateway.register_provider(provider, priority=ProviderPriority.FIREWORKS.value)
-        logger.info(
-            f"Registered Fireworks provider (priority {ProviderPriority.FIREWORKS.value}): "
-            f"model={config.FIREWORKS_MODEL}"
-        )
 
-    # Priority 8: Ollama — local LLM, always-on, no API key needed
-    if config.OLLAMA_ENABLED:
+def _lazy_register_remaining(gateway: LLMGateway) -> None:
+    """Lazy-register non-primary providers on first failover use."""
+    global _LAZY_LOCKED
+    if _LAZY_LOCKED:
+        return
+    _LAZY_LOCKED = True
+
+    # Priority 0: Gemini
+    if config.GEMINI_ENABLED and not gateway.get_provider("gemini"):
+        try:
+            provider = GeminiProvider(
+                api_key=config.GEMINI_API_KEY,
+                timeout_s=config.GEMINI_TIMEOUT_S,
+                max_tokens=config.GEMINI_MAX_TOKENS,
+                model_name=config.GEMINI_MODEL,
+                fallback_model_name=config.GEMINI_FALLBACK_MODEL,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.GEMINI.value)
+            logger.info("Lazy-loaded Gemini (priority %d)", ProviderPriority.GEMINI.value)
+        except Exception as exc:
+            logger.warning("Lazy-load Gemini failed: %s", exc)
+
+    # Priority 4: SambaNova
+    if config.SAMBANOVA_ENABLED and not gateway.get_provider("sambanova"):
+        try:
+            provider = DirectHTTPProvider(
+                name="sambanova",
+                base_url=config.SAMBANOVA_BASE_URL,
+                api_key=config.SAMBANOVA_API_KEY,
+                model=config.SAMBANOVA_MODEL,
+                timeout_s=config.SAMBANOVA_TIMEOUT_S,
+                max_tokens=config.SAMBANOVA_MAX_TOKENS,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.SAMBANOVA.value)
+            logger.info("Lazy-loaded SambaNova (priority %d)", ProviderPriority.SAMBANOVA.value)
+        except Exception as exc:
+            logger.warning("Lazy-load SambaNova failed: %s", exc)
+
+    # Priority 5: Fireworks
+    if config.FIREWORKS_ENABLED and not gateway.get_provider("fireworks"):
+        try:
+            provider = DirectHTTPProvider(
+                name="fireworks",
+                base_url=config.FIREWORKS_BASE_URL,
+                api_key=config.FIREWORKS_API_KEY,
+                model=config.FIREWORKS_MODEL,
+                timeout_s=config.FIREWORKS_TIMEOUT_S,
+                max_tokens=config.FIREWORKS_MAX_TOKENS,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.FIREWORKS.value)
+            logger.info("Lazy-loaded Fireworks (priority %d)", ProviderPriority.FIREWORKS.value)
+        except Exception as exc:
+            logger.warning("Lazy-load Fireworks failed: %s", exc)
+
+    # Priority 6: Hugging Face
+    if config.HUGGINGFACE_ENABLED and not gateway.get_provider("huggingface"):
+        try:
+            provider = HuggingFaceProvider(
+                api_key=config.HUGGINGFACE_API_KEY,
+                timeout_s=config.HUGGINGFACE_TIMEOUT_S,
+                max_tokens=config.HUGGINGFACE_MAX_TOKENS,
+                model_name=config.HUGGINGFACE_MODEL,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.HUGGINGFACE.value)
+            logger.info("Lazy-loaded HuggingFace (priority %d)", ProviderPriority.HUGGINGFACE.value)
+        except Exception as exc:
+            logger.warning("Lazy-load HuggingFace failed: %s", exc)
+
+    # Priority 7: OpenRouter
+    if config.OPENROUTER_ENABLED and not gateway.get_provider("openrouter"):
+        try:
+            provider = DirectHTTPProvider(
+                name="openrouter",
+                base_url=config.OPENROUTER_BASE_URL,
+                api_key=config.OPENROUTER_API_KEY,
+                model=config.OPENROUTER_MODEL,
+                timeout_s=config.OPENROUTER_TIMEOUT_S,
+                max_tokens=config.OPENROUTER_MAX_TOKENS,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.OPENROUTER.value)
+            logger.info("Lazy-loaded OpenRouter (priority %d)", ProviderPriority.OPENROUTER.value)
+        except Exception as exc:
+            logger.warning("Lazy-load OpenRouter failed: %s", exc)
+
+    # Priority 8: Together AI
+    if config.TOGETHER_AI_ENABLED and not gateway.get_provider("together_ai"):
+        try:
+            provider = DirectHTTPProvider(
+                name="together_ai",
+                base_url=config.TOGETHER_AI_BASE_URL,
+                api_key=config.TOGETHER_AI_API_KEY,
+                model=config.TOGETHER_AI_MODEL,
+                timeout_s=config.TOGETHER_AI_TIMEOUT_S,
+                max_tokens=config.TOGETHER_AI_MAX_TOKENS,
+            )
+            gateway.register_provider(provider, priority=ProviderPriority.TOGETHER_AI.value)
+            logger.info("Lazy-loaded TogetherAI (priority %d)", ProviderPriority.TOGETHER_AI.value)
+        except Exception as exc:
+            logger.warning("Lazy-load TogetherAI failed: %s", exc)
+
+    # Priority 9: Ollama
+    if config.OLLAMA_ENABLED and not gateway.get_provider("ollama"):
         try:
             from mini_kio.llm.ollama_provider import OllamaProvider
             provider = OllamaProvider(
@@ -188,17 +247,14 @@ def _register_providers(gateway: LLMGateway) -> None:
                 max_tokens=config.OLLAMA_MAX_TOKENS,
             )
             gateway.register_provider(provider, priority=ProviderPriority.OLLAMA.value)
-            logger.info(
-                f"Registered Ollama provider (priority {ProviderPriority.OLLAMA.value}): "
-                f"model={config.OLLAMA_MODEL}"
-            )
+            logger.info("Lazy-loaded Ollama (priority %d)", ProviderPriority.OLLAMA.value)
         except Exception as exc:
-            logger.warning(f"Ollama provider skipped: {exc}")
+            logger.warning("Lazy-load Ollama failed: %s", exc)
 
-    # Optional: FreeLLM experimental backend (off by default)
-    if _ENABLE_FREELLM and config.FREELLMAPI_ENABLED:
+    # FreeLLM experimental
+    if _ENABLE_FREELLM and config.FREELLMAPI_ENABLED and not gateway.get_provider("freellm"):
         try:
-            from mini_kio.llm.freellm_provider import FreeLLMProvider  # noqa: delayed import
+            from mini_kio.llm.freellm_provider import FreeLLMProvider
             provider = FreeLLMProvider(
                 base_url=config.FREELLMAPI_BASE_URL,
                 api_key=config.FREELLMAPI_API_KEY,
@@ -206,96 +262,108 @@ def _register_providers(gateway: LLMGateway) -> None:
                 timeout_s=config.FREELLMAPI_TIMEOUT_S,
                 max_tokens=config.FREELLMAPI_MAX_TOKENS,
             )
-            gateway.register_provider(provider, priority=99)  # lowest priority
-            logger.info(
-                "Registered FreeLLM experimental backend "
-                f"(priority 99): endpoint={config.FREELLMAPI_BASE_URL}"
-            )
+            gateway.register_provider(provider, priority=99)
+            logger.info("Lazy-loaded FreeLLM (priority 99)")
         except Exception as exc:
-            logger.warning(f"FreeLLM experimental backend skipped: {exc}")
+            logger.warning("Lazy-load FreeLLM failed: %s", exc)
 
-    registered = gateway.get_registry().get_providers()
+    registry = gateway.get_registry()
+    registered = registry.get_providers()
     logger.info(
-        f"Provider chain: {len(registered)} provider(s) registered "
-        f"in order: {', '.join(registered) if registered else 'none'}"
+        "Provider chain after lazy-load: %d provider(s) in order: %s",
+        len(registered), ", ".join(registered),
     )
-    _log_provider_health_report(gateway)
 
 
-def _get_config_label(name: str, provider) -> str:
-    """Return a human-readable config status for a provider.
-
-    Uses a private event loop so we never touch the main-thread loop
-    (which may be closed after a PTB run_polling restart).
-    """
-    try:
-        hc = provider.health_check()
-        if inspect.iscoroutine(hc) or inspect.iscoroutinefunction(getattr(provider, 'health_check', None)):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                healthy = loop.run_until_complete(asyncio.ensure_future(hc))
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
-        else:
-            healthy = bool(hc)
-    except Exception:
-        healthy = False
-    if not healthy:
-        if "gemini" in name.lower():
-            return "INVALID_CONFIG"
-        return "MISSING_KEY"
-    return "OK"
-
-
-def _log_provider_health_report(gateway: LLMGateway) -> None:
-    """Log a startup health report showing each provider's state."""
+def _log_startup_summary(gateway: LLMGateway) -> None:
+    """Log concise startup provider summary."""
     registry = gateway.get_registry()
     providers = registry.get_providers()
-    lines = ["Provider Health Report"]
-    lines.append("=" * 40)
-    for name in providers:
-        state = registry.get_state(name)
-        failures = registry.get_failure_count(name)
-        display = state.value.upper()
-        cd_until = registry._cooldown_until.get(name, 0)
-        cd_info = ""
-        if cd_until > time.time():
-            remaining = int(cd_until - time.time())
-            cd_info = f" (cooldown {remaining}s remaining)"
-        # HEALTHY + 0 failures = untested / registered-only state
-        if state.value == "healthy" and failures == 0 and cd_until == 0.0:
-            provider = gateway._providers.get(name)
-            if provider:
-                config = _get_config_label(name, provider)
-                display = config if config != "OK" else "REGISTERED"
-        lines.append(f"  {name:<20} {display:<12} failures={failures}{cd_info}")
-    if not providers:
-        lines.append("  (no providers registered)")
-    lines.append("=" * 40)
-    logger.info("\n".join(lines))
+    logger.info(
+        "Startup providers (%d): %s",
+        len(providers), ", ".join(providers) if providers else "none",
+    )
 
 
-async def ask_llm(query: str, timeout: float = 8.0, max_tokens: int = 200) -> Optional[str]:
+async def ask_llm(
+    query: str,
+    timeout: float = 8.0,
+    max_tokens: int = 200,
+    task_type: str = "chat",
+) -> Optional[str]:
     """
     Authoritative entry point for conversational LLM requests.
-    Routes through LLMGateway → multi-provider failover chain.
+
+    Two-phase routing:
+      Phase 1 — NVIDIA PRIMARY: For standard task types, try NVIDIA first
+      Phase 2 — FAILOVER CHAIN: If NVIDIA fails, fall through the
+                multi-provider failover chain
     """
     gateway = _get_gateway()
+
+    # ── Phase 1: NVIDIA-first routing ────────────────────────────────
+    if task_type in _NVIDIA_PRIMARY_TASKS and config.NVIDIA_ENABLED:
+        nvidia = gateway.get_provider("nvidia")
+        if nvidia is not None:
+            request = LLMRequest(
+                prompt=query,
+                max_tokens=max_tokens,
+                timeout_s=timeout,
+                provider="nvidia",
+                metadata={"task_type": task_type},
+            )
+            try:
+                start_t = time.monotonic()
+                response = await asyncio.wait_for(
+                    nvidia.generate(request),
+                    timeout=timeout,
+                )
+                latency_ms = (time.monotonic() - start_t) * 1000
+                if response.success and response.content:
+                    model = nvidia.resolve_model(task_type)
+                    logger.info(
+                        "[NVIDIA_PRIMARY_ROUTE] task_type=%s provider=nvidia model=%s",
+                        task_type, model,
+                    )
+                    logger.info(
+                        "[NVIDIA_SUCCESS] latency=%.0f model=%s",
+                        latency_ms, model,
+                    )
+                    return response.content.strip()
+
+                err = response.error_code or "unknown"
+                logger.info(
+                    "[NVIDIA_FAILOVER] from=nvidia to=provider_chain reason=%s",
+                    err,
+                )
+            except asyncio.TimeoutError:
+                logger.info("[NVIDIA_FAILOVER] from=nvidia to=provider_chain reason=timeout")
+            except Exception as e:
+                logger.info(
+                    "[NVIDIA_FAILOVER] from=nvidia to=provider_chain reason=%s",
+                    type(e).__name__,
+                )
+
+    # ── Phase 2: Failover chain — lazy-load remaining providers ──────
+    _lazy_register_remaining(gateway)
 
     request = LLMRequest(
         prompt=query,
         max_tokens=max_tokens,
         timeout_s=timeout,
-        provider="",  # Let chain decide
+        provider="",
+        metadata={"task_type": task_type},
     )
 
     try:
         response = await gateway.generate(request)
         if response.success and response.content:
+            logger.info(
+                "[NVIDIA_FAILOVER] resolved=provider_chain selected=%s",
+                response.provider,
+            )
             return response.content.strip()
     except Exception as e:
-        logger.warning(f"Unified LLM path failed: {e}")
+        logger.warning("Unified LLM path failed: %s", e)
 
     return None

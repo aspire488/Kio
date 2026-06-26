@@ -16,7 +16,9 @@ extension, validates responses, returns TabResult.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import secrets
 import sys
 import threading
@@ -194,7 +196,7 @@ class Connector:
 
     def __init__(self, *, mock: bool = False, mock_mode: str = "ready", port: int = 9877):
         self._registry = TabRegistry()
-        self._token: str = secrets.token_hex(32)
+        self._token: str = self._load_or_create_token()
         self._extension: Optional[Any] = None
         self._ws_server: Optional[Any] = None
         self._lock = asyncio.Lock()
@@ -210,6 +212,37 @@ class Connector:
             self._mock = MockExtension(mode=mock_mode)
         else:
             self._mock = None
+
+    @staticmethod
+    def _token_file_path() -> str:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _root = os.path.abspath(os.path.join(_here, "..", ".."))
+        return os.path.join(_root, "data", "browser_connector_token.json")
+
+    @staticmethod
+    def _load_or_create_token() -> str:
+        _path = Connector._token_file_path()
+        _dir = os.path.dirname(_path)
+        try:
+            if os.path.isfile(_path):
+                with open(_path, "r") as f:
+                    _data = json.load(f)
+                _token = _data.get("token", "")
+                if _token and len(_token) >= 32:
+                    logger.info("[CONNECTOR] loaded persistent token from %s", _path)
+                    return _token
+        except Exception as exc:
+            logger.warning("[CONNECTOR] failed to load token file %s: %s", _path, exc)
+        _token = secrets.token_hex(32)
+        try:
+            if not os.path.isdir(_dir):
+                os.makedirs(_dir, exist_ok=True)
+            with open(_path, "w") as f:
+                json.dump({"token": _token}, f)
+            logger.info("[CONNECTOR] created persistent token at %s", _path)
+        except Exception as exc:
+            logger.warning("[CONNECTOR] failed to persist token to %s: %s", _path, exc)
+        return _token
 
     def _log_browser_trace(self, command_id: str, command: str, success: str, payload: Any) -> None:
         import datetime

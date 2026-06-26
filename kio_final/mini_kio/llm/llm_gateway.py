@@ -150,6 +150,10 @@ class LLMGateway:
         """Legacy alias kept for backward compatibility with existing tests."""
         return self._deterministic_fallback(error_code)
 
+    def get_provider(self, name: str) -> Optional[LLMProvider]:
+        """Get a registered provider by name, or None if not found."""
+        return self._providers.get(name)
+
     def get_registry(self) -> ProviderFailoverRegistry:
         return self._registry
 

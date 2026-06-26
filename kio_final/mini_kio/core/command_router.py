@@ -252,6 +252,19 @@ def _resolve_contextual_references(command: str) -> str:
             resolved = re.sub(r"\b(it|that|this)\b", target, command, flags=re.IGNORECASE)
             _log_route("context_resolve", original=command, resolved=resolved, source="runtime")
             return resolved.strip()
+        # Fix D: Fallback to tracked processes when capability and interaction are empty
+        try:
+            from mini_kio.core.runtime import get_runtime
+            _rt = get_runtime()
+            if _rt and _rt.tracked_processes:
+                _last_proc = _rt.tracked_processes[-1]
+                _target = _last_proc.get("target") or _last_proc.get("name", "")
+                if _target:
+                    resolved = re.sub(r"\b(it|that|this)\b", _target, command, flags=re.IGNORECASE)
+                    _log_route("context_resolve", original=command, resolved=resolved, source="tracked_process")
+                    return resolved.strip()
+        except Exception:
+            pass
 
     return command
 
@@ -613,34 +626,38 @@ def _dispatch_command(command: str) -> dict:
                     try_activate_browser(int(_pid))
             return result
 
-        # ── FOCUS / SWITCH ────────────────────────────────────────────────────
+        # ── FOCUS / SWITCH / ACTIVATE ────────────────────────────────────────
         is_focus = lower.startswith("focus ")
         is_switch = lower.startswith("switch ")
-        if (is_focus or is_switch) and config.BROWSER_CONNECTOR_ENABLED:
+        is_activate = lower.startswith("activate ")
+        if is_focus or is_switch or is_activate:
             if is_focus:
                 target = command[6:].strip()
+            elif is_activate:
+                target = command[9:].strip()
             elif lower.startswith("switch to "):
                 target = command[10:].strip()
             else:
                 target = command[7:].strip()
+            if target.lower().startswith("to "):
+                target = target[3:].strip()
 
-            conn = _get_connector()
-            if conn and conn.is_connected():
+            _conn = _get_connector()
+            if _conn and _conn.is_connected():
                 try:
-                    result = safe_run_async(conn.focus_tab(target))
+                    result = safe_run_async(_conn.focus_tab(target))
                     if result.success:
                         _log_route("route", intent="connector_focus", target=target)
                         from mini_kio.platform.window_activation import try_activate_browser
                         from mini_kio.core.capability_registry import get_capability_registry
                         from mini_kio.core.routing_utils import get_browser_registry
-                        
+
                         cap_reg = get_capability_registry()
-                        # Patch 2: Targeted PID selection
                         canon_target = get_browser_registry().canonicalize(target.lower().strip())
                         _entry = cap_reg.resolve_by_target(canon_target)
                         if not _entry:
                             _entry = cap_reg.get_latest_active()
-                        
+
                         if _entry and _entry.browser_pid:
                             try_activate_browser(_entry.browser_pid)
                         return {
@@ -649,25 +666,33 @@ def _dispatch_command(command: str) -> dict:
                             "action": "focus_tab",
                             "target": target,
                         }
-                    return {
-                        "success": False,
-                        "message": f"Couldn't focus {target}: {result.error}",
-                        "action": "focus_tab",
-                        "target": target,
-                    }
                 except BaseException as exc:
                     logger.warning("[CONNECTOR] focus_tab failed: %s", exc)
+
+            # Non-connector fallback — try tracked processes, web nav, or native app
+            from mini_kio.core.runtime import get_runtime
+            _rt = get_runtime()
+            if _rt:
+                _tracked = _rt.get_tracked_process(target.lower().strip())
+                if _tracked and _tracked.get("pid"):
+                    from mini_kio.platform.window_activation import try_activate_browser
+                    try_activate_browser(int(_tracked["pid"]))
                     return {
-                        "success": False,
-                        "message": f"Couldn't focus {target}.",
+                        "success": True,
+                        "message": f"Focused {target.capitalize()}.",
                         "action": "focus_tab",
                         "target": target,
                     }
-            if config.BROWSER_CONNECTOR_ENABLED:
-                return {
-                    "success": False,
-                    "message": f"Can't focus {target} — Browser Connector is not connected.",
-                }
+            from mini_kio.core.routing_utils import get_browser_routing
+            _alt_route = get_browser_routing(target)
+            if _alt_route["route_type"] in ("browser_fallback", "native"):
+                return execute_action(_alt_route["action"], _alt_route["target"])
+            return {
+                "success": False,
+                "message": f"Can't focus {target}: not found in browser tabs, apps, or tracked processes.",
+                "action": "focus_tab",
+                "target": target,
+            }
 
         # ── LIST TABS ─────────────────────────────────────────────────────────
         if lower in ("list tabs", "list open tabs", "what tabs are open", "show tabs") and config.BROWSER_CONNECTOR_ENABLED:
@@ -721,6 +746,9 @@ def _dispatch_command(command: str) -> dict:
                 return execute_action("close_app", app_target)
 
             # Browser Connector: try owned-tab close before capability registry
+            # Fix A: On failure, fall through to remaining close logic
+            # (capability registry → browser session → close_app) instead of
+            # returning the connector error — native apps are not in TabRegistry.
             if config.BROWSER_CONNECTOR_ENABLED:
                 conn = _get_connector()
                 if conn and conn.is_connected():
@@ -743,16 +771,8 @@ def _dispatch_command(command: str) -> dict:
                                 "action": "close_app",
                                 "target": target,
                             }
-                        return {
-                            "success": False,
-                            "message": f"Couldn't close {target}: {result.error}",
-                        }
                     except BaseException as exc:
                         logger.warning("[CONNECTOR] close_tab failed: %s", exc)
-                        return {
-                            "success": False,
-                            "message": f"Couldn't close {target}.",
-                        }
 
             # Gate 5 P2: Check browser session registry for browser_operator-owned sessions
             from mini_kio.core.routing_utils import get_browser_registry

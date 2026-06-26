@@ -23,5 +23,5 @@ class ReasoningResolver(BaseResolver):
         
         trace.add_step("ReasoningResolver: initiating structured reasoning")
         
-        reply = ask_llm_sync(text, system_prompt=system_prompt)
+        reply = ask_llm_sync(text, system_prompt=system_prompt, task_type="reasoning")
         return reply

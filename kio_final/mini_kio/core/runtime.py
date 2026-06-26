@@ -11,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 import json
 import logging
+import os
+import requests
 import sys
 import threading
 import time
@@ -1077,6 +1079,101 @@ def _route_via_orchestration(text: str, *, channel: str = "unknown", user_id: in
     }
 
 
+def aura_store_memory(role: str, content: str) -> None:
+    """Fire-and-forget AURA memory store in a background thread."""
+    if not content or not content.strip():
+        return
+    content = content[:4000]
+    _aura_url = os.environ.get("AURA_URL")
+    if not _aura_url:
+        return
+    threading.Thread(
+        target=_aura_store_worker,
+        args=(_aura_url, role, content),
+        daemon=True,
+    ).start()
+
+
+def _aura_store_worker(aura_url: str, role: str, content: str) -> None:
+    try:
+        resp = requests.post(
+            f"{aura_url}/memory/store",
+            json={"role": role, "content": content, "source": "kio"},
+            timeout=1,
+        )
+        if resp.ok:
+            logger.info("[AURA_STORE] stored %s message", role)
+        elif resp.status_code == 404:
+            logger.debug("[AURA_FALLBACK] /memory/store not available (404)")
+    except Exception as exc:
+        logger.debug("[AURA_FALLBACK] memory store failed: %s", exc)
+
+
+def aura_emit_event(event_type: str, payload: dict, session_id: str = "", correlation_id: str = "") -> None:
+    """Fire-and-forget event emission to AURA Phase 2 Event System."""
+    _aura_url = os.environ.get("AURA_URL")
+    if not _aura_url:
+        return
+    threading.Thread(
+        target=_aura_event_worker,
+        args=(_aura_url, event_type, payload, session_id, correlation_id),
+        daemon=True,
+    ).start()
+
+
+def _aura_event_worker(aura_url: str, event_type: str, payload: dict, session_id: str, correlation_id: str) -> None:
+    try:
+        resp = requests.post(
+            f"{aura_url}/events/store",
+            json={
+                "event_type": event_type,
+                "source": "kio",
+                "payload": payload,
+                "session_id": session_id,
+                "correlation_id": correlation_id,
+            },
+            timeout=1,
+        )
+        if resp.ok:
+            logger.info("[AURA_EVENT] emitted %s", event_type)
+        elif resp.status_code == 404:
+            logger.debug("[AURA_FALLBACK] /events/store not available (404)")
+    except Exception as exc:
+        logger.debug("[AURA_FALLBACK] event emission failed: %s", exc)
+
+
+def aura_emit_observation(observation_type: str, content: dict, context: dict = None) -> None:
+    """Fire-and-forget observation emission to AURA Phase 2 Observation Pipeline."""
+    _aura_url = os.environ.get("AURA_URL")
+    if not _aura_url:
+        return
+    threading.Thread(
+        target=_aura_observation_worker,
+        args=(_aura_url, observation_type, content, context or {}),
+        daemon=True,
+    ).start()
+
+
+def _aura_observation_worker(aura_url: str, observation_type: str, content: dict, context: dict) -> None:
+    try:
+        resp = requests.post(
+            f"{aura_url}/observations/ingest",
+            json={
+                "source": "kio",
+                "observation_type": observation_type,
+                "content": content,
+                "context": context,
+            },
+            timeout=1,
+        )
+        if resp.ok:
+            logger.info("[AURA_OBSERVE] ingested %s", observation_type)
+        elif resp.status_code == 404:
+            logger.debug("[AURA_FALLBACK] /observations/ingest not available (404)")
+    except Exception as exc:
+        logger.debug("[AURA_FALLBACK] observation ingestion failed: %s", exc)
+
+
 def dispatch_channel_input(
     text: str,
     *,
@@ -1136,6 +1233,9 @@ def dispatch_channel_input(
     from mini_kio.llm.input_normalizer import InputNormalizer
     command = InputNormalizer.strip_emoji(command_raw)
     runtime._gate5_normalized_text = command
+    aura_store_memory("user", command)
+    aura_emit_event("user_message", {"text": command[:2000]})
+    aura_emit_observation("user_input", {"text": command[:2000]})
 
     emit_runtime_trace(
         "orchestration_entry",
@@ -1144,6 +1244,54 @@ def dispatch_channel_input(
         text_len=len(command),
         runtime=get_runtime_snapshot(),
     )
+
+    # ── Gate 5.7: Cognitive Intent Classification — before continuity ──
+    # Classify the cognitive intent BEFORE any continuity/entity/retrieval
+    # processing. Cognition intents (CHAT, FACTUAL_QA, REASONING, PLANNING,
+    # ARCHITECTURE, CODING, DEBUGGING, AGENT, VISION, OCR, SCREEN_ANALYSIS)
+    # bypass ContinuityResolver, MediaIntelligence, and Exa entirely.
+    from mini_kio.core.cognitive_intent import classify_intent, CognitiveIntent
+    from mini_kio.llm.cognition_router import process_cognition, is_cognition_intent
+
+    intent = classify_intent(command)
+    logger.info("[COGNITION_INTENT] intent=%s text=%r", intent.value, command[:80])
+
+    if is_cognition_intent(intent):
+        try:
+            import asyncio
+
+            response = asyncio.run(
+                process_cognition(intent=intent, query=command)
+            )
+            if response:
+                result = {
+                    "success": True,
+                    "message": response,
+                    "channel": channel,
+                }
+                from mini_kio.core.runtime_response_formatter import format_result
+
+                result["message"] = format_result("", "", True, result)
+                aura_store_memory("assistant", str(result.get("message", "")))
+                aura_emit_event("assistant_response", {"text": str(result.get("message", ""))[:2000], "success": True})
+                aura_emit_observation("assistant_response", {"text": str(result.get("message", ""))[:2000], "success": True})
+                return result
+
+            logger.info("[COGNITION_INTENT] NVIDIA returned None for intent=%s", intent.value)
+            return {
+                "success": False,
+                "message": "I'm having trouble reaching my language model. Please try again.",
+                "channel": channel,
+            }
+        except Exception as exc:
+            logger.warning("[COGNITION_INTENT] NVIDIA routing failed: %s", exc)
+            return {
+                "success": False,
+                "message": "I'm having trouble reaching my language model. Please try again.",
+                "channel": channel,
+            }
+
+    logger.info("[COGNITION_INTENT] intent=%s route=existing_pipeline", intent.value)
 
     # ── Gate 5.1: Continuity Pre-Routing ────────────────────────────────
     # Must happen BEFORE command_router + classifier + ai_fallback
@@ -1202,6 +1350,9 @@ def dispatch_channel_input(
         )
         if continuity_reply:
             emit_runtime_trace("continuity_pre_route_used", normalized=command)
+            aura_store_memory("assistant", continuity_reply)
+            aura_emit_event("assistant_response", {"text": continuity_reply[:2000]})
+            aura_emit_observation("assistant_response", {"text": continuity_reply[:2000]})
             return {
                 "success": True,
                 "message": continuity_reply,
@@ -1293,6 +1444,10 @@ def dispatch_channel_input(
         },
     )
     result["channel"] = channel
+    resp_text = str(result.get("message", ""))
+    aura_store_memory("assistant", resp_text)
+    aura_emit_event("assistant_response", {"text": resp_text[:2000], "success": bool(result.get("success"))})
+    aura_emit_observation("assistant_response", {"text": resp_text[:2000], "success": bool(result.get("success"))})
     return result
 
 
