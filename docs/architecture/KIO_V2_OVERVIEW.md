@@ -1,34 +1,15 @@
 # KIO V2 Overview
 
-## KIO Executive
+KIO V2 introduces a modular architecture where **core components** never import external adapters directly. Instead, all adapters are discovered and managed by the **Adapter Registry** (see `ADAPTER_REGISTRY.md`).
 
-Central orchestrator that coordinates all runtimes, manages conversation flow, identity, personality, and supervises execution.
+## Key Changes
+- Central `adapters/` package with discovery, loading, health aggregation.
+- Core modules obtain adapters via:
+  ```python
+  from adapters.registry import AdapterRegistry
+  adapter = AdapterRegistry.instance().load("openwork")
+  ```
+- Lifecycle hooks (`shutdown`, `reload`) allow graceful restarts.
+- Version and capability metadata enable runtime decision making.
 
-## AURA
-
-Provides observation processing, long‑term memory, knowledge base, reasoning, planning, reflection, learning, world model, beliefs, goals, confidence, and continuity.
-
-## Execution Fabric
-
-Orchestrates task execution across runtimes, handling scheduling, dependency resolution, and resource allocation.
-
-## Internal APIs
-
-The concrete contracts are defined in `internal_api/` and documented in `docs/specifications/INTERNAL_API_SPEC.md`.
-
-- **Adapter Registry** – Registers and resolves adapters for external repositories.
-- **Observation Bus** – Publishes observations from AURA to KIO Executive and other consumers.
-- **Provider System** – Routes provider calls (e.g., LLM, storage) through a unified interface.
-- **BrowserFacade** – Abstracts browser interactions for the Execution Fabric.
-- **Agent Runtime** – Hosts autonomous agents, managing their lifecycle.
-- **Voice Runtime** – Handles voice input/output and coordination.
-- **Avatar Runtime** – Manages avatar rendering and interaction pipelines.
-
-## Infrastructure
-
-- **MCP Runtime** – Micro‑container platform for service isolation (unchanged).
-- **WorkflowEngine** – Executes defined workflows; remains untouched.
-
----
-
-*ponytail: omitted exhaustive component diagrams – add when needed for stakeholder presentations.*
+The registry is the only entry point for external functionality such as OpenWork, Scrapling, Agency Swarm, Shepherd, etc.
