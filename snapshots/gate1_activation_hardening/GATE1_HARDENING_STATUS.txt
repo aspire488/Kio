@@ -1,0 +1,17 @@
+Gate 1 — Activation Stack Hardening & Runtime Validation
+Status: COMPLETE
+
+Stress validation: 10/10 PASS
+Full Gate 1 regression: 50/50 PASS
+Harness: snapshots/gate1_activation_hardening/gate1_activation_stress_validation.py
+Audit: GATE1_ACTIVATION_STACK_HARDENING_AUDIT.md
+
+Fixes applied:
+- release_camera_if_open releases handle even when state is off
+- orphan handle release on re-bootstrap
+- bootstrap_runtime pre-cleanup (activation + camera)
+- disable_camera_observer ends activation session
+- reset candidate cooldown on session idle
+- prepare_camera_groundwork releases stale handle
+
+NOT added: features, loops, voice, UI, planners, ML

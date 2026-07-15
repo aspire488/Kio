@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "KIO Browser Connector",
+  "version": "0.1.0",
+  "description": "Allows KIO to manage browser tabs from the desktop assistant.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "ws://127.0.0.1/*",
+    "*://*.youtube.com/*",
+    "*://*.music.youtube.com/*",
+    "*://*.open.spotify.com/*",
+    "*://*.soundcloud.com/*",
+    "*://*.twitch.tv/*",
+    "*://*.netflix.com/*",
+    "*://*.primevideo.com/*",
+    "*://*.disneyplus.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon48.png"
+  }
+}

@@ -1,0 +1,15 @@
+Gate 1 — Presence & Interaction Layer
+Objective: Runtime-owned Telegram communication bridge
+
+Status: INTEGRATED (minimal path)
+
+Changes:
+- runtime.dispatch_channel_input() — runtime-owned channel handoff
+- runtime.format_channel_reply() — channel-safe text normalization
+- kio_bot.py — routes text through runtime dispatch (not direct route())
+- command_router.route() — compat wrapper over runtime dispatch
+
+Flow verified:
+Telegram -> adapter -> dispatch_channel_input -> handle_command -> execute_action -> reply
+
+Audit: GATE1_TELEGRAM_INTEGRATION_AUDIT.md

@@ -1,0 +1,18 @@
+Gate 1 — Lightweight Camera Integration Groundwork
+Status: COMPLETE
+
+Validation: 7/7 PASS (camera) + prior activation/telegram harnesses
+Harness: snapshots/gate1_camera_groundwork/gate1_camera_validation.py
+Audit: GATE1_CAMERA_INTEGRATION_AUDIT.md
+
+Added:
+- mini_kio/core/camera_runtime.py
+- runtime camera fields + shutdown release
+- observer session wrappers (open/close/poll)
+- config: CAMERA_DEVICE_INDEX, CAMERA_MAX_FRAMES_PER_POLL
+
+NOT added:
+- MediaPipe, gesture recognition, capture loops, frame queues
+
+Manual flow:
+  enable_camera_observer() -> open_camera_session() -> poll_camera_frame() -> close_camera_session()

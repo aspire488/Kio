@@ -1,0 +1,21 @@
+Gate 1 — Interaction Stabilization
+Status: VALIDATED + HARDENED
+
+Offline validation: 14/14 PASS
+Harness: snapshots/gate1_interaction_stabilization/gate1_telegram_validation.py
+Audit: GATE1_TELEGRAM_STABILIZATION_AUDIT.md
+
+Fixes applied:
+- runtime context TTL prune (full-buffer scan)
+- channel detach: running|degraded -> idle -> stopped
+- channel list cleanup on detach
+- channel input max length 2000
+- /help via runtime dispatch
+- PTB transport error trace (no lifecycle collapse)
+- channel_dispatch_failure integrity category
+- format_channel_reply Error prefix guard
+
+Manual live checks recommended:
+- ping, open notepad, unknown text, shutdown (blocked)
+- Ctrl+C graceful stop
+- brief network disconnect (observe recovery)

@@ -1,0 +1,14 @@
+Gate 1 — Minimal Controlled Activation Detection
+Status: COMPLETE
+
+Validation: 6/6 PASS
+Harness: snapshots/gate1_activation_detection/gate1_activation_detection_validation.py
+Audit: GATE1_ACTIVATION_DETECTION_AUDIT.md
+
+Added:
+- mini_kio/core/activation_detection.py (center_darkness heuristic)
+- camera_runtime.capture_and_analyze()
+- observer poll_activation_candidate()
+- 2s signal cooldown
+
+NOT added: MediaPipe, ML pipelines, frame queues, background workers
