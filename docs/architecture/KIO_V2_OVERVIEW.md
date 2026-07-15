@@ -11,5 +11,6 @@ KIO V2 introduces a modular architecture where **core components** never import 
   ```
 - Lifecycle hooks (`shutdown`, `reload`) allow graceful restarts.
 - Version and capability metadata enable runtime decision making.
+- Core observation bus (`runtime/observation_bus.py`) is the sole runtime event propagation mechanism; all components publish observations instead of direct calls.
 
 The registry is the only entry point for external functionality such as OpenWork, Scrapling, Agency Swarm, Shepherd, etc.
