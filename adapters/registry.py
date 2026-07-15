@@ -134,6 +134,25 @@ class AdapterRegistry:
         overall, reports = self._health_aggregator.aggregate(list(self._instances.values()))
         return {"overall": overall, "reports": reports}
 
+    def overall_health(self) -> Any:
+        """Return the aggregated overall health status.
+        """
+        return self.health().get("overall")
+
+    def health_summary(self) -> Any:
+        """Return detailed health reports from all adapters.
+        """
+        return self.health().get("reports")
+
+    def capability_summary(self) -> list[str]:
+        """Return a deduplicated list of all capabilities across adapters.
+        """
+        return self.capabilities()
+
+    def version_summary(self) -> dict[str, str]:
+        """Return a mapping of adapter id to version string.
+        """
+        return self.versions()
     def validate(self) -> None:
         """Validate that each registered adapter meets minimal interface.
 

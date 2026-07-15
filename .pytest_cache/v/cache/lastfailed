@@ -1,4 +1,0 @@
-{
-  "tests/test_gate5_1_routing_hardening.py::test_patch3_achievement_recognition": true,
-  "tests/test_provider_hardening.py::test_provider_count_names_and_priorities": true
-}
