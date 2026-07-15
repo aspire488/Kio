@@ -14,6 +14,8 @@ Orchestrates task execution across runtimes, handling scheduling, dependency res
 
 ## Internal APIs
 
+The concrete contracts are defined in `internal_api/` and documented in `docs/specifications/INTERNAL_API_SPEC.md`.
+
 - **Adapter Registry** – Registers and resolves adapters for external repositories.
 - **Observation Bus** – Publishes observations from AURA to KIO Executive and other consumers.
 - **Provider System** – Routes provider calls (e.g., LLM, storage) through a unified interface.
