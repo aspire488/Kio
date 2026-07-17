@@ -1,0 +1,13 @@
+adapter_id: scrapling
+version: 0.1.0
+capabilities:
+  - html_parsing
+  - dom_parsing
+  - css_selectors
+  - xpath
+  - tables
+  - forms
+  - metadata
+  - jsonld
+  - schema_org
+  - structured_extraction
