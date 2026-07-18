@@ -1,0 +1,6 @@
+adapter_id: agency_swarm
+version: 0.1.0
+capabilities:
+  - worker_execution
+  - task_delegation
+  - orchestration
