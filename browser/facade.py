@@ -39,4 +39,72 @@ class BrowserFacadeImpl:
         # The handler returns a dict with a "content" key.
         return result.get("content", "")
 
+    def extract_dom(self) -> Any:
+        """Return a structured DOM representation of the current page.
+
+        Uses the existing `browser_extract_html` operator to obtain the raw HTML
+        of the active tab and then delegates parsing to the Scrapling adapter.
+        This provides a minimal *structured extraction* capability for the
+        BrowserFacade without pulling in the full Scrapling API surface.
+        """
+        # Get raw HTML of the current page (no selector → full page).
+        payload = json.dumps({})
+        html_result = bo.browser_extract_html(payload)
+        html = html_result.get("content", "")
+        if not html:
+            return {"status": False, "error": "no html retrieved"}
+        try:
+            # Lazy import to avoid hard dependency at module load.
+            from adapters.scrapling.adapter import Adapter as ScraplingAdapter
+            scrap = ScraplingAdapter()
+            dom = scrap.extract_dom(html)
+            return {"status": True, "dom": dom}
+        except Exception as exc:
+            # ponytail: placeholder – replace with full extraction pipeline when needed
+            return {"status": False, "error": str(exc)}
+
+    def extract_tables(self, selector: str) -> Any:
+        """Extract HTML tables from the current page (or a sub‑selector).
+
+        Retrieves the HTML for the given selector via `browser_extract_html`
+        and then forwards the DOM to Scrapling's `extract_tables` helper.
+        Returns a dict with ``status`` and ``tables`` (list) on success.
+        """
+        payload = json.dumps({"selector": selector})
+        html_result = bo.browser_extract_html(payload)
+        html = html_result.get("content", "")
+        if not html:
+            return {"status": False, "error": "no html retrieved"}
+        try:
+            from adapters.scrapling.adapter import Adapter as ScraplingAdapter
+            scrap = ScraplingAdapter()
+            dom = scrap.extract_dom(html)
+            tables = scrap.extract_tables(dom)
+            return {"status": True, "tables": tables}
+        except Exception as exc:
+            # ponytail: placeholder – replace with full table‑extraction pipeline when needed
+            return {"status": False, "error": str(exc)}
+
+    def extract_links(self, selector: str) -> Any:
+        """Extract anchor links (href) from the current page (or a sub‑selector).
+
+        Uses `browser_extract_html` to obtain HTML for the selector, then
+        delegates to Scrapling's `extract_links` helper which returns a list of
+        URL strings.
+        """
+        payload = json.dumps({"selector": selector})
+        html_result = bo.browser_extract_html(payload)
+        html = html_result.get("content", "")
+        if not html:
+            return {"status": False, "error": "no html retrieved"}
+        try:
+            from adapters.scrapling.adapter import Adapter as ScraplingAdapter
+            scrap = ScraplingAdapter()
+            dom = scrap.extract_dom(html)
+            links = scrap.extract_links(dom)
+            return {"status": True, "links": links}
+        except Exception as exc:
+            # ponytail: placeholder – replace with full link‑extraction pipeline when needed
+            return {"status": False, "error": str(exc)}
+
 __all__ = ["BrowserFacadeImpl"]
