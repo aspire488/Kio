@@ -1,0 +1,6 @@
+adapter_id: shepherd
+version: 0.1.0
+capabilities:
+  - governance
+  - audit
+  - recovery
