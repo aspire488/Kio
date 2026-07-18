@@ -1,0 +1,6 @@
+adapter_id: agent_reach
+version: 0.1.0
+capabilities:
+  - web_read
+  - semantic_search
+  - remote_execution
