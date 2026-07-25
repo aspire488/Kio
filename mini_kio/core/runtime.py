@@ -1173,11 +1173,12 @@ def dispatch_channel_input(
         runtime=get_runtime_snapshot(),
     )
 
-    # ── Gate 5.1: Continuity Pre-Routing ────────────────────────────────
-    # Must happen BEFORE command_router + classifier + ai_fallback
-    continuity_reply = None
-    # Ensure gate3 pipeline exists and is session-scoped
+    # ── Session Context (unified) ──────────────────────────────────────
     session_id = _compute_session_id(channel, user_id)
+    from mini_kio.core.context_manager import get_session_context
+    _ctx = get_session_context(session_id)
+
+    # Ensure gate3 pipeline exists
     if not hasattr(runtime, '_gate3_pipeline'):
         from mini_kio.llm.intent_classifier import IntentClassifier
         from mini_kio.llm.intent_validator import IntentValidator
@@ -1194,10 +1195,10 @@ def dispatch_channel_input(
             'normalizer': InputNormalizer(),
             'responder': ConversationResponder(session_id=session_id),
         }
-    # Gate 5: Wire unified SessionState into ContinuityResolver and MediaIntelligenceAdapter
+
     _session_state = runtime._gate3_pipeline['responder']._state
-    from mini_kio.core.continuity_resolver import ContinuityResolver
-    ContinuityResolver.set_session_state(_session_state)
+
+    # Wire SessionState into MediaIntelligenceAdapter (for entity tracking)
     try:
         from mini_kio.media.media_manager import MediaManager
         mm = MediaManager.get_instance()
@@ -1206,89 +1207,68 @@ def dispatch_channel_input(
     except Exception:
         pass
 
-    # Sports info commands must bypass continuity — prevents stale context pollution
-    _lower_cmd = command.strip().lower()
-    _sports_continuity_skip = any(kw in _lower_cmd for kw in
-        ["standings", "table", "group ", "groups", "fixtures", "results",
-         "scores", "world cup", "league table", "points table"])
+    # ── MISSION PIPELINE (single unified dispatch) ────────────────────
+    try:
+        from mini_kio.core.mission import get_pipeline
+        pipeline = get_pipeline()
+        result = pipeline.run(command, channel=channel, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Pipeline dispatch failed: %s", exc)
+        result = None
 
-    # Single-word media commands must bypass continuity and route directly to handle_command
-    _media_commands = {"resume", "play", "pause", "stop", "next", "previous",
-                       "mute", "unmute", "shuffle", "repeat"}
-    _first_word = _lower_cmd.split()[0] if _lower_cmd.split() else ""
-    _skip_continuity = _first_word in _media_commands or _sports_continuity_skip
-
-    if _sports_continuity_skip:
-        logger.info("[CONTINUITY_SKIPPED] reason=fresh_sports_information_query query=%s", _lower_cmd)
-
-    if not _skip_continuity:
-        from mini_kio.llm.conversation_responder import _handle_continuity_pre_route
-        responder = runtime._gate3_pipeline['responder']
-        session_id = _compute_session_id(channel, user_id)
-        continuity_reply = _handle_continuity_pre_route(
-            command_raw, responder._state, None, None, session_id
-        )
-        if continuity_reply:
-            emit_runtime_trace("continuity_pre_route_used", normalized=command)
+    # ── Fallback: deterministic dispatch if pipeline unavailable ──────
+    if result is None:
+        # Sync legacy SessionState → SessionContext before deterministic dispatch
+        try:
+            _ctx.sync_from(_session_state)
+            _ctx.sync_exchanges_from(_session_state)
+        except Exception:
+            pass
+        try:
+            from mini_kio.core.command_router import handle_command
+            result = handle_command(command, session_id=session_id)
+        except Exception as exc:
+            logger.exception("Channel dispatch failed: %s", exc)
+            record_runtime_integrity_warning(
+                "channel_dispatch_failure",
+                {"channel": channel, "error": str(exc)[:120]},
+            )
             return {
-                "success": True,
-                "message": continuity_reply,
+                "success": False,
+                "message": "KIO encountered an internal error but is still running.",
                 "channel": channel,
             }
+        # Sync SessionContext → legacy SessionState after deterministic dispatch
+        try:
+            _ctx.sync_to(_session_state)
+        except Exception:
+            pass
 
-    # ── Gate 3: Deterministic fast-path ────────────────────────────────
-    try:
-        from mini_kio.core.command_router import handle_command
+    # ── Re-route: planning or conversation for unhandled commands ────
+    if result and result.get("_gate3_eligible"):
+        try:
+            _ctx.sync_to(_session_state)
+        except Exception:
+            pass
+        try:
+            from mini_kio.core.mission import get_pipeline
+            plan_result = get_pipeline().run(command, channel=channel, user_id=user_id)
+            if isinstance(plan_result, dict) and not plan_result.get("_gate3_eligible"):
+                result = plan_result
+            else:
+                result = _route_via_orchestration(command, channel=channel, user_id=user_id)
+        except Exception:
+            result = _route_via_orchestration(command, channel=channel, user_id=user_id)
 
-        result = handle_command(command)
-    except Exception as exc:
-        logger.exception("Channel dispatch failed: %s", exc)
-        record_runtime_integrity_warning(
-            "channel_dispatch_failure",
-            {"channel": channel, "error": str(exc)[:120]},
-        )
-        return {
-            "success": False,
-            "message": "KIO encountered an internal error but is still running.",
-            "channel": channel,
-        }
-
-    # ── Gate 3: Orchestration pipeline for non-deterministic input ─────
-    if result.get("_gate3_eligible"):
-        result = _route_via_orchestration(command, channel=channel, user_id=user_id)
-        # Fix C: Sync ContinuityResolver after Gate 3 handles a contentful
-        # entity query (e.g. "Interstellar").  Only sync when the result has a
-        # meaningful contentful subject — NEVER overwrite with raw command text
-        # (which would poison memory with garbage like "Who sings it?").
-        if result.get("success"):
-            try:
-                from mini_kio.media.media_manager import MediaManager
-                mm = MediaManager.get_instance()
-                if mm and mm._intelligence_adapter:
-                    last_e = mm._intelligence_adapter._mem.get_last_entity()
-                    if last_e and last_e.name:
-                        from mini_kio.core.continuity_resolver import ContinuityResolver, DomainContinuationType
-                        ContinuityResolver.set_state_subject(last_e.name, DomainContinuationType.MEDIA)
-                        ContinuityResolver.set_state_domain(DomainContinuationType.MEDIA)
-                        logger.info("[GATE3_SYNC] updated continuity from memory subject=%s", last_e.name)
-                    else:
-                        logger.debug("[GATE3_SKIP_SYNC] no entity in memory — skipping continuity sync")
-                else:
-                    logger.debug("[GATE3_SKIP_SYNC] no intelligence adapter — skipping continuity sync")
-            except Exception as exc:
-                logger.debug("[GATE3_SYNC] sync failed: %s", exc)
-    elif hasattr(runtime, '_gate3_pipeline'):
-        # Bridge confirmation responses back into orchestrator.
-        # When orchestrator is awaiting confirmation, "yes"/"youtube"/"spotify"
-        # must be routed through the orchestrator, not just the deterministic
-        # fast-path (which has no awareness of the orchestrator's pending action).
-        _lower = command.lower().strip()
+    # ── Confirmation bridge: route confirmations into orchestrator ────
+    if hasattr(runtime, '_gate3_pipeline') and isinstance(result, dict) and not result.get("_gate3_eligible"):
         _orch = runtime._gate3_pipeline.get('orchestrator')
         if _orch is not None:
             from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
             if isinstance(_orch, ConversationOrchestrator):
                 from mini_kio.llm.conversation_models import OrchestrationState
                 if _orch.get_state() == OrchestrationState.AWAITING_CONFIRMATION:
+                    _lower = command.lower().strip()
                     _confirm_triggers = {"yes", "confirm", "proceed", "go ahead", "do it", "y"}
                     _selection_triggers = {"youtube", "spotify"}
                     if _lower in _confirm_triggers | _selection_triggers:
