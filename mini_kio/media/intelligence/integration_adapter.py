@@ -244,9 +244,14 @@ class MediaIntelligenceAdapter:
         query_words = {w.strip("?.!") for w in words}
 
         # Pronouns always trigger continuation — they need entity resolution from memory
-        pronouns = {"it", "that", "this", "they", "them", "he", "she", "him", "his", "her", "their"}
+        pronouns = {"it", "this", "they", "them", "he", "she", "him", "his", "her", "their"}
         if query_words & pronouns:
             return True
+        # "that" as pronoun: exclude conjunction usage ("remember that I...")
+        if "that" in query_words:
+            import re
+            if not re.search(r"\bthat\b\s+(?:i|you|he|she|it|we|they|my|your|his|her|its|our|their)\b", ql, re.I):
+                return True
 
         # Interrogatives (who/what/where/when/why/how) — only continuation if query
         # lacks explicit entity content (e.g. "who directed interstellar" is FRESH,
@@ -1309,10 +1314,6 @@ class MediaIntelligenceAdapter:
             return memory_res
 
         subject = self._extract_subject(query, topic)
-        if not subject:
-            last_e = self._mem.get_last_entity()
-            if last_e:
-                subject = last_e.name
         text, res = self._retrieve_and_summarize(query, topic, subject)
         self._register_entity(subject, topic, result=res, confidence=confidence)
         self._continuity.update_context(query, topic, subject, confidence)
@@ -1334,7 +1335,7 @@ class MediaIntelligenceAdapter:
         if not result or not subject:
             return
 
-        raw = result.raw_content or result.summary
+        raw = result if isinstance(result, str) else (result.raw_content or result.summary)
         if not raw:
             return
         

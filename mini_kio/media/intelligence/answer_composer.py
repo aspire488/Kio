@@ -33,10 +33,14 @@ class AnswerComposer:
         self._llm_fn = llm_fn
         self._last_offers: List[str] = []
 
-    def compose(self, result: RetrievalResult, query: str) -> str:
-        topic = result.topic
-        subject = result.entity or result.title
-        raw = result.raw_content or result.summary
+    def compose(self, result: RetrievalResult, query: str,
+                topic: Optional[TopicType] = None,
+                subject: Optional[str] = None) -> str:
+        if topic is None:
+            topic = result.topic
+        if subject is None:
+            subject = result.entity or result.title
+        raw = result if isinstance(result, str) else (result.raw_content or result.summary)
 
         llm_answer = self._summarize_with_llm(result, query)
         if llm_answer:
