@@ -53,7 +53,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
-    from mini_kio.core.command_router import _show_help
+    from mini_kio.core.routes.system_routes import _show_help
     result = _show_help()
     await update.message.reply_text(result.get("message", "KIO help unavailable."))
 
