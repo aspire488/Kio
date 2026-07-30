@@ -106,8 +106,8 @@ class MediaIntelligenceAdapter:
         self._session_state = state
         from mini_kio.core.continuity_resolver import ContinuityResolver
         ContinuityResolver.set_session_state(state)
-        # Bootstrap entity memory from persisted state
-        if state.active_entity:
+        # Bootstrap entity memory from persisted state ONLY if empty
+        if state.active_entity and not self._mem.get_last_entity():
             from mini_kio.media.media_intelligence_models import ResolvedEntity
             from mini_kio.media.intelligence.media_intelligence_models import TopicType
             # Map stored DomainContinuationType-compatible value back to TopicType
@@ -495,7 +495,7 @@ class MediaIntelligenceAdapter:
         # Check for number or ordinal
         for word, index in self._NUMBER_WORDS.items():
             if q == word:
-                print(f"[ARTIFACT_RESOLVE] selection={word} index={index}")
+                logger.info("[ARTIFACT_RESOLVE] selection=%s index=%d", word, index)
                 return self._resolve_offer_index(index)
 
         # Handle "play the first one", "show the first one", "play first one" etc.
@@ -505,7 +505,7 @@ class MediaIntelligenceAdapter:
             stripped = ordinal_match.group(1).strip()
             for word, index in self._NUMBER_WORDS.items():
                 if stripped == word:
-                    print(f"[ARTIFACT_RESOLVE] ordinal_stripped=%s selection=%s index=%s", q, word, index)
+                    logger.info("[ARTIFACT_RESOLVE] ordinal_stripped=%s selection=%s index=%s", q, word, index)
                     return self._resolve_offer_index(index)
 
         # F3: Action shortcut keywords — short artifact/resolution tokens
@@ -565,7 +565,7 @@ class MediaIntelligenceAdapter:
             was = self._ctx.get("last_offers")
             if was and was.value:
                 subject = was.value.get("subject", "")
-                print(f"[ARTIFACT_RESOLVE] entity={subject} artifact=multiple selection=all")
+                logger.info("[ARTIFACT_RESOLVE] entity=%s artifact=multiple selection=all", subject)
                 return IntelligenceResult(
                     topic=TopicType(was.value.get("topic", "unknown")),
                     response_text=f"Available for {subject}: " + ", ".join(was.value.get("offers", [])),
@@ -599,7 +599,7 @@ class MediaIntelligenceAdapter:
             if ctx_subject and ctx_topic:
                 target_artifact = default_artifact_for_topic(ctx_topic)
                 if target_artifact:
-                    print(f"[ARTIFACT_RESOLVE] entity={ctx_subject} artifact={target_artifact.value} selection=default(continuity)")
+                    logger.info("[ARTIFACT_RESOLVE] entity=%s artifact=%s selection=default(continuity)", ctx_subject, target_artifact.value)
                     record = self._art.resolve_artifact(target_artifact, subject=ctx_subject, topic=ctx_topic)
                     if record:
                         return IntelligenceResult(
@@ -620,7 +620,7 @@ class MediaIntelligenceAdapter:
             return None
         
         if target_artifact:
-            print(f"[ARTIFACT_RESOLVE] entity={last_e.name} artifact={target_artifact.value} selection=default")
+            logger.info("[ARTIFACT_RESOLVE] entity=%s artifact=%s selection=default", last_e.name, target_artifact.value)
             record = self._art.resolve_artifact(target_artifact, subject=last_e.name, topic=topic)
             if record:
                 return IntelligenceResult(
@@ -665,7 +665,7 @@ class MediaIntelligenceAdapter:
             self._session_state.last_action = artifact_key
             self._session_state.last_action_target = subject
         
-        print(f"[ARTIFACT_RESOLVE] entity={subject} artifact={offer_name} selection={index+1}")
+        logger.info("[ARTIFACT_RESOLVE] entity=%s artifact=%s selection=%d", subject, offer_name, index + 1)
         
         # Determine if it's an info request or a play request
         play_keywords = {"play", "trailer", "video", "performance", "highlights", "audiobook"}
@@ -828,7 +828,7 @@ class MediaIntelligenceAdapter:
             logger.info("[FOLLOWUP_DETECTED] query=%s", query)
             followup_res = self._handle_followup(query, execute=execute)
             if followup_res.source != "none" and followup_res.confidence > 0:
-                print(f"[QUERY_RESOLVE] original={query} resolved={followup_res.subject}")
+                logger.info("[QUERY_RESOLVE] original=%s resolved=%s", query, followup_res.subject)
                 logger.info("[FOLLOWUP_RESOLVED] source=%s subject=%s", followup_res.source, followup_res.subject)
                 return followup_res
             logger.info("[FOLLOWUP_FALLTHROUGH] query=%s", query)
@@ -889,7 +889,10 @@ class MediaIntelligenceAdapter:
             if topic == TopicType.UNKNOWN and entity.name:
                 topic = classify_topic(entity.name).topic
             if self.play and execute:
-                side_effect_res = self.play(entity.url or entity.name)
+                play_target = entity.url or entity.name
+                if entity.url and not entity.url.startswith(("http://", "https://")):
+                    play_target = entity.name
+                side_effect_res = self.play(play_target)
                 # playback — return resolve confirmation
                 self._register_entity(entity.name, topic, confidence=ref.confidence)
                 return IntelligenceResult(
@@ -1010,7 +1013,9 @@ class MediaIntelligenceAdapter:
             # If artifact has no URL, fall through to search instead of playing nothing
             if result.artifact_record.url:
                 if execute:
-                    side_effect_res = self.play(result.artifact_record.url)
+                    _url = result.artifact_record.url
+                    if _url.startswith(("http://", "https://", "www.")):
+                        side_effect_res = self.play(_url)
                 self._register_entity(result.subject or "", topic, confidence=result.confidence)
                 return IntelligenceResult(
                     topic=topic,

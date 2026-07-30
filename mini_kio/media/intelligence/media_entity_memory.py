@@ -8,6 +8,7 @@ Plugs into existing MediaContext / MediaManager.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import threading
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from collections import deque
+
+logger = logging.getLogger(__name__)
 
 from mini_kio.media.media_intelligence_models import (
     EntityType, MediaProvider, ResolvedEntity, HistoricalMediaSession
@@ -135,7 +138,7 @@ class MediaEntityMemory:
             
             if et in media_entities:
                 self.set("last_entity", entity.to_dict(), self.TTL_LAST_SESSION)
-                print(f"[MEDIA_CONTEXT] entity={entity.name}") # Required log
+                logger.info("[MEDIA_CONTEXT] entity=%s", entity.name)
             
             if et == EntityType.SONG:
                 self.set("last_track", entity.to_dict(), self.TTL_LAST_TRACK)

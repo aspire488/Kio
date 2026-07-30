@@ -142,18 +142,6 @@ _SEEK_PATTERNS = [
 ]
 
 
-_MEDIA_TYPE_KEYWORDS: dict[str, str] = {
-    "music": "music song album artist singer band playlist",
-    "video": "video watch movie film clip",
-    "trailer": "trailer preview coming soon",
-    "tutorial": "tutorial how to guide learn walkthrough",
-    "educational": "explain what is how does why is science history lesson",
-    "podcast": "podcast episode talk show interview",
-    "livestream": "live stream streaming",
-    "sports": "sports highlights match game nfl nba soccer",
-    "news": "news update announcement latest",
-}
-
 _MEDIA_TOPIC_KEYWORDS: dict[str, str] = {
     "SPORTS": "fifa world cup football soccer basketball baseball nfl nba uefa formula 1 ipl premier league la liga bundesliga serie a champions league euro cup copa america f1 standings table fixtures results",
     "MOVIES": "movie film cinema marvel dc disney pixar star wars entertainment studio",
@@ -676,6 +664,20 @@ class MediaManager:
 
         ql = query.lower().strip()
 
+        # ── Step -2.5: Pronoun resolution — "it" / "that" / "this" → last entity name ──
+        _PRONOUNS = frozenset(("it", "that", "this", "them", "those"))
+        _pronoun_resolved = False
+        if ql in _PRONOUNS and self._intelligence_adapter:
+            try:
+                last_e = self._intelligence_adapter._mem.get_last_entity()
+                if last_e and last_e.name:
+                    logger.info("[PRONOUN_RESOLVE] original=%s resolved=%s", query, last_e.name)
+                    query = last_e.name
+                    ql = query.lower().strip()
+                    _pronoun_resolved = True
+            except Exception:
+                pass
+
         # ── Step -2: Bare artifact resolution — prepend last entity name ──
         _bare_artifact_patterns = {
             "trailer", "the trailer", "trailers", "the trailers",
@@ -709,20 +711,31 @@ class MediaManager:
                 pass
 
         # ── Step -1: Intelligence / Continuity / Recommendation Resolution ──
-        if self._intelligence_adapter and ql:
+        _skip_intel = _pronoun_resolved or not self._intelligence_adapter or not ql
+        if not _skip_intel:
             # Skip intelligence re-resolution for explicitly enriched queries
-            # (e.g. "Atomic Habits audiobook" from the OPEN handler)
             _skip_intel = any(p in ql for p in (" audiobook", " interview", " behind the scenes", " behind-the-scenes"))
-            if not _skip_intel:
-                try:
-                    res = self._intelligence_adapter.handle(ql, execute=False)
-                    if res.source in ("continuity", "recommendation", "followup", "artifact") and res.subject:
-                        logger.info("[MEDIA_INTELLIGENCE_RESOLVE] source=%s original=%s resolved=%s", 
-                                    res.source, ql, res.subject)
-                        query = res.subject
-                        ql = query.lower().strip()
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("[MEDIA_INTELLIGENCE_FAILED] %s", exc)
+        if not _skip_intel:
+            try:
+                _saved_subject = self._intelligence_adapter.context.recent_subject()
+                _saved_art_len = len(self._intelligence_adapter._art._store)
+                _saved_topic = self._intelligence_adapter.context.recent_topic()
+            except Exception:
+                _saved_subject = _saved_art_len = _saved_topic = None
+            try:
+                res = self._intelligence_adapter.handle(query, execute=False)
+                if res.source in ("continuity", "recommendation", "followup", "artifact", "acceptance") and res.subject:
+                    logger.info("[MEDIA_INTELLIGENCE_RESOLVE] source=%s original=%s resolved=%s", 
+                                res.source, ql, res.subject)
+                    query = res.subject
+                    ql = query.lower().strip()
+                elif _saved_subject is not None and self._intelligence_adapter:
+                    # Result not applied — roll back side effects
+                    self._intelligence_adapter.context.set_subject(_saved_subject, _saved_topic or None)
+                    if _saved_art_len is not None:
+                        del self._intelligence_adapter._art._store[_saved_art_len:]
+            except Exception as exc:
+                logging.getLogger(__name__).warning("[MEDIA_INTELLIGENCE_FAILED] %s", exc)
 
         # Rule: Duplicate Media Execution — guard vars set AFTER confirmed PLAYING below
         now = time.time()
@@ -827,24 +840,21 @@ class MediaManager:
             self._register_session(last_provider, last_result)
             return self._to_dict(last_result)
 
-        logger.info("[MM_TRACE] returning gate3 — defaulting to YouTube")
-        # Playback policy: default to YouTube for all media types.
-        # No intermediate confirmation question — execute immediately.
+        logger.info("[MM_TRACE] returning gate3 — no provider succeeded")
         query_clean = query.rstrip(".!?;:,") if query else ""
         if query_clean:
-            # Attempt YouTube provider even without session (for search/open)
             _prov = self._get_provider("youtube")
             if _prov:
                 try:
                     _mt = _detect_media_type(query)
                     _result = _prov.play(query, media_type=_mt, platform="youtube")
-                    if _result and _result.success:
+                    if _result and _result.success and _result.session and _result.session.state == MediaState.PLAYING:
                         self._register_session("youtube", _result)
                         return self._to_dict(_result)
                 except Exception:
                     pass
-            return {"success": True, "message": f"Playing on YouTube: {query_clean}"}
-        return {"success": True, "message": "Playing on YouTube."}
+            return {"success": False, "message": f"Couldn't play {query_clean} on YouTube."}
+        return {"success": False, "message": "Nothing to play."}
 
     def pause(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=pause")

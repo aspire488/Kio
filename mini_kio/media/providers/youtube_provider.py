@@ -281,10 +281,13 @@ class YouTubeProvider(MediaProvider):
             )
             self._session.touch()
 
+            display_query = clean_query
+            if clean_query.startswith(("http://", "https://", "www.")):
+                display_query = "the requested media"
             message = (
-                f"Playing on YouTube: {clean_query}" if playback_state == MediaState.PLAYING else
+                f"Playing on YouTube: {display_query}" if playback_state == MediaState.PLAYING else
                 "Video ready on YouTube." if playback_state == MediaState.READY else
-                f"Opened on YouTube: {clean_query}"
+                f"Opened on YouTube: {display_query}"
             )
             return MediaResult(
                 success=playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),

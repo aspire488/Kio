@@ -1,7 +1,8 @@
 """
-discord_transport.py — KIO Discord Transport
+discord_transport.py — KIO Discord Transport Adapter
 
-Reuses existing KIO runtime via route().
+Converts Discord messages to canonical InterfaceRequest,
+passes to runtime via route(), renders InterfaceResponse back to Discord.
 No duplicated orchestration, memory, or Media Intelligence.
 """
 
@@ -12,6 +13,8 @@ import logging
 import threading
 import time
 from typing import Optional
+
+from mini_kio.interfaces.models import InterfaceRequest
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +49,10 @@ async def _handle_discord_message(message, client) -> None:
     elif content.startswith("/"):
         return
 
+    req = InterfaceRequest(text=content, channel="discord", user_id=user_id)
     try:
         t0 = time.time()
-        reply = await asyncio.to_thread(route, content, user_id=user_id, channel="discord")
+        reply = await asyncio.to_thread(route, req.text, user_id=req.user_id, channel=req.channel)
         elapsed = time.time() - t0
         logger.info(
             "[DISCORD_RESPONSE] author=%s elapsed=%.2fs response_len=%d",

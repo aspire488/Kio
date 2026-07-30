@@ -85,6 +85,20 @@ class ContinuityEngine:
             if wc and wc[0].isupper() and wc.lower() not in _start_words:
                 cap_words.add(wc.lower())
         if not cap_words:
+            # All-lowercase input — check if query has substantive words beyond
+            # artifact/freshness/start words that don't overlap with current subject.
+            _artifact_kws = {"trailer","teaser","gameplay","highlights","standings","fixtures","results",
+                             "interview","music","video","mv","reveal","table","scores","schedule",
+                             "analysis","tactical","recap","clips","blooper","behind","scenes","best",
+                             "ending","explained","press","conference","goal","compilation","onboard",
+                             "team","radio","concert","acoustic","lyrics","walkthrough","audiobook",
+                             "book","review","summary","author","reading"}
+            _freshness = {"latest","updates","news","recent","current","today","any","group",
+                          "leader","leading","qualified","eliminated"}
+            query_words = {w.strip(".,!?;:'\"").lower() for w in words}
+            content = query_words - _start_words - _artifact_kws - _freshness
+            if len(content) >= 2 and not any(cw in current_lower for cw in content):
+                return True
             return False  # No clear entity reference — safe to treat as followup
         # If any capitalized word is NOT part of current subject, it's a new entity
         for cw in cap_words:

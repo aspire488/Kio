@@ -34,6 +34,7 @@ from mini_kio.llm.identity_dataset import get_identity_answer
 from mini_kio.media.media_manager import MediaManager
 from mini_kio.media.intelligence.artifact_memory import parse_artifact_type
 from mini_kio.core.command_parser import is_multi_step
+from mini_kio.interfaces.models import InterfaceRequest
 
 logger = logging.getLogger(__name__)
 
@@ -728,7 +729,7 @@ def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Telegram-facing entry point
+# Interface-facing entry points
 # ---------------------------------------------------------------------------
 
 def route(text: str, user_id: int = 0, channel: str = "telegram") -> str:
@@ -745,6 +746,11 @@ def route(text: str, user_id: int = 0, channel: str = "telegram") -> str:
     except BaseException as exc:
         logger.exception(f"route() crashed: {exc}")
         return "KIO encountered an internal error but is still running."
+
+
+def route_request(req: InterfaceRequest) -> str:
+    """Canonical interface entry point.  Accepts InterfaceRequest, returns plain text."""
+    return route(text=req.text, user_id=req.user_id, channel=req.channel)
 
 
 # ---------------------------------------------------------------------------

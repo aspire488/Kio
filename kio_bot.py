@@ -74,10 +74,9 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle user text messages.
-
-    BUG-08 FIX: result type is guarded before calling .get().
-    route() returns str, but the guard protects against any future refactor.
+    Handle user text messages — Telegram adapter.
+    Converts input to canonical InterfaceRequest, passes to runtime,
+    renders InterfaceResponse back to Telegram.
     """
     if not update.effective_user or not update.message:
         return
@@ -95,23 +94,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.chat.send_action("typing")
 
     try:
-        result = await asyncio.to_thread(route, command, user_id)
-
-        if isinstance(result, dict):
-            msg = result.get("message", "")
-        elif isinstance(result, str):
-            msg = result
-        else:
-            msg = str(result)
-
-        if not msg:
-            msg = "Done."
-
-        if len(msg) > 4000:
-            msg = msg[:4000] + "…"
-
-        await update.message.reply_text(msg)
-
+        reply = await asyncio.to_thread(route, command, user_id)
+        await update.message.reply_text(reply)
     except BaseException as exc:
         logger.exception(f"[TELEGRAM] handler error: {exc}")
         await update.message.reply_text(
@@ -275,4 +259,5 @@ def run_bot(runtime=None) -> None:
 
 
 if __name__ == "__main__":
-    run_bot()
+    from mini_kio.core.runtime import run_runtime
+    run_runtime()

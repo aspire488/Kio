@@ -508,9 +508,17 @@ class SessionContext:
         target = result.get("target") or result.get("subject") or ""
         if target:
             clean = target.strip().rstrip(".,!?;:")
-            self.active_entity = clean
-            self.last_target = clean
+            _blocked = {"http://", "https://", "www."}
+            if not any(clean.lower().startswith(p) for p in _blocked):
+                self.active_entity = clean
+                self.last_target = clean
             _set_last_action(self.session_id, command)
+        elif command.lower().startswith("play ") and not target:
+            # Failed play: still remember what user tried to play
+            entity = command[5:].strip()
+            if entity and len(entity) > 3:
+                self.active_entity = entity
+                self.last_target = entity
 
         action = result.get("action") or ""
         if action:

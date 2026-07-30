@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from mini_kio.core.config import TELEGRAM_TOKEN, DISCORD_BOT_TOKEN, BROWSER_RUNTIME_ENABLED
+from mini_kio.core.config import TELEGRAM_TOKEN, DISCORD_BOT_TOKEN, BROWSER_RUNTIME_ENABLED, TERMINAL_ENABLED
 
 logger = logging.getLogger(__name__)
 _CURRENT_RUNTIME: "KioRuntime | None" = None
@@ -1212,6 +1212,8 @@ def dispatch_channel_input(
         from mini_kio.core.mission import get_pipeline
         pipeline = get_pipeline()
         result = pipeline.run(command, channel=channel, user_id=user_id)
+    except ImportError:
+        result = None
     except Exception as exc:
         logger.exception("Pipeline dispatch failed: %s", exc)
         result = None
@@ -1629,13 +1631,25 @@ def host_runtime(runtime: KioRuntime, idle_wait_s: float = 5.0) -> None:
         emit_runtime_trace("runtime_host_stop", runtime=get_runtime_snapshot())
 
 
+def _sigint_handler(signum, frame):
+    """Set shutdown_requested on SIGINT to avoid tracebacks through every frame."""
+    runtime = get_runtime()
+    if runtime and not runtime.shutdown_requested:
+        runtime.request_shutdown()
+        logger.info("Shutdown requested via signal %s", signum)
+
+
 def run_runtime() -> None:
     """
     Runtime-first entrypoint.
 
-    Supports Telegram and/or Discord transports.
+    Supports Telegram, Discord, and Terminal transports.
     Channels are loaded independently — failure of one does not affect the other.
+    Terminal runs on the main thread when it's the only channel.
     """
+    import signal
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     runtime = bootstrap_runtime()
 
     # Start Discord in a daemon thread if configured
@@ -1647,15 +1661,36 @@ def run_runtime() -> None:
             logger.error("[DISCORD] failed to start: %s", exc)
             emit_runtime_trace("runtime_channel_failure", channel="discord", error=str(exc))
 
-    if not TELEGRAM_TOKEN:
-        if not DISCORD_BOT_TOKEN:
-            emit_runtime_trace("runtime_ready_no_channel", runtime=get_runtime_snapshot())
-        host_runtime(runtime)
-        return
+    terminal_thread = None
+    if TERMINAL_ENABLED:
+        try:
+            from mini_kio.interfaces.terminal import run_terminal
+            # Terminal-only: run on main thread (blocks on input())
+            if not TELEGRAM_TOKEN and not DISCORD_BOT_TOKEN:
+                run_terminal(runtime)
+                return
+            # Terminal alongside other channels: non-daemon thread
+            import threading
+            terminal_thread = threading.Thread(
+                target=run_terminal, args=(runtime,), daemon=False,
+                name="terminal-interface",
+            )
+            terminal_thread.start()
+            emit_runtime_trace("runtime_channel_start", channel="terminal")
+        except Exception as exc:
+            logger.error("[TERMINAL] failed to start: %s", exc)
+            emit_runtime_trace("runtime_channel_failure", channel="terminal", error=str(exc))
 
-    from kio_bot import run_bot
+    if TELEGRAM_TOKEN:
+        from kio_bot import run_bot
+        start_runtime_channel(runtime, "telegram", run_bot)
 
-    start_runtime_channel(runtime, "telegram", run_bot)
+    # Keep alive for non-blocking channels (Discord, Terminal alongside Telegram)
+    host_runtime(runtime)
+
+    # Clean up terminal thread if running
+    if terminal_thread and terminal_thread.is_alive():
+        terminal_thread.join(timeout=3)
 
 
 if __name__ == "__main__":
