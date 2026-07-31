@@ -39,6 +39,7 @@ class PatternMemoryExtractor:
     # key_template, value_template
     _PATTERNS = [
         (re.compile(r"^\s*i\s+(like|love)\s+(.+?)\s*$", re.I), ("preference_{1}", "like")),
+        (re.compile(r"^\s*remember\s+(?:that\s+)?i\s+(?:like|love|enjoy)\s+(.+?)\s*$", re.I), ("preference_{0}", "like")),
         (re.compile(r"^\s*i\s+(dislike|hate)\s+(.+?)\s*$", re.I), ("preference_{1}", "dislike")),
         (re.compile(r"^\s*my\s+favorite\s+(.+?)\s+is\s+(.+?)\s*$", re.I), ("favorite_{0}", "{1}")),
         (re.compile(r"^\s*remember\s+(?:that\s+)?my\s+favorite\s+(.+?)\s+is\s+(.+?)\s*$", re.I), ("favorite_{0}", "{1}")),

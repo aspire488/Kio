@@ -40,7 +40,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     user = update.effective_user
     name = user.first_name if user else "User"
-    await update.message.reply_text(
+    reply = (
         f"Hey {name}! KIO is online.\n\n"
         "Send commands like:\n"
         "  open chrome\n"
@@ -49,13 +49,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  open chrome and search AI news\n"
         "Use /help for the full command list."
     )
+    logger.info(f"[TELEGRAM_REPLY] /start reply={reply!r}")
+    await update.message.reply_text(reply)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
     from mini_kio.core.routes.system_routes import _show_help
     result = _show_help()
-    await update.message.reply_text(result.get("message", "KIO help unavailable."))
+    reply = result.get("message", "KIO help unavailable.")
+    logger.info(f"[TELEGRAM_REPLY] /help reply={reply!r}")
+    await update.message.reply_text(reply)
 
 
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -95,6 +99,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         reply = await asyncio.to_thread(route, command, user_id)
+        logger.info(f"[TELEGRAM_REPLY] uid={user_id} reply={reply!r}")
         await update.message.reply_text(reply)
     except BaseException as exc:
         logger.exception(f"[TELEGRAM] handler error: {exc}")

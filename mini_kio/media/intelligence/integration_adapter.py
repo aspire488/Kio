@@ -1823,6 +1823,12 @@ class MediaIntelligenceAdapter:
         if len(text) < 50:
             return False
         text_lower = text.lower()
+        # Role queries ("who directed X") return the person's page, which
+        # legitimately never names the movie/subject — accept it.
+        _role_stems = ("direct", "writ", "compos", "produc", "creat", "design",
+                       "star", "actor", "voice", "sing", "cast", "develop", "score")
+        if any(t in query.lower() for t in _role_stems):
+            return True
         q_words = {w for w in query.lower().split() if len(w) > 2}
         s_words = {w for w in subject.lower().split() if len(w) > 2}
         key_terms = q_words | s_words
@@ -1889,13 +1895,6 @@ class MediaIntelligenceAdapter:
                                      if w.strip(".,!?;:\"'") and w.strip(".,!?;:\"'")[0].isupper()}
                         has_proper = any(w.lower() in orig_caps for w in reconstructed)
                         if has_proper:
-                            # Casting/character queries about the current memory entity
-                            # should preserve the series entity (e.g. "Solo Leveling"),
-                            # not register the character name ("Sung Jinwoo").
-                            _cast_roles = {"voiced", "voice", "voices", "cast", "actor",
-                                           "actress", "starred", "stars", "played", "plays"}
-                            if last_e and last_e.name and any(r in ql for r in _cast_roles):
-                                return last_e.name
                             # Comparison queries ("compared to GTA V", "vs old version") 
                             # extract the comparison target, not the subject entity.
                             # Prefer memory entity in this case.

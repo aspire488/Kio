@@ -229,7 +229,7 @@ IDENTITY_ENTRIES: list[dict] = [
     {
         "id": "consciousness_alive",
         "triggers": [
-            "are you alive", "do you think",
+            "are you alive",
             "are you conscious", "are you sentient",
             "are you self-aware",
         ],
@@ -442,6 +442,8 @@ IDENTITY_ENTRIES: list[dict] = [
             "your views on technology",
             "what is your view on technology",
             "opinions on technology",
+            "what's your view on technology",
+            "whats your view on technology",
         ],
     },
     {
@@ -452,6 +454,9 @@ IDENTITY_ENTRIES: list[dict] = [
             "your views on ai",
             "what is your view on artificial intelligence",
             "opinions on artificial intelligence",
+            "what's your view on ai",
+            "whats your view on ai",
+            "what do you think of ai",
         ],
     },
     {
@@ -462,6 +467,7 @@ IDENTITY_ENTRIES: list[dict] = [
             "your views on space exploration",
             "what do you think about space",
             "opinions on space",
+            "what's your view on space exploration",
         ],
     },
     {
@@ -471,6 +477,7 @@ IDENTITY_ENTRIES: list[dict] = [
             "what do you think about automation",
             "your views on automation",
             "opinions on automation",
+            "what's your view on automation",
         ],
     },
     {
@@ -481,8 +488,10 @@ IDENTITY_ENTRIES: list[dict] = [
             "your views on creativity",
             "opinions on human creativity",
             "what do you think about creativity",
+            "what's your view on creativity",
         ],
     },
+
     # ── Adversarial (5) ────────────────────────────────────────────────
     {
         "id": "adversarial_ignore_instructions",

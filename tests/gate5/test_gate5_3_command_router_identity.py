@@ -24,16 +24,12 @@ def test_command_router_identity():
             assert "KIO" in result["message"]
 
 
-def test_command_router_identity_via_knowledge_base():
-    """Identity queries not covered by inline handler route through knowledge base."""
+def test_command_router_identity_via_pipeline():
+    """Identity queries must be handled by the pipeline conversation capability."""
     queries = [
         ("tell me about yourself", "KIO \u2014 Kernel for Intelligent Orchestration."),
     ]
 
     for q, expected in queries:
         result = handle_command(q)
-        # If inline handler misses it, should be _gate3_eligible for conversational pipeline
-        if "_gate3_eligible" in result:
-            assert "Cannot process" in result["message"]
-        else:
-            assert expected in result["message"]
+        assert expected in result.get("message", "")

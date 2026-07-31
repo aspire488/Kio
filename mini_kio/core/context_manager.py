@@ -542,54 +542,6 @@ class SessionContext:
         if self.pending_action:
             self.pending_action.executed = True
 
-    def sync_from(self, source: object) -> None:
-        """Pull fields from a legacy state object (SessionState-like duck type)."""
-        try:
-            v = getattr(source, 'active_entity', None)
-            if v is not None:
-                self.active_entity = v
-            v = getattr(source, 'active_domain', None)
-            if v is not None:
-                self.active_domain = v
-            v = getattr(source, 'last_action', None)
-            if v is not None:
-                self.last_action = v
-            v = getattr(source, 'last_action_target', None) or getattr(source, 'last_target', None)
-            if v is not None:
-                self.last_target = v
-        except Exception:
-            pass
-
-    def sync_to(self, target: object) -> None:
-        """Push fields to a legacy state object (SessionState-like duck type)."""
-        try:
-            if self.active_entity is not None or self.active_domain is not None:
-                set_ead = getattr(target, 'set_entity_and_domain', None)
-                if set_ead:
-                    set_ead(self.active_entity or "", self.active_domain or "unknown")
-            if self.last_action is not None:
-                try:
-                    target.last_action = self.last_action
-                except AttributeError:
-                    pass
-            if self.last_target is not None:
-                try:
-                    target.last_action_target = self.last_target
-                except AttributeError:
-                    pass
-        except Exception:
-            pass
-
-    def sync_exchanges_from(self, source: object) -> None:
-        try:
-            hist = getattr(source, 'get_history_window', None)
-            if hist:
-                exchanges = hist(10)
-                if exchanges:
-                    self._exchanges = list(exchanges)
-        except Exception:
-            pass
-
     def clear_exchanges(self) -> None:
         self._exchanges.clear()
         self._topic_stack.clear()

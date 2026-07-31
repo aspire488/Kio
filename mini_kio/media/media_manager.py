@@ -764,7 +764,7 @@ class MediaManager:
                         logger.info("[MM_TRACE] resuming active session result=%s", result)
                         return self._to_dict(result)
             logger.info("[MM_TRACE] no query/platform and no active session — gate3")
-            return {"success": True, "message": "What would you like to play?", "_gate3_eligible": False}
+            return {"success": True, "message": "What would you like to play?"}
 
         # ── Step 1: Media type detection ───────────────────────
         mt = _detect_media_type(query)
@@ -1154,7 +1154,7 @@ class MediaManager:
                     q = self._context.pending_media_query
                     self._register_current_artifact()
                     result = self.play(q)
-                    if result.get("success") and result.get("_gate3_eligible") is not True and not self._is_platform_choice(result):
+                    if result.get("success") and not self._is_platform_choice(result):
                         self._context.pending_action = ""
                         self._context.pending_media_query = ""
                     else:

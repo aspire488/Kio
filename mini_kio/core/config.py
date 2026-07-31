@@ -20,6 +20,10 @@ def _reset_env_loaded():
 
 _ensure_env_loaded()
 
+# ── Terminal Configuration ──────────────────────────────────────
+# Terminal is enabled by default.  Set TERMINAL_ENABLED=false to disable.
+TERMINAL_ENABLED = os.getenv("TERMINAL_ENABLED", "").strip().lower() != "false"
+
 # ── Discord Configuration ────────────────────────────────────────
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_APPLICATION_ID = os.getenv("DISCORD_APPLICATION_ID", "").strip()

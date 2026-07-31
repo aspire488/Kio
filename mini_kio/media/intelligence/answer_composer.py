@@ -79,21 +79,12 @@ class AnswerComposer:
         raw = re.sub(r"\s+", " ", raw).strip()
         max_input = raw[:4000]
 
-        _topic_formats = {
-            TopicType.MOVIES: "MOVIE TITLE\n\nQuick rundown\n[2-3 sentence plot summary]\n\nWhy people care\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.TV: "SHOW TITLE\n\nQuick rundown\n[2-3 sentence summary]\n\nWhy people care\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.MUSIC: "SONG / ARTIST\n\nQuick rundown\n[2-3 sentence description]\n\nWorth knowing\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.SPORTS: "TEAM / EVENT\n\nQuick rundown\n[2-3 sentence summary]\n\nWorth knowing\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.GAMING: "GAME TITLE\n\nQuick rundown\n[2-3 sentence description]\n\nWhy people care\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.BOOKS: "BOOK TITLE\n\nQuick rundown\n[2-3 sentence summary]\n\nWhy people care\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-            TopicType.PEOPLE: "PERSON NAME\n\nQuick rundown\n[2-3 sentence biography]\n\nWhy people care\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3",
-        }
-        fmt = _topic_formats.get(topic, "SUBJECT NAME\n\nQuick rundown\n[2-3 sentence summary]\n\nWorth knowing\n\u2022 Fact 1\n\u2022 Fact 2\n\u2022 Fact 3")
         prompt = (
             f"Source text about {subject}:\n\n{max_input}\n\n"
-            f"Write a concise answer about {subject} (topic: {topic.value}).\n"
-            f"Format:\n{fmt}\n\n"
-            f"No markdown. No URLs. Keep it natural."
+            f"Answer naturally about {subject} (topic: {topic.value}).\n"
+            "Write a concise, conversational reply like a knowledgeable friend "
+            "(2-4 sentences). No headings, no 'Quick rundown', no bullet lists, "
+            "no markdown, no URLs."
         )
         try:
             answer = self._llm_fn(prompt)

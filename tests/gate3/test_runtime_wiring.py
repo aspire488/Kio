@@ -8,7 +8,7 @@ from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
 from mini_kio.llm.intent_classifier import IntentClassifier
 from mini_kio.llm.intent_validator import IntentValidator
 from mini_kio.core.runtime import SafetyState
-from mini_kio.core.command_router import _ai_fallback
+from mini_kio.core.command_router import handle_command
 
 
 class TestRuntimeWiring(unittest.TestCase):
@@ -219,36 +219,34 @@ class TestGate3PipelineIntegration(unittest.TestCase):
     #       The unit test test_veto_in_emergency_mode (TestRuntimeWiring)
     #       already covers handoff-level veto directly.
 
-    # ── gate3_eligible flag ────────────────────────────────────────────
+    # ── Unknown command handling ───────────────────────────────────────
 
-    def test_ai_fallback_unknown_returns_gate3_eligible(self):
-        """_ai_fallback must set _gate3_eligible on unknown input."""
-        result = _ai_fallback("xyzzy_unrecognizable_command")
+    def test_unknown_command_returns_error(self):
+        """Unknown commands must not crash and return helpful error."""
+        result = handle_command("xyzzy_unrecognizable_command")
         self.assertFalse(result["success"])
-        self.assertTrue(result.get("_gate3_eligible"))
+        self.assertIn("Cannot process", result["message"])
 
 
-class TestDispatchChannelInputIntegration(unittest.TestCase):
-    """Integration tests for dispatch_channel_input orchestration routing."""
+class TestPipelineDispatchIntegration(unittest.TestCase):
+    """Integration tests for the authoritative Pipeline dispatch."""
 
     @patch('mini_kio.core.runtime.get_runtime_snapshot')
-    @patch('mini_kio.core.runtime._route_via_orchestration')
     @patch('mini_kio.core.runtime._CURRENT_RUNTIME')
     @patch('mini_kio.core.command_router.handle_command')
-    def test_gate3_eligible_routes_to_orchestration(self, mock_handle, mock_runtime, mock_orchestrate, mock_snapshot):
-        """Input that triggers gate3_eligible must route through orchestration."""
+    def test_dispatch_goes_through_pipeline(self, mock_handle, mock_runtime, mock_snapshot):
+        """dispatch_channel_input must go through handle_command (Pipeline) exactly once."""
         from mini_kio.core.runtime import dispatch_channel_input
 
         mock_snapshot.return_value = {}
         mock_runtime.state = "running"
         mock_runtime.shutdown_requested = False
         mock_runtime.prune_tracked_processes = MagicMock()
-        mock_handle.return_value = {"success": False, "message": "unknown", "_gate3_eligible": True}
-        mock_orchestrate.return_value = {"success": True, "message": "Orchestrated response", "_orchestrated": True}
+        mock_handle.return_value = {"success": True, "message": "handled"}
 
-        result = dispatch_channel_input("some completely unknown input", channel="test", user_id=0)
+        result = dispatch_channel_input("hello", channel="test", user_id=0)
 
-        mock_orchestrate.assert_called_once()
+        mock_handle.assert_called_once()
         self.assertTrue(result.get("success"))
 
 

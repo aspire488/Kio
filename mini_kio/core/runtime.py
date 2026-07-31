@@ -57,8 +57,8 @@ class RamBudgetError(RuntimeError):
 
 class ResourceGuard:
     """RAM budget enforcement (v1.1)."""
-    SOFT_LIMIT_MB = 150
-    HARD_LIMIT_MB = 190
+    SOFT_LIMIT_MB = 350
+    HARD_LIMIT_MB = 400
 
     def check_capacity(self, module_ram_mb: float) -> None:
         """Called BEFORE every lazy-load or tool execution."""
@@ -892,11 +892,6 @@ def get_runtime_observer_snapshot() -> list[dict[str, object]]:
     return [dict(record) for record in runtime.observers.values()]
 
 
-def _route_via_orchestration(text: str) -> dict[str, object]:
-    # Backwards-compatible wrapper: this signature may be updated by callers.
-    return _route_via_orchestration(text, channel="unknown", user_id=0)
-
-
 def _compute_session_id(channel: str, user_id: int) -> str:
     """Compute a session_id string from channel and user_id to avoid 'default'."""
     try:
@@ -907,202 +902,6 @@ def _compute_session_id(channel: str, user_id: int) -> str:
     except Exception:
         pass
     return f"local_{user_id or 0}"
-
-
-def _route_via_orchestration(text: str, *, channel: str = "unknown", user_id: int = 0) -> dict[str, object]:
-    """
-    Gate 3 orchestration pipeline for non-deterministic input.
-
-    Pipeline: input_normalizer -> intent_classifier -> intent_validator -> 
-              conversation_orchestrator -> runtime_handoff
-    """
-    runtime = _CURRENT_RUNTIME
-    if runtime is None:
-        return {"success": False, "message": "Runtime not initialized."}
-
-    # Lazy-init singleton pipeline instances on the runtime object
-    if not hasattr(runtime, '_gate3_pipeline'):
-        from mini_kio.llm.intent_classifier import IntentClassifier
-        from mini_kio.llm.intent_validator import IntentValidator
-        from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
-        from mini_kio.runtime.runtime_handoff import RuntimeHandoff
-        from mini_kio.llm.input_normalizer import InputNormalizer
-        from mini_kio.llm.conversation_responder import ConversationResponder
-        session_id = _compute_session_id(channel, user_id)
-        runtime._gate3_pipeline = {
-            'classifier': IntentClassifier(),
-            'validator': IntentValidator(),
-            'orchestrator': ConversationOrchestrator(),
-            'handoff': RuntimeHandoff(),
-            'normalizer': InputNormalizer(),
-            'responder': ConversationResponder(session_id=session_id),
-        }
-
-    pipe = runtime._gate3_pipeline
-    session_id = _compute_session_id(channel, user_id)
-    from mini_kio.llm.conversation_responder import ConversationResponder
-    if (
-        'responder' not in pipe
-        or pipe['responder'] is None
-        or getattr(pipe['responder'], '_state', None) is None
-        or pipe['responder']._state.session_id != session_id
-    ):
-        pipe['responder'] = ConversationResponder(session_id=session_id)
-        pipe['session_id'] = session_id
-
-    normalizer = pipe['normalizer']
-    responder = pipe['responder']
-    normalizer.reset_diag()
-
-    # Gate 5.1: Use pre-normalized text from earliest entrypoint if available
-    pre_normalized = getattr(runtime, '_gate5_normalized_text', None)
-    if isinstance(pre_normalized, str) and pre_normalized in text:
-        sanitized_text = pre_normalized
-        # Still run through normalizer for typo corrections on pre-normalized
-        normalized_text = normalizer.normalize_typos(sanitized_text)
-        normalizer._diag["emoji_sanitize_applied"] = True
-    else:
-        # 1. EARLY SANITIZATION
-        sanitized_text = normalizer.sanitize(text)
-        # 2. PRE-CLASSIFICATION NORMALIZATION (Typos)
-        normalized_text = normalizer.normalize_typos(sanitized_text)
-
-    # 3. HARD AUTHORITY OVERRIDES
-    authority_reply = normalizer.check_authority_override(normalized_text)
-    
-    # 4. CONTINUITY-FIRST ROUTING
-    is_continuity = normalizer.is_continuity_request(normalized_text)
-    
-    # Educational continuity check (deterministically local)
-    context = responder._context
-    mode, step = context.get_lesson_state()
-    active_lesson = mode and step >= 0
-    
-    # Capture browser diagnostics from routing_utils (global registry)
-    from mini_kio.core.routing_utils import get_browser_registry
-    browser_diag = get_browser_registry().get_diagnostics()
-
-    if authority_reply:
-        from mini_kio.llm.intent_models import IntentType, ExtractedIntent, IntentClassification
-        primary = ExtractedIntent(
-            raw_text=text,
-            normalized_text=normalized_text,
-            confidence=1.0,
-            intent_type=IntentType.CONVERSATIONAL
-        )
-        diag = normalizer.get_diag()
-        classification = IntentClassification(
-            primary_intent=primary,
-            is_safe=True,
-            authority_override_used=True,
-            sanitize_applied=diag["sanitize_applied"],
-            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
-            typo_normalization_applied=diag["typo_normalization_applied"]
-        )
-        # Bypassing classifier and validator for authority override
-        validated = classification 
-        orchestration = pipe['orchestrator'].orchestrate(validated)
-    elif is_continuity and active_lesson:
-        from mini_kio.llm.intent_models import IntentType, ExtractedIntent, IntentClassification
-        normalizer.mark_continuity_used()
-        primary = ExtractedIntent(
-            raw_text=text,
-            normalized_text=normalized_text,
-            confidence=1.0,
-            intent_type=IntentType.EDUCATIONAL
-        )
-        diag = normalizer.get_diag()
-        classification = IntentClassification(
-            primary_intent=primary,
-            is_safe=True,
-            continuity_resume_used=True,
-            educational_state_preserved=True,
-            sanitize_applied=diag["sanitize_applied"],
-            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
-            typo_normalization_applied=diag["typo_normalization_applied"]
-        )
-        # Bypassing classifier and validator for continuity
-        validated = classification
-        orchestration = pipe['orchestrator'].orchestrate(validated)
-    else:
-        from mini_kio.llm.intent_models import IntentType, IntentClassification
-        # Standard pipeline
-        emit_runtime_trace("intent_classification", text_len=len(normalized_text))
-        classification = pipe['classifier'].classify(normalized_text)
-        
-        # Educational state preservation check
-        educational_preserved = False
-        if active_lesson:
-            from mini_kio.llm.intent_models import IntentType
-            if classification.primary_intent.intent_type == IntentType.EDUCATIONAL:
-                educational_preserved = True
-
-        # Update classification with diag
-        diag = normalizer.get_diag()
-        classification = IntentClassification(
-            primary_intent=classification.primary_intent,
-            alternatives=classification.alternatives,
-            is_safe=classification.is_safe,
-            sanitize_applied=diag["sanitize_applied"],
-            emoji_sanitize_applied=diag.get("emoji_sanitize_applied", False),
-            typo_normalization_applied=diag["typo_normalization_applied"],
-            educational_state_preserved=educational_preserved,
-            browser_canonicalization_used=browser_diag.get("browser_canonicalization_used", 0) > 0
-        )
-
-        emit_runtime_trace("validator_result",
-                           is_safe=classification.is_safe,
-                           intent_type=str(classification.primary_intent.intent_type)
-                           if classification.primary_intent else "none")
-        validated = pipe['validator'].validate(classification)
-        
-        # Prevent Intent Downgrade (educational -> conversational)
-        if active_lesson and validated.primary_intent.intent_type == IntentType.CONVERSATIONAL:
-            # Check if it should have been educational (handled by responder usually, but let's flag it)
-            pass
-
-        emit_runtime_trace("orchestration_state",
-                           state=str(pipe['orchestrator'].get_state()))
-        orchestration = pipe['orchestrator'].orchestrate(validated)
-
-    handoff_state = str(orchestration.state.value) if hasattr(orchestration.state, 'value') else str(orchestration.state)
-    emit_runtime_trace("handoff_result",
-                       state=handoff_state,
-                       has_pending=orchestration.pending_action is not None)
-    try:
-        handoff_result = pipe['handoff'].handle_handoff(orchestration)
-    except Exception:
-        pipe['orchestrator']._reset_state()
-        return {"success": False, "message": "Orchestration handoff failed."}
-
-    # Gate 3: Generate response through safe text-only responder
-    responder = pipe['responder']
-    try:
-        # For authority override, use the direct reply if possible
-        if authority_reply:
-            response_text = authority_reply
-        else:
-            response_text = responder.generate(
-                original_text=text,
-                orchestration=orchestration,
-                handoff_result=handoff_result,
-            )
-        emit_runtime_trace("conversation_response_generated",
-                           classification=str(handoff_result.classification.value)
-                           if hasattr(handoff_result.classification, 'value')
-                           else str(handoff_result.classification))
-    except Exception:
-        response_text = "KIO encountered an issue processing that input."
-        emit_runtime_trace("conversation_response_degraded",
-                           classification=str(handoff_result.classification.value)
-                           if hasattr(handoff_result.classification, 'value')
-                           else str(handoff_result.classification))
-
-    return {
-        "success": handoff_result.success,
-        "message": response_text,
-        "_orchestrated": True,
-    }
 
 
 def dispatch_channel_input(
@@ -1131,6 +930,11 @@ def dispatch_channel_input(
         }
 
     if runtime.shutdown_requested or runtime.state == RuntimeState.STOPPED:
+        import logging as _log
+        _log.getLogger("runtime.input_guard").warning(
+            "REJECT: channel=%s shutdown_requested=%s state=%s",
+            channel, runtime.shutdown_requested, runtime.state,
+        )
         return {
             "success": False,
             "message": "Runtime is not accepting input.",
@@ -1163,7 +967,14 @@ def dispatch_channel_input(
     # Gate 5.1: Global normalization at earliest entrypoint
     from mini_kio.llm.input_normalizer import InputNormalizer
     command = InputNormalizer.strip_emoji(command_raw)
-    runtime._gate5_normalized_text = command
+
+    # Pronoun resolution at earliest entrypoint — so both deterministic
+    # and orchestration paths see resolved text (e.g. "it" → last topic)
+    try:
+        from mini_kio.core.command_router import _resolve_contextual_references
+        command = _resolve_contextual_references(command)
+    except Exception:
+        pass
 
     emit_runtime_trace(
         "orchestration_entry",
@@ -1178,104 +989,21 @@ def dispatch_channel_input(
     from mini_kio.core.context_manager import get_session_context
     _ctx = get_session_context(session_id)
 
-    # Ensure gate3 pipeline exists
-    if not hasattr(runtime, '_gate3_pipeline'):
-        from mini_kio.llm.intent_classifier import IntentClassifier
-        from mini_kio.llm.intent_validator import IntentValidator
-        from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
-        from mini_kio.runtime.runtime_handoff import RuntimeHandoff
-        from mini_kio.llm.input_normalizer import InputNormalizer
-        from mini_kio.llm.conversation_responder import ConversationResponder
-
-        runtime._gate3_pipeline = {
-            'classifier': IntentClassifier(),
-            'validator': IntentValidator(),
-            'orchestrator': ConversationOrchestrator(),
-            'handoff': RuntimeHandoff(),
-            'normalizer': InputNormalizer(),
-            'responder': ConversationResponder(session_id=session_id),
-        }
-
-    _session_state = runtime._gate3_pipeline['responder']._state
-
-    # Wire SessionState into MediaIntelligenceAdapter (for entity tracking)
+    # ── Single dispatch through authoritative Pipeline ────────────────
     try:
-        from mini_kio.media.media_manager import MediaManager
-        mm = MediaManager.get_instance()
-        if mm and hasattr(mm, '_intelligence_adapter') and mm._intelligence_adapter:
-            mm._intelligence_adapter.set_session_state(_session_state)
-    except Exception:
-        pass
-
-    # ── MISSION PIPELINE (single unified dispatch) ────────────────────
-    try:
-        from mini_kio.core.mission import get_pipeline
-        pipeline = get_pipeline()
-        result = pipeline.run(command, channel=channel, user_id=user_id)
-    except ImportError:
-        result = None
+        from mini_kio.core.command_router import handle_command
+        result = handle_command(command, session_id=session_id)
     except Exception as exc:
-        logger.exception("Pipeline dispatch failed: %s", exc)
-        result = None
-
-    # ── Fallback: deterministic dispatch if pipeline unavailable ──────
-    if result is None:
-        # Sync legacy SessionState → SessionContext before deterministic dispatch
-        try:
-            _ctx.sync_from(_session_state)
-            _ctx.sync_exchanges_from(_session_state)
-        except Exception:
-            pass
-        try:
-            from mini_kio.core.command_router import handle_command
-            result = handle_command(command, session_id=session_id)
-        except Exception as exc:
-            logger.exception("Channel dispatch failed: %s", exc)
-            record_runtime_integrity_warning(
-                "channel_dispatch_failure",
-                {"channel": channel, "error": str(exc)[:120]},
-            )
-            return {
-                "success": False,
-                "message": "KIO encountered an internal error but is still running.",
-                "channel": channel,
-            }
-        # Sync SessionContext → legacy SessionState after deterministic dispatch
-        try:
-            _ctx.sync_to(_session_state)
-        except Exception:
-            pass
-
-    # ── Re-route: planning or conversation for unhandled commands ────
-    if result and result.get("_gate3_eligible"):
-        try:
-            _ctx.sync_to(_session_state)
-        except Exception:
-            pass
-        try:
-            from mini_kio.core.mission import get_pipeline
-            plan_result = get_pipeline().run(command, channel=channel, user_id=user_id)
-            if isinstance(plan_result, dict) and not plan_result.get("_gate3_eligible"):
-                result = plan_result
-            else:
-                result = _route_via_orchestration(command, channel=channel, user_id=user_id)
-        except Exception:
-            result = _route_via_orchestration(command, channel=channel, user_id=user_id)
-
-    # ── Confirmation bridge: route confirmations into orchestrator ────
-    if hasattr(runtime, '_gate3_pipeline') and isinstance(result, dict) and not result.get("_gate3_eligible"):
-        _orch = runtime._gate3_pipeline.get('orchestrator')
-        if _orch is not None:
-            from mini_kio.llm.conversation_orchestrator import ConversationOrchestrator
-            if isinstance(_orch, ConversationOrchestrator):
-                from mini_kio.llm.conversation_models import OrchestrationState
-                if _orch.get_state() == OrchestrationState.AWAITING_CONFIRMATION:
-                    _lower = command.lower().strip()
-                    _confirm_triggers = {"yes", "confirm", "proceed", "go ahead", "do it", "y"}
-                    _selection_triggers = {"youtube", "spotify"}
-                    if _lower in _confirm_triggers | _selection_triggers:
-                        logger.info("[BRIDGE] routing confirmation '%s' into orchestrator", _lower)
-                        result = _route_via_orchestration(command, channel=channel, user_id=user_id)
+        logger.exception("Channel dispatch failed: %s", exc)
+        record_runtime_integrity_warning(
+            "channel_dispatch_failure",
+            {"channel": channel, "error": str(exc)[:120]},
+        )
+        return {
+            "success": False,
+            "message": "KIO encountered an internal error but is still running.",
+            "channel": channel,
+        }
 
     if not isinstance(result, dict):
         result = {"success": False, "message": str(result)}
@@ -1287,12 +1015,6 @@ def dispatch_channel_input(
     target = str(result.get("target", ""))
     formatted = format_result(action, target, bool(result.get("success")), result)
     result["message"] = formatted
-
-    # Gate 5: Refresh SessionState TTL after successful dispatch
-    try:
-        _session_state.refresh_ttl()
-    except Exception:
-        pass
 
     remember_runtime_context(
         "channel_input",
@@ -1639,6 +1361,39 @@ def _sigint_handler(signum, frame):
         logger.info("Shutdown requested via signal %s", signum)
 
 
+def _harden_console_lifecycle() -> None:
+    """
+    Windows: survive the parent console being closed.
+
+    When a service is launched attached to a console, closing that console
+    (or the launching shell exiting) delivers CTRL_CLOSE_EVENT, and Python's
+    default handler calls os._exit(0) silently — no log, no cleanup. A
+    long-running companion bot must outlive its launcher, so swallow
+    CTRL_CLOSE/LOGOFF/SHUTDOWN while still passing CTRL_C/CTRL_BREAK through.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        _CTRL_C_EVENT = 0
+        _CTRL_BREAK_EVENT = 1
+        _CTRL_CLOSE_EVENT = 2
+        _CTRL_LOGOFF_EVENT = 5
+        _CTRL_SHUTDOWN_EVENT = 6
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+        def _console_handler(ctrl_type: int) -> bool:
+            if ctrl_type in (_CTRL_CLOSE_EVENT, _CTRL_LOGOFF_EVENT, _CTRL_SHUTDOWN_EVENT):
+                return True
+            return False
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_handler, True)
+        logger.info("Console close events will be ignored (service keeps running)")
+    except Exception:
+        pass
+
+
 def run_runtime() -> None:
     """
     Runtime-first entrypoint.
@@ -1647,6 +1402,7 @@ def run_runtime() -> None:
     Channels are loaded independently — failure of one does not affect the other.
     Terminal runs on the main thread when it's the only channel.
     """
+    _harden_console_lifecycle()
     import signal
     signal.signal(signal.SIGINT, _sigint_handler)
 
@@ -1670,13 +1426,17 @@ def run_runtime() -> None:
                 run_terminal(runtime)
                 return
             # Terminal alongside other channels: non-daemon thread
-            import threading
-            terminal_thread = threading.Thread(
-                target=run_terminal, args=(runtime,), daemon=False,
-                name="terminal-interface",
-            )
-            terminal_thread.start()
-            emit_runtime_trace("runtime_channel_start", channel="terminal")
+            import sys as _sys
+            if not _sys.stdin.isatty():
+                logger.info("[TERMINAL] stdin not a TTY, skipping terminal")
+            else:
+                import threading
+                terminal_thread = threading.Thread(
+                    target=run_terminal, args=(runtime,), daemon=False,
+                    name="terminal-interface",
+                )
+                terminal_thread.start()
+                emit_runtime_trace("runtime_channel_start", channel="terminal")
         except Exception as exc:
             logger.error("[TERMINAL] failed to start: %s", exc)
             emit_runtime_trace("runtime_channel_failure", channel="terminal", error=str(exc))

@@ -111,6 +111,24 @@ class IntentClassifier:
         except Exception as e:
             return self._unknown_intent(raw_text, f"JSON mapping failed: {str(e)}")
 
+    def _is_greeting(self, text: str) -> bool:
+        clean = text.lower().strip().strip(".,!?;: ")
+        greetings = {
+            "hello", "hi", "hey", "yo", "sup", "wassup", "what's up", "whats up",
+            "good morning", "good afternoon", "good evening", "good night",
+            "how are you", "how are ya", "howre you", "how you doing", "hows it going",
+            "how's it going", "how r u",
+        }
+        acknowledgements = {
+            "i see", "oh i see", "ah i see", "got it", "makes sense", "understood",
+            "right", "alright", "cool", "nice", "good",
+        }
+        social = {
+            "thanks", "thank you", "thankyou", "ty", "thx", "appreciate it",
+            "bye", "goodbye", "okay", "ok", "sure",
+        }
+        return clean in greetings or clean in acknowledgements or clean in social
+
     def _heuristic_classify(self, text: str) -> IntentClassification:
         text_lower = text.lower().strip()
         
@@ -119,6 +137,20 @@ class IntentClassifier:
         action = None
         target = None
         confidence = 0.4
+        
+        # 0. Social/Greeting — highest priority, never treated as informational
+        if self._is_greeting(text_lower):
+            intent_type = IntentType.CONVERSATIONAL
+            confidence = 0.95
+            primary = ExtractedIntent(
+                raw_text=text,
+                normalized_text=text_lower,
+                confidence=confidence,
+                intent_type=intent_type,
+                proposed_action=action,
+                proposed_target=target
+            )
+            return IntentClassification(primary_intent=primary)
         
         # 1. Check for Math (Deterministic resolution preferred)
         if re.search(r"^\s*[\d\(\)\s\+\-\*\/\%\^\.\*\*]+\s*$", text_lower) and any(op in text_lower for op in "+-*/%^"):
