@@ -294,6 +294,12 @@ class KioRuntime:
                 _br_run_async(self.browser_runtime.stop())
             except Exception:
                 pass
+        # Gracefully stop the background Browser Connector (WS server + thread)
+        try:
+            from mini_kio.core.command_router import _stop_connector
+            _stop_connector()
+        except Exception:
+            pass
         logger.info("Runtime shutdown requested")
 
     def mark_stopped(self) -> None:
@@ -966,6 +972,8 @@ def dispatch_channel_input(
 
     # Gate 5.1: Global normalization at earliest entrypoint
     from mini_kio.llm.input_normalizer import InputNormalizer
+    from mini_kio.core.trace_logger import start_trace, record_trace, flush_trace
+
     command = InputNormalizer.strip_emoji(command_raw)
 
     # Pronoun resolution at earliest entrypoint — so both deterministic
@@ -976,6 +984,7 @@ def dispatch_channel_input(
     except Exception:
         pass
 
+    start_trace(command, channel)
     emit_runtime_trace(
         "orchestration_entry",
         channel=channel,
@@ -1010,11 +1019,18 @@ def dispatch_channel_input(
 
     # Gate 5.1: Runtime response formatting (hide internal routing)
     from mini_kio.core.runtime_response_formatter import format_result
+    from mini_kio.core.trace_logger import flush_trace
+
     raw_message = str(result.get("message", ""))
     action = str(result.get("action", ""))
     target = str(result.get("target", ""))
     formatted = format_result(action, target, bool(result.get("success")), result)
     result["message"] = formatted
+
+    try:
+        flush_trace(formatted)
+    except Exception:
+        pass
 
     remember_runtime_context(
         "channel_input",
@@ -1354,11 +1370,28 @@ def host_runtime(runtime: KioRuntime, idle_wait_s: float = 5.0) -> None:
 
 
 def _sigint_handler(signum, frame):
-    """Set shutdown_requested on SIGINT to avoid tracebacks through every frame."""
+    """Handle SIGINT (Ctrl+C) for graceful shutdown on all platforms.
+
+    On Windows, PTB's run_polling does not install its own stop-signal
+    handlers, so its event loop keeps running forever and a plain boolean
+    flag never wakes it. This handler therefore also stops the running
+    event loop from the main thread so run_forever() returns and PTB runs
+    its normal stop/shutdown teardown.
+    """
     runtime = get_runtime()
     if runtime and not runtime.shutdown_requested:
         runtime.request_shutdown()
         logger.info("Shutdown requested via signal %s", signum)
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+    except RuntimeError:
+        # No running loop in this thread (e.g. signal fired outside the loop).
+        pass
+    except Exception as exc:  # pragma: no cover - fail-safe
+        logger.warning("Could not stop event loop on %s: %s", signum, exc)
 
 
 def _harden_console_lifecycle() -> None:

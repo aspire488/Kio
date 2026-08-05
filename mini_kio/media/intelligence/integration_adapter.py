@@ -284,7 +284,7 @@ class MediaIntelligenceAdapter:
                     "will", "would", "can", "could", "should", "may", "might",
                     "get", "got", "go", "went", "come", "came", "make", "made"}
         content_words = query_words - ref_words - pronouns - _fillers
-        if content_words and len(words) > 2:
+        if content_words and len(words) >= 2 and not (interrogatives & query_words):
             return False
         return bool(ref_words & query_words)
 

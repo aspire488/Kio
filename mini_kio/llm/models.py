@@ -53,6 +53,7 @@ class LLMRequest:
     timeout_s: float = 30.0
     provider: str = "mock"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    preferred_provider: str = ""
 
 
 @dataclass(frozen=True)

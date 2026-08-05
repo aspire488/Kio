@@ -30,8 +30,8 @@ def _sanitize_llm_output(text: str) -> str:
     text = _AUTHORITY_CLAIM_RE.sub("", text)
     return text.strip().strip('"').strip("'")
 
-def ask_llm_sync(query: str, system_prompt: Optional[str] = None, timeout: float = 20.0, max_tokens: int = 400) -> Optional[str]:
-    """Synchronous wrapper for LLM requests."""
+def ask_llm_sync(query: str, system_prompt: Optional[str] = None, timeout: float = 20.0, max_tokens: int = 400, task: str = "") -> Optional[str]:
+    """Synchronous wrapper for LLM requests. `task` selects a preferred provider first."""
     # Build prompt
     if system_prompt and "Current User Input:" in system_prompt:
         prompt = f"{system_prompt}\nKIO:"
@@ -42,14 +42,14 @@ def ask_llm_sync(query: str, system_prompt: Optional[str] = None, timeout: float
 
     try:
         try:
-            content = asyncio.run(ask_llm(prompt, timeout=timeout, max_tokens=max_tokens))
+            content = asyncio.run(ask_llm(prompt, timeout=timeout, max_tokens=max_tokens, task=task))
         except RuntimeError:
             # Called from an async context where asyncio.run() is forbidden.
             # Fall back to scheduling on the running loop via thread-safe bridge.
             try:
                 loop = asyncio.get_running_loop()
                 future = asyncio.run_coroutine_threadsafe(
-                    ask_llm(prompt, timeout=timeout, max_tokens=max_tokens),
+                    ask_llm(prompt, timeout=timeout, max_tokens=max_tokens, task=task),
                     loop,
                 )
                 content = future.result(timeout=timeout + 5.0)

@@ -246,6 +246,13 @@ def run_bot(runtime=None) -> None:
         else:
             logger.warning("[LIFECYCLE] polling_stopped reason=clean_return restart_count=%d", _restart_counter)
 
+        # A graceful shutdown request (Ctrl+C / SIGTERM) must end the loop,
+        # not be swallowed by the crash-restart logic.
+        from mini_kio.core.runtime import get_runtime as _get_rt
+        if _get_rt() is not None and _get_rt().shutdown_requested:
+            logger.info("[LIFECYCLE] break_loop reason=runtime_shutdown_requested")
+            break
+
         _restart_counter += 1
         logger.info("[LIFECYCLE] restart_executed count=%d", _restart_counter)
 

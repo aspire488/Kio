@@ -548,6 +548,35 @@ const SCRIPTS = {
     }
     return JSON.stringify({ playerState: -1 }); // Unknown or not available
   },
+  sample_media: () => {
+    // State probe used by the verification pipeline. NEVER mutates playback.
+    // Returns an idempotent snapshot of the current media element so the
+    // connector can prove time progression (currentTime advancing) instead of
+    // trusting the play ACK alone.
+    const v = document.querySelector('video,audio');
+    let playerState = -1;
+    try {
+      const player = document.getElementById('movie_player');
+      if (player && typeof player.getPlayerState === 'function') {
+        playerState = player.getPlayerState();
+      }
+    } catch (e) {
+      console.warn("[KIO_SAMPLE_MEDIA] Failed to get player state:", e);
+    }
+    if (!v) {
+      return JSON.stringify({
+        ok: false, status: 'no media', url: location.href,
+        currentTime: 0, duration: 0, paused: true, playerState,
+      });
+    }
+    return JSON.stringify({
+      ok: true, status: v.paused ? 'paused' : 'playing',
+      url: location.href, paused: v.paused, ended: v.ended,
+      currentTime: v.currentTime, duration: v.duration,
+      readyState: v.readyState, networkState: v.networkState,
+      muted: v.muted, volume: v.volume, playerState,
+    });
+  },
 };
 
 async function handleExecuteScript(msg) {

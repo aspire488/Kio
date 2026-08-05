@@ -55,6 +55,13 @@ class Pipeline:
 
 
 class _NormalizationService:
+    # R1: strip leading politeness/soft-start phrases so the classifier sees a
+    # clean command verb ("can you please open chrome" -> "open chrome").
+    _POLITE_PREFIX_RE = re.compile(
+        r"^(?:can|could|would|will)\s+(?:you|u)?\s*(?:please\s+)?",
+        re.IGNORECASE,
+    )
+
     def run(self, text: str, ctx) -> str:
         from mini_kio.llm.input_normalizer import InputNormalizer
         from mini_kio.core.command_parser import _apply_aliases, _normalize_connectors
@@ -63,6 +70,13 @@ class _NormalizationService:
         cmd = _resolve_contextual_references(cmd, ctx)
         cmd = _apply_aliases(cmd)
         cmd = _normalize_connectors(cmd)
+
+        # R1: strip politeness prefix but only when it clearly precedes a
+        # command verb; never strip from standalone social small-talk.
+        stripped = self._POLITE_PREFIX_RE.sub("", cmd, count=1).strip()
+        if stripped and cmd.lower() != stripped.lower():
+            cmd = stripped
+
         cmd = re.sub(r"\bon\s+(chrome|edge|comet|firefox|brave)\b", r" in \1", cmd)
         return cmd
 
@@ -76,6 +90,9 @@ def _resolve_contextual_references(command: str, ctx) -> str:
     if lower.startswith(("play ", "watch ", "seek ", "turn ")):
         return command
     if lower in ("pause", "resume", "stop", "next", "previous", "mute", "unmute"):
+        return command
+
+    if lower.startswith("forget"):
         return command
 
     if lower == "again" or lower == "do it again":
@@ -112,7 +129,7 @@ class _IntentClassifier:
 
     GREETINGS = frozenset({
         "hello", "hi", "hey", "yo", "hola", "sup", "wassup", "what's up", "whats up",
-        "good morning", "good evening", "heyy", "bro", "broo",
+        "good morning", "good afternoon", "good evening", "heyy", "bro", "broo",
     })
 
     ACKNOWLEDGEMENTS = frozenset({
@@ -209,6 +226,10 @@ class _IntentClassifier:
         if cls:
             return cls
 
+        cls = self._classify_emotion(lower, text)
+        if cls:
+            return cls
+
         cls = self._classify_context_followup(lower, text)
         if cls:
             return cls
@@ -224,8 +245,9 @@ class _IntentClassifier:
         return decision
 
     def _strip_greeting(self, lower_clean, first_word, second_word, words, text="", raw_text=""):
+        names = ("kio", "bro", "joel")
         if first_word in self.GREETINGS:
-            remaining = " ".join(words[1:]) if second_word not in ("kio", "bro", "joel") else " ".join(words[2:])
+            remaining = " ".join(words[1:]) if second_word not in names else " ".join(words[2:])
             if remaining:
                 if remaining in ("there",):
                     return RoutingDecision(
@@ -233,11 +255,31 @@ class _IntentClassifier:
                     )
                 logger.info("[GREETING_STRIP] remaining=%r", remaining)
                 return self.classify(remaining, "")
-        elif first_word in ("kio", "bro", "joel"):
+            return RoutingDecision(
+                IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
+            )
+        elif first_word in names:
             remaining = " ".join(words[1:])
             if remaining:
                 logger.info("[NAME_STRIP] remaining=%r", remaining)
                 return self.classify(remaining, "")
+            return RoutingDecision(
+                IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
+            )
+        multi = sorted((g for g in self.GREETINGS if " " in g), key=len, reverse=True)
+        for g in multi:
+            if lower_clean == g:
+                return RoutingDecision(
+                    IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
+                )
+            if lower_clean.startswith(g + " "):
+                rest = lower_clean[len(g):].strip()
+                if rest in names:
+                    return RoutingDecision(
+                        IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
+                    )
+                logger.info("[GREETING_STRIP] remaining=%r", rest)
+                return self.classify(rest, "")
         if lower_clean in self.GREETINGS | frozenset({"how are you", "how are you doing", "how are ya"}):
             return RoutingDecision(
                 IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
@@ -452,10 +494,15 @@ class _IntentClassifier:
         interrogatives = frozenset({"who", "what", "where", "when", "why", "how"})
         first_w = lower.split()[0] if lower.split() else ""
 
+        # R4: confirm/accept antecedents — substring forms too ("please go ahead",
+        # "yes please", "go ahead", "yes do it", "okay go for it"). Only when the
+        # utterance is a short confirmation, never a full command.
         if (
-            (first_w in ("yes", "yeah", "sure", "ok", "okay") or
-             lower in ("play it", "play that", "watch it", "watch that",
-                       "show it", "show me", "go ahead", "do it", "play video", "play the first one"))
+            first_w in ("yes", "yeah", "sure", "ok", "okay")
+            or lower in ("go ahead", "do it", "play video")
+            or re.fullmatch(r"yes(?:\s+please|\s+go\s+ahead|\s+do\s+it)?", lower)
+            or re.fullmatch(r"please\s+(?:go\s+ahead|go\s+for\s+it|do\s+it|go)", lower)
+            or re.fullmatch(r"(?:go\s+ahead|go\s+for\s+it)", lower)
         ):
             return RoutingDecision(IntentType.CONVERSATION, "accept_offer", "", text, lower, confidence=0.9)
 
@@ -485,6 +532,10 @@ class _IntentClassifier:
             return RoutingDecision(IntentType.MEMORY, "store", lower, lower, lower, confidence=0.9)
         if re.match(r"^my\s+favorite\s+.+\s+is\s+", lower):
             return RoutingDecision(IntentType.MEMORY, "store", lower, lower, lower, confidence=0.9)
+        if re.match(r"^forget\s+(?:that|it|this|everything|all)\b", lower) or lower == "forget":
+            return RoutingDecision(IntentType.MEMORY, "forget", lower, lower, lower, confidence=0.9)
+        if re.match(r"^forget\s+(.+)", lower):
+            return RoutingDecision(IntentType.MEMORY, "forget_one", lower, lower, lower, confidence=0.9)
 
         recall = (
             r"^(?:do\s+you\s+)?(?:remember|recall)\b",
@@ -492,8 +543,11 @@ class _IntentClassifier:
             r"^what\s+do\s+i\s+(?:call|go\s+by)\b",
             r"^who\s+am\s+i\b",
             r"^(?:what'?s|what\s+is)\s+my\s+favorite\b",
+            r"^(?:what'?s|what\s+is)\s+my\s+favourite\b",
             r"^what\s+\w+\s+do\s+i\s+(?:like|love|enjoy|prefer)\b",
             r"^what\s+do\s+i\s+(?:like|love|enjoy|prefer)\b",
+            # generic possessive recall: "what's my favourite colour", "what's my nickname"
+            r"^(?:what'?s|what\s+is)\s+my\b",
         )
         if any(re.match(p, lower) for p in recall):
             return RoutingDecision(IntentType.MEMORY, "recall", lower, lower, lower, confidence=0.9)
@@ -520,6 +574,31 @@ class _IntentClassifier:
                 return RoutingDecision(IntentType.CONVERSATION, "converse", text, text, lower, confidence=0.7)
         return None
 
+    def _classify_emotion(self, lower, text):
+        _emotion_words = frozenset({
+            "sad", "happy", "angry", "frustrated", "stressed", "exhausted",
+            "excited", "depressed", "anxious", "worried", "upset", "mad",
+            "furious", "irritated", "annoyed", "disappointed", "grateful",
+            "thankful", "relieved", "confused", "lonely", "bored", "tired",
+            "nervous", "scared", "afraid", "terrified", "overwhelmed",
+            "content", "peaceful", "calm", "relaxed", "hopeful", "proud",
+            "embarrassed", "ashamed", "guilty", "jealous", "envious",
+            "terrible", "awful", "horrible", "miserable", "rough", "bad",
+        })
+        _emotion_re = "|".join(_emotion_words)
+        _emotion_patterns = (
+            r"^i(?:'m|\s+am)\s+(?:feeling\s+)?(?:so\s+|very\s+|really\s+|extremely\s+)?(" + _emotion_re + r")\b",
+            r"^i\s+feel\s+(?:so\s+|very\s+|really\s+|extremely\s+)?(" + _emotion_re + r")\b",
+            r"^i(?:'m|\s+am)\s+(?:not\s+(?:feeling\s+)?)?(?:so\s+|very\s+|really\s+|extremely\s+)?(" + _emotion_re + r")\b",
+            r"^i\s+(?:had|having|been)\s+a\s+(" + _emotion_re + r")\s+day\b",
+            r"^i\s+don'?t\s+feel\s+(?:so\s+|very\s+|really\s+)?(" + _emotion_re + r"|good|well)\b",
+            r"^i(?:'m|\s+am)\s+not\s+feeling\s+(?:so\s+|very\s+|really\s+)?(good|well|" + _emotion_re + r")\b",
+        )
+        for pat in _emotion_patterns:
+            if re.search(pat, lower):
+                return RoutingDecision(IntentType.CONVERSATION, "empathy", text, text, lower, confidence=0.9)
+        return None
+
     def _classify_entity_query(self, lower, text, raw_text):
         words = lower.split()
         if not words:
@@ -543,6 +622,28 @@ class _IntentClassifier:
             second_word_orig = orig_words[1] if len(orig_words) > 1 else ""
             if first_w in ("the", "a", "an") and second_word_orig and second_word_orig[0].isupper():
                 return RoutingDecision(IntentType.ENTITY_QUERY, "information_query", raw_text, raw_text, lower, confidence=0.8)
+
+        # R3: lowercase entity + artifact/info noun ("interstellar cast", "the weeknd news").
+        # Only fires on a short noun-phrase ending in a content/artifact keyword — never on
+        # social chat or imperatives (those are captured earlier in the chain).
+        _content_nouns = (
+            "cast", "trailer", "teaser", "soundtrack", "plot", "ending", "review",
+            "reviews", "summary", "gameplay", "gameplay", "news", "standings",
+            "fixtures", "results", "scores", "highlights", "discography", "filmography",
+            "biography", "stats", "statistics", "career", "awards", "net worth",
+        )
+        _social_leads = ("hi", "hey", "hello", "thanks", "thank", "sorry", "please",
+                         "okay", "ok", "sure", "no", "yes", "good", "bad", "sad", "happy",
+                         "i'm", "i am", "im", "not", "cool", "nice", "great", "boring")
+        if len(words) >= 2 and len(words) <= 5:
+            lead = words[0]
+            last_w = words[-1]
+            if lead in ("the", "a", "an") and len(words) >= 3:
+                lead = words[1]
+            if lead in two_word_stop:
+                pass
+            elif last_w in _content_nouns and lead not in _social_leads and len(lead) >= 2:
+                return RoutingDecision(IntentType.ENTITY_QUERY, "information_query", raw_text, raw_text, lower, confidence=0.7)
 
         i_loved = re.match(r"i\s+(loved|liked|enjoy(?:ed)?|watched|read|listen(?:ed)?\s+to)\s+(.+)", lower)
         if i_loved and len(i_loved.group(2)) > 2:
@@ -712,30 +813,32 @@ class _ExecutionCoordinator:
             target = params.get("target", "")
             return execute_action("execute_capability", target)
 
+        # Browser Connector is the single source of truth for tab state.
+        # open_tab writes into the Connector registry; close/list/focus must
+        # read from the same registry, not from a separate Playwright world.
+        conn = _get_connector()
+
         if action == "list_tabs":
-            if _check_br_available():
-                return _br_list_tabs()
-            conn = _get_connector()
             if conn and conn.is_connected():
                 from mini_kio.core.async_utils import safe_run_async
                 try:
                     result = safe_run_async(conn.list_tabs())
                     if result.success and result.tabs:
-                        lines = [f"  {t.title or t.url}" for t in result.tabs]
+                        lines = []
+                        for idx, t in enumerate(result.tabs, start=1):
+                            title = t.title or t.url
+                            suffix = " [Opened by KIO]" if getattr(t, "is_owned", False) else ""
+                            lines.append(f"{idx}. {title}{suffix}")
                         return {"success": True, "message": "Open tabs:\n" + "\n".join(lines)}
                     elif result.success:
                         return {"success": True, "message": "No tabs open."}
                 except Exception as exc:
                     logger.warning("list_tabs failed: %s", exc)
+            if _check_br_available():
+                return _br_list_tabs()
             return {"success": False, "message": "Browser not available."}
 
         if action == "focus":
-            if _check_br_available():
-                result = _br_focus_tab(params["target"])
-                if result.get("success"):
-                    self._try_browser_activate()
-                return result
-            conn = _get_connector()
             if conn and conn.is_connected():
                 from mini_kio.core.async_utils import safe_run_async
                 try:
@@ -745,12 +848,14 @@ class _ExecutionCoordinator:
                         return {"success": True, "message": f"Focused {params['target'].capitalize()} tab."}
                 except Exception as exc:
                     logger.warning("focus_tab failed: %s", exc)
+            if _check_br_available():
+                result = _br_focus_tab(params["target"])
+                if result.get("success"):
+                    self._try_browser_activate()
+                return result
             return {"success": False, "message": f"Couldn't focus {params['target']}."}
 
         if action == "close_tab":
-            if _check_br_available():
-                return _br_close_tab(params["target"])
-            conn = _get_connector()
             if conn and conn.is_connected():
                 from mini_kio.core.async_utils import safe_run_async
                 try:
@@ -759,6 +864,8 @@ class _ExecutionCoordinator:
                         return {"success": True, "message": f"Closed {params['target'].capitalize()} tab."}
                 except Exception as exc:
                     logger.warning("close_tab failed: %s", exc)
+            elif _check_br_available():
+                return _br_close_tab(params["target"])
             from mini_kio.core.execution_boundary import execute_action
             return execute_action("close_app", params["target"])
 
@@ -804,9 +911,29 @@ class _ExecutionCoordinator:
                 return {"success": True, "message": random.choice(responses["thanks"])}
             return {"success": True, "message": random.choice(responses["acknowledge"])}
 
-        # Substantive conversation (opinions, recommendations, open chat):
-        # generate a natural reply with the LLM using session facts + history.
-        if action in ("converse", "elaborate"):
+        # R4/Blocker 3: accept/confirm follow-up. Resolves the pending offer
+        # through the media intelligence layer (same path the media capability
+        # uses), so "yes please" / "please go ahead" continue the conversation.
+        if action == "accept_offer":
+            from mini_kio.media.media_manager import MediaManager
+            mm = MediaManager.get_instance()
+            result = mm.process_followup(decision.normalized_text)
+            if result:
+                return {"success": True, "message": result.get("message", "Done.")}
+            if mm.has_intelligence_offer():
+                accepted = mm.accept_intelligence_offer()
+                return {"success": True, "message": accepted.get("message", "Done.")}
+            last = mm.get_last_offer()
+            if last:
+                accepted = mm.accept_offer()
+                return {"success": True, "message": accepted.get("message", "Done.")}
+            reply = self._chat_converse(decision)
+            return {"success": True, "message": reply} if reply else {"success": True, "message": "Sure — what is it?"}
+
+        # Substantive conversation (opinions, recommendations, open chat,
+        # empathy): generate a natural reply with the LLM using session
+        # facts + history.
+        if action in ("converse", "elaborate", "empathy"):
             reply = self._chat_converse(decision)
             if reply:
                 return {"success": True, "message": reply}
@@ -873,18 +1000,22 @@ class _ExecutionCoordinator:
 
         parts = [
             "You are KIO, an intelligent personal companion and desktop assistant. "
-            "You are chatting naturally with a real user. Be warm, conversational and concise "
-            "(usually 1-4 sentences). Give genuine opinions with brief reasoning, compare options "
-            "fairly when asked, and recommend thoughtfully. Never claim you executed any real "
-            "action on the computer. If you don't know, or the topic is current/breaking, say so "
+            "You are chatting naturally with a real user. Be warm, conversational and short-first: "
+            "reply in 1-2 sentences, then offer to go deeper (e.g. 'Want more detail?'). "
+            "Only expand unprompted when the user explicitly asked for depth. "
+            "When asked for an opinion or to compare options, give a "
+            "reasoned analytical perspective grounded in KIO's design philosophy (determinism, "
+            "safety, honesty, human judgment) and the facts at hand. You may have opinions, but "
+            "you never invent personal human experience: you do not have a body, senses, "
+            "emotions, a childhood, or personal taste from living. Do not claim to like/dislike "
+            "music, films, food, games, or sports from personal experience; discuss them "
+            "analytically instead. If you don't know, or the topic is current/breaking, say so "
             "honestly instead of inventing facts. Plain prose only - no headings, no bullet lists, "
             "no 'Quick rundown' sections. "
             "NEVER reference past conversation topics unless they appear in the 'Recent conversation' "
             "section below. If that section is empty, you have NO prior context - greet naturally and "
             "do not claim or imply you were discussing anything before. "
-            "You have your own taste and perspective, like a friend: express likes and dislikes "
-            "directly. NEVER say 'I don't have personal feelings', 'as an AI', 'I don't have emotions', "
-            "or any detached-assistant phrasing.",
+            "You are honest that you are an AI companion when asked directly.",
         ]
         try:
             if ctx is not None:
@@ -898,7 +1029,7 @@ class _ExecutionCoordinator:
             pass
 
         try:
-            reply = ask_llm_sync(decision.normalized_text, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=300)
+            reply = ask_llm_sync(decision.normalized_text, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=300, task="conversation")
         except Exception:
             reply = None
         if reply:
@@ -922,8 +1053,42 @@ class _ExecutionCoordinator:
             for key, value in facts.items():
                 store.set_fact(key, value)
             ctx.append_message("user", text)
-            summary = ", ".join(f"{key} = {value}" for key, value in facts.items())
-            return {"success": True, "message": f"Remembered: {summary}."}
+            friendly = []
+            for key, value in facts.items():
+                if key.startswith("preference_"):
+                    friendly.append(f"You {value} {key[len('preference_'):].replace('_', ' ')}.")
+                elif key.startswith("favorite_"):
+                    friendly.append(f"Your favorite {key[len('favorite_'):].replace('_', ' ')} is {value}.")
+                elif key == "user_name":
+                    friendly.append(f"Your name is {value.capitalize()}.")
+                else:
+                    friendly.append(f"{key}: {value}.")
+            return {"success": True, "message": "Got it — " + " ".join(friendly)}
+
+        if params.get("action") == "forget":
+            facts = store.get_all_facts()
+            if not facts:
+                return {"success": False, "message": "I don't have anything saved about you yet."}
+            if re.search(r"\b(that|it|this)\b", text.lower()):
+                key = next(reversed(facts))
+                store.delete_fact(key)
+                return {"success": True, "message": f"Done — I've forgotten about {key.replace('_', ' ')}."}
+            store.clear()
+            return {"success": True, "message": "Done — I've forgotten everything I knew about you."}
+        if params.get("action") == "forget_one":
+            topic = text.lower().replace("forget", "", 1).strip(" .,!?;:")
+            facts = store.get_all_facts()
+            target = None
+            t_terms = re.findall(r"[a-z0-9]+", topic)
+            for k in facts:
+                k_terms = re.findall(r"[a-z0-9]+", k)
+                if any(t in k_terms for t in t_terms if len(t) > 2):
+                    target = k
+                    break
+            if target:
+                store.delete_fact(target)
+                return {"success": True, "message": f"Done — I've forgotten about {topic}."}
+            return {"success": False, "message": f"I don't remember anything about {topic}."}
 
         ctx.append_message("user", text)
         facts = store.get_all_facts()
@@ -931,30 +1096,56 @@ class _ExecutionCoordinator:
             return {"success": False, "message": "I don't have anything saved about you yet."}
 
         lower = text.lower()
+        # Normalize UK->US spellings so "favourite colour" matches "favorite_color".
+        _us = (lower.replace("favourite", "favorite").replace("colour", "color")
+                   .replace("behaviour", "behavior").replace("centre", "center")
+                   .replace("metre", "meter").replace("favourite", "favorite"))
+        facts_us = {}
+        for k, v in facts.items():
+            k_us = (k.replace("favourite", "favorite").replace("colour", "color")
+                     .replace("behaviour", "behavior").replace("centre", "center")
+                     .replace("metre", "meter"))
+            facts_us[k_us] = (k, v)
         if "name" in lower:
             name = facts.get("user_name") or facts.get("my_name")
             if name:
                 return {"success": True, "message": f"Your name is {name.capitalize()}."}
-        if any(k in lower for k in ("favorite", "like", "love", "enjoy", "prefer")):
-            fav_m = re.search(r"\bfavorite\s+(movie|film|show|game|food|music|band|artist|book|team|sport|color|subject|hobby|thing)\b", lower)
+        if any(k in _us for k in ("favorite", "like", "love", "enjoy", "prefer")):
+            # Scoped recall: extract the specific attribute (favorite color, nickname, ...)
+            topic_terms = re.findall(r"[a-z0-9]+", _us)
+            stop = {"what", "is", "my", "s", "i", "do"}
+            topic_terms = [t for t in topic_terms if len(t) > 2 and t not in stop]
+            scoped = []
+            for k_us, (orig_k, v) in facts_us.items():
+                k_terms = re.findall(r"[a-z0-9]+", k_us)
+                if any(t in k_terms for t in topic_terms):
+                    if k_us.startswith("preference_"):
+                        scoped.append(f"You {v} {orig_k.split('preference_')[-1].replace('_', ' ')}.")
+                    elif k_us.startswith("favorite_"):
+                        scoped.append(f"Your favorite {orig_k.split('favorite_')[-1].replace('_', ' ')} is {v}.")
+                    else:
+                        scoped.append(f"{orig_k.replace('_', ' ')}: {v}.")
+            if scoped:
+                return {"success": True, "message": " ".join(scoped)}
+            fav_m = re.search(r"\bfavorite\s+(movie|film|show|game|food|music|band|artist|book|team|sport|color|subject|hobby|thing)\b", _us)
             if fav_m:
                 cat = fav_m.group(1)
-                if not any(k.startswith(f"favorite_{cat}") or k.startswith(f"preference_{cat}") for k in facts):
+                if not any(k_us.startswith(f"favorite_{cat}") or k_us.startswith(f"preference_{cat}") for k_us in facts_us):
                     return {"success": False, "message": f"I don't know your favorite {cat} yet."}
                 lines = []
-                for k, v in facts.items():
-                    if k.startswith(f"favorite_{cat}"):
+                for k_us, (orig_k, v) in facts_us.items():
+                    if k_us.startswith(f"favorite_{cat}"):
                         lines.append(f"Your favorite {cat} is {v}.")
-                    elif k.startswith(f"preference_{cat}"):
-                        lines.append(f"You {v} {k[len('preference_'):].replace('_', ' ')}.")
+                    elif k_us.startswith(f"preference_{cat}"):
+                        lines.append(f"You {v} {k_us[len('preference_'):].replace('_', ' ')}.")
                 if lines:
                     return {"success": True, "message": " ".join(lines)}
             lines = []
-            for k, v in facts.items():
-                if k.startswith("preference_"):
-                    lines.append(f"You {v} {k[len('preference_'):].replace('_', ' ')}.")
-                elif k.startswith("favorite_"):
-                    lines.append(f"Your favorite {k[len('favorite_'):].replace('_', ' ')} is {v}.")
+            for k_us, (orig_k, v) in facts_us.items():
+                if k_us.startswith("preference_"):
+                    lines.append(f"You {v} {orig_k[len('preference_'):].replace('_', ' ')}.")
+                elif k_us.startswith("favorite_"):
+                    lines.append(f"Your favorite {orig_k[len('favorite_'):].replace('_', ' ')} is {v}.")
             if lines:
                 return {"success": True, "message": " ".join(lines)}
         if re.search(r"\bremember\b", lower) and facts.get("user_name"):
@@ -1003,11 +1194,39 @@ class _ExecutionCoordinator:
 
 
 class _ResponseComposer:
+    # BUG 6 (retained): implementation tokens must never surface to the user.
+    # The execution/verification layers produce structured facts; only this
+    # composer turns them into user language. Strip leaked jargon defensively.
+    _LEAK_PATTERNS = re.compile(
+        r"\b(?:via|through|using|over)\s+"
+        r"(?:the\s+)?"
+        r"(?:browser\s+connector|connector|provider|execution\s+boundary|runtime|pipeline|capability|cdp|mcp)\b",
+        re.IGNORECASE,
+    )
+    _LEAK_WORDS = re.compile(
+        r"\b(?:browser\s+connector|connector|execution\s+boundary|capability|pipeline|runtime|cdp|mcp)\b",
+        re.IGNORECASE,
+    )
+
+    def _strip_leaks(self, message: str) -> str:
+        """Remove implementation verbosity from any message at a central point."""
+        if not message:
+            return message
+        stripped = self._LEAK_PATTERNS.sub("", message)
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+        stripped = self._LEAK_WORDS.sub("", stripped)
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip(" .,;\n\t")
+        return stripped
+
     def compose(
         self, result: dict[str, Any], decision: RoutingDecision, ctx
     ) -> dict[str, Any]:
         result.setdefault("success", False)
-        result.setdefault("message", "Done." if result.get("success") else "Command failed.")
+        if "message" not in result:
+            result["message"] = "Done." if result.get("success") else "Command failed."
+
+        message = result["message"] if isinstance(result["message"], str) else str(result["message"])
+        result["message"] = self._strip_leaks(message or "Done.")
 
         ctx.update(result, decision.normalized_text)
         try:
@@ -1021,5 +1240,4 @@ class _ResponseComposer:
                 "target": result.get("target", decision.target),
                 "success": result.get("success", False),
             })
-
         return result

@@ -95,6 +95,15 @@ class OwnedTab:
         )
 
 
+class VerificationCode(str, Enum):
+    """Structured outcome of an externally-visible browser action."""
+    VERIFIED = "VERIFIED"          # Observable state matches the request
+    PARTIAL = "PARTIAL"           # State reached but could not be fully confirmed
+    TIMEOUT = "TIMEOUT"           # State never reached before deadline
+    FAILED = "FAILED"             # State contradicts the request
+    NOT_VERIFIED = "NOT_VERIFIED" # No verification was possible
+
+
 @dataclass
 class TabResult:
     """Result of a tab operation."""
@@ -104,10 +113,11 @@ class TabResult:
     tabs: Optional[list[OwnedTab]] = None
     error: str = ""
     message: str = ""
+    verification: str = VerificationCode.NOT_VERIFIED.value
 
     def to_dict(self) -> dict:
         d = {"success": self.success, "command_id": self.command_id,
-             "message": self.message}
+             "message": self.message, "verification": self.verification}
         if self.tab:
             d["tab"] = self.tab.to_dict()
         if self.tabs is not None:

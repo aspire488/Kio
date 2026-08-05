@@ -701,6 +701,20 @@ def _safe_webbrowser_open(url: str) -> bool:
     if os.environ.get("KIO_TEST_MODE") == "1":
         logger.info("[TEST MODE] Blocked webbrowser.open(%s)", url)
         return True
+    from mini_kio.core.command_router import _get_connector
+    from mini_kio.core.async_utils import safe_run_async
+    conn = _get_connector()
+    if conn:
+        try:
+            result = safe_run_async(conn.open_tab(url))
+            if getattr(result, "success", False):
+                return True
+            logger.debug("[CONNECTOR] open_tab failed or reported failure, falling back to system browser: %s", result)
+        except Exception as exc:
+            logger.debug("[CONNECTOR] open_tab failed, falling back to system browser: %s", exc)
+    else:
+        if config.BROWSER_CONNECTOR_ENABLED:
+            logger.debug("[CONNECTOR] connector configured but unavailable, falling back to system browser")
     return webbrowser.open(url)
 
 
@@ -1756,22 +1770,23 @@ def execute_capability(target: str) -> dict:
             else:
                 url = args if args.startswith("http") else "https://" + args
 
-        # Prefer BrowserRuntime over subprocess when available
-        if rt and rt.browser_runtime:
-            from mini_kio.core.browser_operator import _br_run_async
-            _ws = getattr(rt, '_browser_default_workspace', 'default')
-            try:
-                info = _br_run_async(rt.browser_runtime.new_tab(_ws, url=url))
-                if info:
-                    from mini_kio.core.routing_utils import register_browser_capability
-                    register_browser_capability(friendly_name, app_name, url)
-                    return _normalize_public_result(
-                        "execute_capability", f"{app_name}::{friendly_name}",
-                        {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.",
-                         "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name},
-                        start_time)
-            except Exception:
-                pass  # Fall through to subprocess if BrowserRuntime fails
+            # Prefer Browser Connector in production for user browser commands.
+            from mini_kio.core.command_router import _get_connector
+            conn = _get_connector()
+            if conn and conn.is_connected():
+                try:
+                    from mini_kio.core.async_utils import safe_run_async
+                    result = safe_run_async(conn.open_tab(url))
+                    if result.success:
+                        from mini_kio.core.routing_utils import register_browser_capability
+                        register_browser_capability(friendly_name, app_name, url)
+                        return _normalize_public_result(
+                            "execute_capability", f"{app_name}::{friendly_name}",
+                            {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()} via connector.",
+                             "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name},
+                            start_time)
+                except Exception as exc:
+                    logger.debug("[CONNECTOR] execute_capability open_tab failed, falling back: %s", exc)
 
         info = _find_in_registry(app_name)
         if not info:

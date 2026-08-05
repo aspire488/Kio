@@ -63,6 +63,13 @@ class LLMGateway:
             self._registry.add_diagnostic(DIAG_CHAIN_EXHAUSTED, "chain", "no providers in chain")
             return self._deterministic_fallback("PROVIDER_CHAIN_EXHAUSTED")
 
+        # Task-tier preference: if the caller requested a specific provider and it is
+        # registered & try-able, try it first, then fall through to the priority chain.
+        preferred = getattr(request, "preferred_provider", "") or ""
+        if preferred and preferred in chain:
+            chain = [preferred] + [p for p in chain if p != preferred]
+            logger.debug(f"Gateway: task-tier preferred provider '{preferred}' moved to front")
+
         for provider_name in chain:
             if time.monotonic() >= total_deadline:
                 logger.warning(f"Gateway: total chain timeout reached, tried up to '{provider_name}'")

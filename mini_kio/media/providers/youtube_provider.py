@@ -45,8 +45,32 @@ class YouTubeProvider(MediaProvider):
             logger.info("[ROOT_YT] RETURN=R1 conn=None")
             return MediaResult(success=False, error="Browser Connector not available", player="youtube")
         if not conn.is_connected():
-            logger.info("[ROOT_YT] RETURN=R2 conn_not_connected")
-            return MediaResult(success=False, error="Browser Connector not available", player="youtube")
+            if config.BROWSER_CONNECTOR_ENABLED:
+                logger.info("[ROOT_YT] RETURN=R2 conn_not_connected -> configured connector unavailable")
+                return MediaResult(success=False, error="Browser Connector not connected", player="youtube")
+            # No Chrome extension attached to the connector. Fall back to opening
+            # the YouTube search page in BrowserRuntime / default browser only
+            # when connector support is disabled in the current environment.
+            logger.info("[ROOT_YT] RETURN=R2 conn_not_connected -> browser fallback")
+            from mini_kio.core.browser_operator import play_youtube
+            fb = play_youtube(query)
+            if not fb.get("success"):
+                return MediaResult(success=False, error=fb.get("message", "Couldn't open YouTube"), player="youtube")
+            display = query.strip()
+            if display.startswith(("http://", "https://", "www.")):
+                display = "the requested media"
+            self._session = MediaSession(
+                player=PlayerType.YOUTUBE,
+                tab_id=None,
+                state=MediaState.PLAYING,
+                query=query.strip(),
+                title=query.strip(),
+                url=_YOUTUBE_SEARCH_URL.format(encoded=urllib.parse.quote_plus(query.strip())),
+                domain_hint="youtube.com",
+                media_type=self._detect_type(query),
+            )
+            self._session.touch()
+            return MediaResult(success=True, message=f"Playing on YouTube: {display}", session=self._session, player="youtube")
 
         clean_query = query.strip()
         if not clean_query:
@@ -415,58 +439,109 @@ class YouTubeProvider(MediaProvider):
         search_url = f"https://www.youtube.com/results?search_query={encoded}"
         
         try:
-            # We use open_tab + script execution to scrape the first result
             result = safe_run_async(conn.open_tab(search_url))
             if not result.success or not result.tab:
                 return MediaResult(success=False, error="Failed to open search tab", player="youtube")
             
             tab_id = result.tab.tab_id
-            time.sleep(1.0) # Wait for results to load
+            time.sleep(1.0)  # Wait for results to load
             
-            # Scrape the first video result
-            # We'll use a script to extract the first video ID and title
             scrape_script = """
             (function() {
-                const video = document.querySelector('ytd-video-renderer a#video-title');
-                if (video) {
-                    const url = video.href;
-                    const videoId = new URL(url).searchParams.get('v');
-                    return { title: video.title, video_id: videoId, url: url };
+                const selectors = [
+                    'ytd-video-renderer',
+                    'ytd-grid-video-renderer',
+                    'ytd-rich-item-renderer',
+                    'ytd-item-section-renderer',
+                ];
+                const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+                const results = [];
+                for (const node of nodes) {
+                    const anchor = node.querySelector('a#video-title');
+                    if (!anchor || !anchor.href) {
+                        continue;
+                    }
+                    const url = anchor.href;
+                    let videoId = null;
+                    try {
+                        videoId = new URL(url).searchParams.get('v');
+                    } catch (err) {
+                        continue;
+                    }
+                    if (!videoId) {
+                        continue;
+                    }
+                    const title = (anchor.title || anchor.textContent || '').trim();
+                    if (!title) {
+                        continue;
+                    }
+                    results.push({ title: title, url: url, video_id: videoId });
+                    if (results.length >= 8) {
+                        break;
+                    }
                 }
-                return null;
+                return results;
             })()
             """
             scrape_res = safe_run_async(conn.execute_script(tab_id, "eval", args=[scrape_script]))
-            
-            if scrape_res.success and isinstance(scrape_res.message, dict):
-                data = scrape_res.message
-                video_id = data.get("video_id")
-                url = data.get("url")
-                title = data.get("title")
-                
-                logger.info("[YOUTUBE_ARTIFACT] query='%s' video_id=%s url=%s", query, video_id, url)
-                
+            candidates = []
+            if scrape_res.success and isinstance(scrape_res.message, list):
+                for item in scrape_res.message:
+                    if not isinstance(item, dict):
+                        continue
+                    title = item.get("title")
+                    url = item.get("url")
+                    video_id = item.get("video_id")
+                    if title and url and video_id:
+                        candidates.append((title, url, video_id))
+
+            def _score_candidate(title: str, url: str) -> int:
+                score = 0
+                tl = title.lower()
+                ql = query.lower()
+                if ql in tl:
+                    score += 20
+                for term in ql.split():
+                    if term and term in tl:
+                        score += 2
+                if "trailer" in ql and "trailer" in tl:
+                    score += 10
+                if "highlight" in ql and "highlight" in tl:
+                    score += 10
+                if "interview" in ql and "interview" in tl:
+                    score += 10
+                if "music video" in ql and "music video" in tl:
+                    score += 10
+                if "live" in ql and "live" in tl:
+                    score += 5
+                if "official" in tl:
+                    score += 3
+                if "/shorts/" in url:
+                    score -= 2
+                return score
+
+            if candidates:
+                best = max(candidates, key=lambda item: _score_candidate(item[0], item[1]))
+                title, url, video_id = best
+                logger.info("[YOUTUBE_ARTIFACT] query='%s' selected_title=%s url=%s", query, title, url)
                 candidate = MediaCandidate(
-                    title=title or query,
+                    title=title,
                     url=url,
                     provider="youtube",
-                    source="youtube"
+                    source="youtube",
+                    confidence=1.0,
                 )
-                
-                # Close the search tab
                 safe_run_async(conn.close_tab(tab_id))
-                
                 return MediaResult(
-                    success=True, 
-                    message=f"Found artifact: {title}", 
+                    success=True,
+                    message=f"Found artifact: {title}",
                     candidates=[candidate],
                     url=url,
-                    player="youtube"
+                    player="youtube",
                 )
-            
+
             safe_run_async(conn.close_tab(tab_id))
             return MediaResult(success=False, error="No video found in search results", player="youtube")
-            
         except Exception as e:
             logger.error("[YOUTUBE_METADATA_SEARCH_ERROR] error=%s", e)
             return MediaResult(success=False, error=str(e), player="youtube")

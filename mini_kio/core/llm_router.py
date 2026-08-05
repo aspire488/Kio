@@ -277,10 +277,27 @@ def _log_provider_health_report(gateway: LLMGateway) -> None:
     logger.info("\n".join(lines))
 
 
-async def ask_llm(query: str, timeout: float = 8.0, max_tokens: int = 200) -> Optional[str]:
+# Task-tier model routing: map task kind → preferred provider (try first, then chain).
+# Leave a task out → default priority chain (current behavior). This keeps cheap/fast
+# tasks on fast providers and reserves big models for reasoning-heavy tasks.
+_TASK_PROVIDER_PREFERENCE = {
+    "conversation": "groq",   # fast chitchat/opinion replies
+    "greeting": "groq",
+    "summarize": "groq",
+    "reasoning": "gemini",    # complex multi-step reasoning
+    "analysis": "gemini",
+    "code": "gemini",
+    "media": "gemini",
+    "memory": "gemini",
+}
+
+
+async def ask_llm(query: str, timeout: float = 8.0, max_tokens: int = 200,
+                  task: str = "") -> Optional[str]:
     """
     Authoritative entry point for conversational LLM requests.
     Routes through LLMGateway → multi-provider failover chain.
+    `task` selects a preferred provider first when set (see _TASK_PROVIDER_PREFERENCE).
     """
     gateway = _get_gateway()
 
@@ -289,6 +306,7 @@ async def ask_llm(query: str, timeout: float = 8.0, max_tokens: int = 200) -> Op
         max_tokens=max_tokens,
         timeout_s=timeout,
         provider="",  # Let chain decide
+        preferred_provider=_TASK_PROVIDER_PREFERENCE.get(task, ""),
     )
 
     try:

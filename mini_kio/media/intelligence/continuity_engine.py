@@ -77,7 +77,11 @@ class ContinuityEngine:
                         "whom", "whose", "is", "are", "was", "were", "do", "does",
                         "did", "can", "could", "will", "would", "shall", "should",
                         "may", "might", "tell", "show", "please", "explain",
-                        "describe", "define", "now", "so", "then", "but", "and"}
+                        "describe", "define", "now", "so", "then", "but", "and",
+                        "the", "a", "an", "of", "for", "with", "about", "at", "in",
+                        "on", "from", "by", "to", "or", "not", "no", "get", "got",
+                        "go", "went", "see", "watch", "listen", "play", "want",
+                        "know", "there", "this", "that"}
         words = q.split()
         cap_words = set()
         for w in words:
@@ -97,7 +101,7 @@ class ContinuityEngine:
                           "leader","leading","qualified","eliminated"}
             query_words = {w.strip(".,!?;:'\"").lower() for w in words}
             content = query_words - _start_words - _artifact_kws - _freshness
-            if len(content) >= 2 and not any(cw in current_lower for cw in content):
+            if content and not any(cw in current_lower for cw in content):
                 return True
             return False  # No clear entity reference — safe to treat as followup
         # If any capitalized word is NOT part of current subject, it's a new entity

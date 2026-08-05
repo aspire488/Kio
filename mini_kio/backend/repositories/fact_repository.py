@@ -52,3 +52,9 @@ class FactRepository:
     def clear_facts(self, session_id: str):
         with db_session() as db:
             db.query(FactModel).filter(FactModel.session_id == session_id).delete()
+
+    def delete_fact(self, session_id: str, key: str):
+        with db_session() as db:
+            db.query(FactModel).filter(
+                FactModel.session_id == session_id, FactModel.fact_key == key
+            ).delete()

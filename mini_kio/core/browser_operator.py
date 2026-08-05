@@ -71,6 +71,10 @@ def _get_browser_runtime():
             with _br_start_lock:
                 if not getattr(br, '_started', False):
                     _br_run_async(br.start())
+                    _ws = getattr(rt, '_browser_default_workspace', 'default')
+                    if not br.workspaces.exists(_ws):
+                        from mini_kio.runtime.browser_runtime.types import WorkspaceConfig
+                        _br_run_async(br.open_workspace(WorkspaceConfig(name=_ws)))
         return br
     except Exception as exc:
         logger.error("BrowserRuntime start failed: %s", exc, exc_info=True)
@@ -120,7 +124,6 @@ def _safe_webbrowser_open(url: str) -> bool:
             return result.success
         except Exception as exc:
             logger.debug("[CONNECTOR] open_tab failed, falling back: %s", exc)
-    # Fallback to BrowserRuntime
     br_result = _try_browser_runtime_navigate(url)
     if br_result is not None:
         return br_result

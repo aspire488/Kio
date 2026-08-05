@@ -10,6 +10,7 @@ coordinator.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -52,6 +53,15 @@ def _get_connector():
             mock=config.BROWSER_CONNECTOR_MOCK,
             port=config.BROWSER_CONNECTOR_PORT,
         )
+        # Wrap the raw connector in the generic state-verification pipeline so
+        # every browser/media provider (which all call _get_connector) benefits
+        # automatically. The ACK is only a trigger; success requires observed
+        # Chrome state.
+        try:
+            from mini_kio.core.state_verification import VerifiedConnector
+            _CONNECTOR_INSTANCE = VerifiedConnector(_CONNECTOR_INSTANCE)
+        except Exception as exc:
+            logger.warning("[CONNECTOR] verification wrapper unavailable, falling back to raw: %s", exc)
     if not _CONNECTOR_STARTED and config.BROWSER_CONNECTOR_ENABLED:
         _CONNECTOR_STARTED = True
         conn = _CONNECTOR_INSTANCE
@@ -60,13 +70,28 @@ def _get_connector():
     return _CONNECTOR_INSTANCE
 
 
+def _stop_connector() -> None:
+    """Stop the background Browser Connector (daemon thread + WS server)."""
+    global _CONNECTOR_INSTANCE, _CONNECTOR_STARTED
+    conn = _CONNECTOR_INSTANCE
+    if conn is None or not _CONNECTOR_STARTED:
+        return
+    try:
+        loop = getattr(conn, "_loop", None)
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(conn.stop(), loop).result(timeout=5)
+        else:
+            conn.stop()
+    except Exception as exc:
+        logger.warning("[CONNECTOR] shutdown failed: %s", exc)
+    finally:
+        _CONNECTOR_STARTED = False
+        _CONNECTOR_INSTANCE = None
+
+
 def _use_browser_runtime() -> bool:
-    from mini_kio.core.runtime import get_runtime
-    rt = get_runtime()
-    if rt is None or rt.browser_runtime is None:
-        return False
-    br = rt.browser_runtime
-    return getattr(br, '_started', False)
+    from mini_kio.core.browser_operator import _get_browser_runtime
+    return _get_browser_runtime() is not None
 
 
 def _br_focus_tab(target: str) -> dict:

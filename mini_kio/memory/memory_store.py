@@ -150,6 +150,11 @@ class MemoryStore:
             self._global["messages"].clear()
             self._global["facts"].clear()
 
+    def delete_fact(self, key: str):
+        self._fact_repo.delete_fact(self._session_id, key)
+        with self._lock:
+            self._global["facts"].pop(key, None)
+
     def close(self):
         try:
             from mini_kio.backend.db import close_db
