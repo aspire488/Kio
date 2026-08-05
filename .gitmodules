@@ -1,0 +1,27 @@
+[submodule "external/LibreChat"]
+	path = external/LibreChat
+	url = https://github.com/danny-avila/LibreChat.git
+[submodule "external/Open-LLM-VTuber"]
+	path = external/Open-LLM-VTuber
+	url = https://github.com/Open-LLM-VTuber/Open-LLM-VTuber.git
+[submodule "external/Scrapling"]
+	path = external/Scrapling
+	url = https://github.com/D4Vinci/Scrapling.git
+[submodule "external/agency-swarm"]
+	path = external/agency-swarm
+	url = https://github.com/VRSEN/agency-swarm.git
+[submodule "external/agent-reach"]
+	path = external/agent-reach
+	url = https://github.com/Panniantong/agent-reach.git
+[submodule "external/agentic-inbox"]
+	path = external/agentic-inbox
+	url = https://github.com/cloudflare/agentic-inbox.git
+[submodule "external/openwork"]
+	path = external/openwork
+	url = https://github.com/different-ai/openwork.git
+[submodule "external/shepherd"]
+	path = external/shepherd
+	url = https://github.com/shepherd-agents/shepherd.git
+[submodule ".agent-skills/ponytail"]
+	path = .agent-skills/ponytail
+	url = https://github.com/DietrichGebert/ponytail.git
