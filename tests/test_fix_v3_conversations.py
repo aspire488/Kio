@@ -71,17 +71,15 @@ def test_media_knowledge_router_non_media():
     print(f"  [OK] Non-media query correctly returned GENERAL")
 
 
-# ── Fix 2: _resolve_contextual_references media entity guard ───────
+# ── Fix 2: contextual-reference media entity guard ───────
 
 def test_context_resolve_media_guard_present():
-    """_resolve_contextual_references must have the media guard in its code."""
+    """resolved_text must have the media passthrough guard (G1) in its code."""
     import inspect
-    from mini_kio.core.command_router import _resolve_contextual_references
-    source = inspect.getsource(_resolve_contextual_references)
-    assert "[CONTEXT_GUARD]" in source, "Media entity guard not found in function"
-    assert "MediaManager" in source, "MediaManager import not found in function"
-    assert "get_last_entity" in source, "get_last_entity call not found"
-    print("  [OK] Media entity guard code is present in _resolve_contextual_references")
+    from mini_kio.core.context_manager import SessionContext
+    source = inspect.getsource(SessionContext.resolved_text)
+    assert '("play ", "watch ", "seek ", "turn ")' in source, "Media passthrough guard not found"
+    print("  [OK] Media entity guard code is present in SessionContext.resolved_text")
 
 
 # ── Fix 3: _handle_acceptance handles "play the first one" ──────────

@@ -118,17 +118,6 @@ class PendingAction:
     executed: bool = False
 
 
-_RUNTIME_TRACKER: dict[str, str] = {}  # session_id → last action target for "again" ref
-
-
-def _get_last_action(session_id: str) -> str:
-    return _RUNTIME_TRACKER.get(session_id, "")
-
-
-def _set_last_action(session_id: str, target: str) -> None:
-    _RUNTIME_TRACKER[session_id] = target
-
-
 _SESSION_CONTEXTS: dict[str, "SessionContext"] = {}
 
 _STATE_FACT_KEY = "session_context_state_json"
@@ -143,7 +132,6 @@ def get_session_context(session_id: str) -> "SessionContext":
 
 def clear_session_context(session_id: str) -> None:
     _SESSION_CONTEXTS.pop(session_id, None)
-    _RUNTIME_TRACKER.pop(session_id, None)
 
 
 class SessionContext:
@@ -458,12 +446,31 @@ class SessionContext:
         return False
 
     def resolved_text(self, text: str) -> str:
-        """Resolve continuity references and return the modified command string."""
+        """Resolve continuity references and return the modified command string.
+
+        P1.2: canonical home of contextual-reference resolution. Merged the
+        live pipeline resolver guards (media/transport/forget passthrough,
+        "again" via runtime buffer, pronoun with last-target fallback) with
+        the pre-existing S1/S2 marker handling. S1/S2 are newly-live on the
+        pipeline path and are covered as new surface in validation.
+        """
         if not text:
             return text
         lower = text.lower().strip()
 
-        # Continuation markers → reuse last target
+        # G1: media passthrough — do not resolve pronouns inside playback verbs
+        if lower.startswith(("play ", "watch ", "seek ", "turn ")):
+            return text
+
+        # G2: transport passthrough
+        if lower in ("pause", "resume", "stop", "next", "previous", "mute", "unmute"):
+            return text
+
+        # G3: forget passthrough — memory commands own their own semantics
+        if lower.startswith("forget"):
+            return text
+
+        # S1: continuation markers → reuse last target [NEWLY LIVE]
         if lower.rstrip(".") in _CONTINUATION_MARKERS:
             if self.last_target:
                 action = self.last_action or "search"
@@ -472,27 +479,48 @@ class SessionContext:
                 return f"{action} {self.last_target}"
             return text
 
-        # Affirmative → proceed with pending
+        # S2: affirmative → proceed with pending [NEWLY LIVE]
         if lower.rstrip(".") in _AFFIRMATIVE_MARKERS:
             if self.pending_action and not self.pending_action.executed:
                 return f"{self.pending_action.action_type} {self.pending_action.query}"
             return text
 
-        # Runtime "again" → repeat last
-        if _RUNTIME_REF_RE.search(lower):
-            last = _get_last_action(self.session_id)
+        # G4: "again" → repeat last successful interaction (runtime buffer).
+        # Live source is get_last_successful_interaction(must_have_target=False),
+        # which is success-gated and permits no-target records — the old
+        # _RUNTIME_TRACKER (target-guarded write) could not represent either.
+        if lower == "again" or lower == "do it again":
+            from mini_kio.core.runtime import get_last_successful_interaction
+            last = get_last_successful_interaction(must_have_target=False)
             if last:
-                return last
-            return text
-
-        # Pronoun/pronoun reference → inject active entity
-        if self._has_pronoun(lower) and self.active_entity:
-            resolved = re.sub(
-                r"\b(it|that|this|him|her|them|they)\b", self.active_entity, text, flags=re.IGNORECASE
-            )
-            if resolved != text:
-                logger.info("[CONTEXT_RESOLVE] pronoun: %r → %r", text, resolved)
+                action = (
+                    last.get("action", "")
+                    .replace("_app", "")
+                    .replace("_web", "")
+                    .replace("_system", "")
+                    .replace("_folder", "")
+                    .replace("_youtube", "")
+                )
+                target = str(last.get("target", ""))
+                resolved = f"{action} {target}".strip()
                 return resolved
+
+        # G5: pronoun → active_entity, then session last_target fallback
+        if re.search(r"\b(it|that|this)\b", lower):
+            if self.active_entity:
+                resolved = re.sub(
+                    r"\b(it|that|this)\b", self.active_entity, text, flags=re.IGNORECASE
+                )
+                if resolved != text:
+                    logger.info("[CONTEXT_RESOLVE] pronoun: %r → %r", text, resolved)
+                    return resolved.strip()
+            if self.last_target:
+                resolved = re.sub(
+                    r"\b(it|that|this)\b", self.last_target, text, flags=re.IGNORECASE
+                )
+                if resolved != text:
+                    logger.info("[CONTEXT_RESOLVE] pronoun: %r → %r", text, resolved)
+                    return resolved.strip()
 
         return text
 
@@ -512,7 +540,6 @@ class SessionContext:
             if not any(clean.lower().startswith(p) for p in _blocked):
                 self.active_entity = clean
                 self.last_target = clean
-            _set_last_action(self.session_id, command)
         elif command.lower().startswith("play ") and not target:
             # Failed play: still remember what user tried to play
             entity = command[5:].strip()

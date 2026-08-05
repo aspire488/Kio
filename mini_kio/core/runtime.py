@@ -976,14 +976,6 @@ def dispatch_channel_input(
 
     command = InputNormalizer.strip_emoji(command_raw)
 
-    # Pronoun resolution at earliest entrypoint — so both deterministic
-    # and orchestration paths see resolved text (e.g. "it" → last topic)
-    try:
-        from mini_kio.core.command_router import _resolve_contextual_references
-        command = _resolve_contextual_references(command)
-    except Exception:
-        pass
-
     start_trace(command, channel)
     emit_runtime_trace(
         "orchestration_entry",

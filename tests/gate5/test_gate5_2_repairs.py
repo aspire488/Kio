@@ -23,22 +23,16 @@ def test_bug1_identity_consistency():
     assert "Joel" in rewritten
     assert "Meta" not in rewritten
 
-def test_bug3_pronoun_resolution(monkeypatch):
-    from mini_kio.core import runtime
-    class MockRuntime:
-        def __init__(self):
-            self.context_items = []
-        def get_last_successful_interaction(self, must_have_target=True):
-            return {"action": "open_app", "target": "Spotify", "success": True}
-    
-    mock_rt = MockRuntime()
-    monkeypatch.setattr(runtime, "get_last_successful_interaction", mock_rt.get_last_successful_interaction)
-    
-    from mini_kio.core.command_router import _resolve_contextual_references
-    resolved = _resolve_contextual_references("close this")
+def test_bug3_pronoun_resolution():
+    from mini_kio.core.context_manager import SessionContext
+    ctx = SessionContext(session_id="p12_pronoun_test")
+    ctx.active_entity = None
+    ctx.last_target = "Spotify"
+
+    resolved = ctx.resolved_text("close this")
     assert "close Spotify" in resolved
-    
-    resolved = _resolve_contextual_references("open it")
+
+    resolved = ctx.resolved_text("open it")
     assert "open Spotify" in resolved
 
 def test_bug4_url_leakage():

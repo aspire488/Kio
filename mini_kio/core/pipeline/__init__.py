@@ -68,7 +68,7 @@ class _NormalizationService:
         from mini_kio.core.command_parser import _apply_aliases, _normalize_connectors
 
         cmd = InputNormalizer.strip_emoji(text)
-        cmd = _resolve_contextual_references(cmd, ctx)
+        cmd = ctx.resolved_text(cmd)
         cmd = _apply_aliases(cmd)
         cmd = _normalize_connectors(cmd)
 
@@ -80,49 +80,6 @@ class _NormalizationService:
 
         cmd = re.sub(r"\bon\s+(chrome|edge|comet|firefox|brave)\b", r" in \1", cmd)
         return cmd
-
-
-def _resolve_contextual_references(command: str, ctx) -> str:
-    """Resolve 'it', 'that', 'again' from session context."""
-    from mini_kio.core.runtime import get_last_successful_interaction
-
-    lower = command.lower().strip()
-
-    if lower.startswith(("play ", "watch ", "seek ", "turn ")):
-        return command
-    if lower in ("pause", "resume", "stop", "next", "previous", "mute", "unmute"):
-        return command
-
-    if lower.startswith("forget"):
-        return command
-
-    if lower == "again" or lower == "do it again":
-        last = get_last_successful_interaction(must_have_target=False)
-        if last:
-            action = (
-                last.get("action", "")
-                .replace("_app", "")
-                .replace("_web", "")
-                .replace("_system", "")
-                .replace("_folder", "")
-                .replace("_youtube", "")
-            )
-            target = str(last.get("target", ""))
-            resolved = f"{action} {target}".strip()
-            return resolved
-
-    if re.search(r"\b(it|that|this)\b", lower):
-        if ctx.active_entity:
-            resolved = re.sub(r"\b(it|that|this)\b", ctx.active_entity, command, flags=re.IGNORECASE)
-            if resolved != command:
-                return resolved.strip()
-        last = get_last_successful_interaction(must_have_target=True)
-        if last:
-            target = str(last.get("target", ""))
-            resolved = re.sub(r"\b(it|that|this)\b", target, command, flags=re.IGNORECASE)
-            return resolved.strip()
-
-    return command
 
 
 class _IntentClassifier:
