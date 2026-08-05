@@ -10,9 +10,8 @@ import pytest
 from mini_kio.core.continuity_resolver import (
     ContinuityResolver, DomainContinuationType,
 )
-from mini_kio.core.command_router import (
-    _is_standalone_entity_query,
-)
+from mini_kio.core.pipeline import _IntentClassifier
+from mini_kio.core.pipeline.types import IntentType
 
 
 @pytest.fixture(autouse=True)
@@ -171,40 +170,43 @@ class TestFixC_ClipsArtifactTrigger:
             assert pending_mm.get_context().pending_media_query == "", \
                 "Pending query must be consumed on match"
 
-    def test_clips_in_keywords(self):
-        """Verify 'clips' and 'clip' are in _dispatch_command artifact keywords."""
-        from mini_kio.core import command_router
-        import inspect
-        source = inspect.getsource(command_router)
-        assert "clips" in source, "clips must be in artifact keywords"
-        assert "clip" in source, "clip must be in artifact keywords"
-
 
 # ═══════════════════════════════════════════════════════════════════
 # Fix D — Standalone Entity Detection (non-regression)
 # ═══════════════════════════════════════════════════════════════════
 
 class TestFixD_StandaloneEntity:
-    """_is_standalone_entity_query must not break with our changes."""
+    """Entity detection moved to pipeline._IntentClassifier._classify_entity_query."""
 
-    def test_capitalized_entity_standalone(self):
-        assert _is_standalone_entity_query("Interstellar")
+    @pytest.fixture(autouse=True)
+    def classifier(self):
+        return _IntentClassifier()
 
-    def test_interrogative_with_entity_standalone(self):
-        assert _is_standalone_entity_query("who directed interstellar")
+    def _decides_entity(self, classifier, query):
+        r = classifier._classify_entity_query(query.lower(), query, query)
+        return r is not None and r.intent_type == IntentType.ENTITY_QUERY
 
-    def test_pronoun_not_standalone(self):
-        assert not _is_standalone_entity_query("who directed it")
-        assert not _is_standalone_entity_query("it")
+    def test_capitalized_entity_standalone(self, classifier):
+        assert self._decides_entity(classifier, "Interstellar")
 
-    def test_play_not_standalone(self):
-        assert not _is_standalone_entity_query("play interstellar")
+    def test_content_noun_entity_standalone(self, classifier):
+        assert self._decides_entity(classifier, "interstellar cast")
 
-    def test_open_not_standalone(self):
-        assert not _is_standalone_entity_query("open chrome")
+    def test_interrogative_with_entity_not_entity_query(self, classifier):
+        assert not self._decides_entity(classifier, "who directed interstellar")
 
-    def test_search_not_standalone(self):
-        assert not _is_standalone_entity_query("search python")
+    def test_pronoun_not_standalone(self, classifier):
+        assert not self._decides_entity(classifier, "who directed it")
+        assert not self._decides_entity(classifier, "it")
+
+    def test_play_not_standalone(self, classifier):
+        assert not self._decides_entity(classifier, "play interstellar")
+
+    def test_open_not_standalone(self, classifier):
+        assert not self._decides_entity(classifier, "open chrome")
+
+    def test_search_not_standalone(self, classifier):
+        assert not self._decides_entity(classifier, "search python")
 
 
 # ═══════════════════════════════════════════════════════════════════

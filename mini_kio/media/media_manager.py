@@ -664,6 +664,15 @@ class MediaManager:
 
         ql = query.lower().strip()
 
+        # R5: ordinal selection of a pending offer ("play the second one" → index 1).
+        # The offer engine's parse_response already maps ordinals; only route here
+        # when an offer is actually pending, otherwise fall through to normal play.
+        _ORDINAL_RE = re.compile(r"\b(?:first|second|third|fourth|fifth|[1-5])\b")
+        if ql and _ORDINAL_RE.search(ql) and self._offer_manager.has_pending_offer():
+            parsed = self._offer_manager.parse_response(ql)
+            if parsed is True:
+                return self.accept_intelligence_offer()
+
         # ── Step -2.5: Pronoun resolution — "it" / "that" / "this" → last entity name ──
         _PRONOUNS = frozenset(("it", "that", "this", "them", "those"))
         _pronoun_resolved = False
@@ -1965,6 +1974,8 @@ class MediaManager:
 
     def accept_intelligence_offer(self) -> Optional[dict]:
         offer = self._offer_manager.accept_active_offer()
+        if not offer:
+            offer = self._offer_manager.get_last_accepted_offer()
         if not offer:
             return None
         entity = self._offer_manager.get_accepted_entity(offer)

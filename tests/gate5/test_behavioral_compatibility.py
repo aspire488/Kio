@@ -15,10 +15,10 @@ def classifier():
     return _IntentClassifier()
 
 
-def _classify(text):
+def _classify(text, raw=None):
     """Shorthand: classify through the pipeline's classifier directly."""
     pipe = Pipeline()
-    return pipe._classifier.classify(text.lower().strip(), text)
+    return pipe._classifier.classify(text.lower().strip(), raw or text)
 
 
 # ── Greeting / Social ───────────────────────────────────────────────────
@@ -213,6 +213,76 @@ def test_unknown(query):
     d = _classify(query)
     assert d.intent_type == IntentType.CONVERSATION
     assert d.confidence <= 0.5
+
+
+# ── R1: bare "please" prefix stripping ─────────────────────────────────
+
+@pytest.mark.parametrize("query,expected_target", [
+    ("please open chrome", "chrome"),
+    ("can you open chrome", "chrome"),
+    ("can you please open chrome", "chrome"),
+])
+def test_r1_please_open_normalizes_to_desktop_open(query, expected_target):
+    """Bare 'please' must be stripped so the classifier sees a clean command verb."""
+    from mini_kio.core.context_manager import get_session_context
+    from mini_kio.core.pipeline import _NormalizationService
+    norm = _NormalizationService().run(query, get_session_context("local_0"))
+    d = _classify(norm, raw=query)
+    assert d.intent_type == IntentType.DESKTOP_OPEN
+    assert d.action == "open_app"
+    assert d.target == expected_target
+
+
+def test_r1_please_alone_not_stripped_to_empty():
+    """Bare 'please' on its own must not vanish into an empty command."""
+    from mini_kio.core.context_manager import get_session_context
+    from mini_kio.core.pipeline import _NormalizationService
+    norm = _NormalizationService().run("please", get_session_context("local_0"))
+    assert norm.strip() == "please"
+
+
+# ── R5: ordinal play resolves via offer engine (execution layer) ─────────
+
+def test_r5_ordinal_play_accepts_pending_offer():
+    """'play the second one' with a pending multi-offer plays candidate index 1."""
+    from mini_kio.media.media_manager import MediaManager
+    from mini_kio.media.intelligence.media_offer_manager import OfferTrigger
+    from mini_kio.media.media_intelligence_models import EntityType, ResolvedEntity
+
+    mm = MediaManager.get_instance()
+    mgr = mm._offer_manager
+    mgr.clear_all()
+    def _ent(name):
+        return ResolvedEntity(name=name, entity_type=EntityType.MOVIE, confidence=1.0)
+    mgr.create_multi_offer(
+        [_ent("First Movie"), _ent("Second Movie")],
+        OfferTrigger.TRAILER_RELEASED, "Found:",
+    )
+    result = mm.play("play the second one")
+    assert mgr.has_pending_offer() is False, "offer must be consumed"
+    assert "Second Movie" in (result.get("message") or ""), "must target candidate 1"
+    mgr.clear_all()
+
+
+def test_r5_ordinal_play_no_offer_falls_through():
+    """Without a pending offer, ordinal phrasing still returns a play dict, not crash."""
+    from mini_kio.media.media_manager import MediaManager
+    mm = MediaManager.get_instance()
+    mm._offer_manager.clear_all()
+    result = mm.play("play the second one")
+    assert isinstance(result, dict)
+
+
+# ── R4: media-shaped affirmatives classify as accept_offer ───────────────
+
+@pytest.mark.parametrize("query", [
+    "play it", "play that", "show it", "watch it", "play video",
+])
+def test_r4_media_affirmative_accept_offer(query):
+    """'play it'/'show it' must accept the pending offer, not literal-play."""
+    d = _classify(query)
+    assert d.intent_type == IntentType.CONVERSATION
+    assert d.action == "accept_offer"
 
 
 # ── Pipeline smoke test (end-to-end classification only) ────────────────

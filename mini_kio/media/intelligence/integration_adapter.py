@@ -1,6 +1,9 @@
 from __future__ import annotations
+import logging
 import re
 from typing import Optional, Callable, Any
+
+logger = logging.getLogger(__name__)
 from mini_kio.media.intelligence.media_intelligence_models import TopicType, ArtifactType, EventRecord, ArtifactRecord, IntelligenceResult
 from mini_kio.intelligence.retrieval_router import RetrievalResult
 from mini_kio.media.intelligence.topic_classifier import classify_topic

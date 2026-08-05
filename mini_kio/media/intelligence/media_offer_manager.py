@@ -159,6 +159,7 @@ class MediaOfferManager:
         self._memory_store = memory_store
         self._offers: Dict[str, MediaOffer] = {}
         self._active: Optional[str] = None    # current pending offer id
+        self._last_accepted: Optional[MediaOffer] = None
 
     # ── create ────────────────────────────────────────────────
 
@@ -235,7 +236,11 @@ class MediaOfferManager:
         self._memory_store.set_fact(f"offer:{offer.offer_id}", json.dumps(offer.to_dict()))
         self._memory_store.set_fact("active_offer_id", "")
         self._active = None
+        self._last_accepted = offer
         return offer
+
+    def get_last_accepted_offer(self) -> Optional[MediaOffer]:
+        return self._last_accepted
 
     def reject_active_offer(self) -> Optional[MediaOffer]:
         offer = self._get_active_offer()

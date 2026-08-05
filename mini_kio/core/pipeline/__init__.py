@@ -56,9 +56,10 @@ class Pipeline:
 
 class _NormalizationService:
     # R1: strip leading politeness/soft-start phrases so the classifier sees a
-    # clean command verb ("can you please open chrome" -> "open chrome").
+    # clean command verb ("can you please open chrome" -> "open chrome",
+    # "please open chrome" -> "open chrome").
     _POLITE_PREFIX_RE = re.compile(
-        r"^(?:can|could|would|will)\s+(?:you|u)?\s*(?:please\s+)?",
+        r"^(?:(?:can|could|would|will)\s+(?:you|u)?\s*(?:please\s+)?|please\s+)",
         re.IGNORECASE,
     )
 
@@ -461,6 +462,12 @@ class _IntentClassifier:
         return None
 
     def _classify_media_transport(self, lower, text):
+        # R4: bare offer-acceptance followups that look like media commands
+        # ("play it", "show it", "watch it") — classified as accept_offer before
+        # the play-target branch can grab them.
+        if lower in ("play it", "play that", "show it", "watch it", "play video"):
+            return RoutingDecision(IntentType.CONVERSATION, "accept_offer", "", text, lower, confidence=0.9)
+
         if any(re.search(rf"\b{re.escape(cmd)}\b", lower) for cmd in self.MEDIA_TRANSPORT):
             return RoutingDecision(IntentType.MEDIA_TRANSPORT, lower.split()[0], "", text, lower, confidence=1.0)
 
