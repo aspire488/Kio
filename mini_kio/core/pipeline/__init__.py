@@ -12,6 +12,20 @@ from mini_kio.core.context_manager import get_session_context
 logger = logging.getLogger(__name__)
 
 
+# R5a: KIO's own failure replies ("Error: ...", "Couldn't ...") and mojibake
+# (replacement chars / double-encoded UTF-8) must not be fed back to the LLM
+# as conversation context — that history pollution produced follow-up replies
+# that referenced fabricated article content from stale error text.
+_BAD_REPLY_RE = re.compile(r"^(?:error\b|couldn't\b|can't\b|i (?:couldn't|can't))", re.IGNORECASE)
+_MOJIBAKE_RE = re.compile(r"[\ufffd\u25a1]|Ã[^\x00-\x7f]|â(?:€™|€œ|€[a-zA-Z])")
+
+
+def _bad_kio_reply(reply: str) -> bool:
+    if not reply or not reply.strip():
+        return True
+    return bool(_BAD_REPLY_RE.search(reply) or _MOJIBAKE_RE.search(reply))
+
+
 class Pipeline:
     """
     Single routing authority for all KIO input.
@@ -987,6 +1001,7 @@ class _ExecutionCoordinator:
                 if facts:
                     parts.append("Known facts about the user:\n" + "\n".join(f"- {k}: {v}" for k, v in facts.items()))
                 history = ctx.get_history_window(6)
+                history = [(u, r) for u, r in history if not _bad_kio_reply(r)]
                 if history:
                     parts.append("Recent conversation (oldest first):\n" + "\n".join(f"User: {u}\nKIO: {r}" for u, r in history))
         except Exception:
