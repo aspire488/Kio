@@ -86,6 +86,14 @@ _FILE_KEYWORDS: set[str] = {
 _PRONOUNS: set[str] = {"it", "this", "they", "them", "he", "she", "him", "his", "her", "their"}
 
 _RUNTIME_REF_RE = re.compile(r"\b(again|do that again|do it again)\b", re.I)
+# R3: again-suffixed variants ("search again", "play again", "play it again",
+# "watch again", "open again", ...). Deliberately verb-scoped so phrases with
+# a real target ("play messi again") do not match — they keep their target.
+_AGAIN_SUFFIX_RE = re.compile(
+    r"^(?:play|watch|search|open|show|go|run|start|find|read|write|create)"
+    r"(?:\s+(?:it|that|this))?\s+again$",
+    re.I,
+)
 _TELL_MORE_RE = re.compile(r"(tell me more|more info|more details|expand|elaborate)", re.I)
 _ORDINAL_RE = re.compile(
     r"\b(first( one)?|second( one)?|third( one)?|fourth( one)?|fifth( one)?)\b", re.I
@@ -458,6 +466,35 @@ class SessionContext:
             return text
         lower = text.lower().strip()
 
+        # G4: "again" → repeat last successful interaction (runtime buffer).
+        # Live source is get_last_successful_interaction(must_have_target=False),
+        # which is success-gated and permits no-target records — the old
+        # _RUNTIME_TRACKER (target-guarded write) could not represent either.
+        # R3: extended to again-suffixed variants ("search again", "play it
+        # again", "watch again", ...). Placed before G1 so media verbs with an
+        # "again" suffix reach it instead of the playback passthrough; the
+        # variant regex is verb-scoped, so targets ("play messi again") still
+        # fall through to G1 untouched. G1/G2/G3/S1/S2 blocks are unchanged.
+        if (
+            lower == "again"
+            or lower == "do it again"
+            or _AGAIN_SUFFIX_RE.fullmatch(lower)
+        ):
+            from mini_kio.core.runtime import get_last_successful_interaction
+            last = get_last_successful_interaction(must_have_target=False)
+            if last:
+                action = (
+                    last.get("action", "")
+                    .replace("_app", "")
+                    .replace("_web", "")
+                    .replace("_system", "")
+                    .replace("_folder", "")
+                    .replace("_youtube", "")
+                )
+                target = str(last.get("target", ""))
+                resolved = f"{action} {target}".strip()
+                return resolved
+
         # G1: media passthrough — do not resolve pronouns inside playback verbs
         if lower.startswith(("play ", "watch ", "seek ", "turn ")):
             return text
@@ -484,26 +521,6 @@ class SessionContext:
             if self.pending_action and not self.pending_action.executed:
                 return f"{self.pending_action.action_type} {self.pending_action.query}"
             return text
-
-        # G4: "again" → repeat last successful interaction (runtime buffer).
-        # Live source is get_last_successful_interaction(must_have_target=False),
-        # which is success-gated and permits no-target records — the old
-        # _RUNTIME_TRACKER (target-guarded write) could not represent either.
-        if lower == "again" or lower == "do it again":
-            from mini_kio.core.runtime import get_last_successful_interaction
-            last = get_last_successful_interaction(must_have_target=False)
-            if last:
-                action = (
-                    last.get("action", "")
-                    .replace("_app", "")
-                    .replace("_web", "")
-                    .replace("_system", "")
-                    .replace("_folder", "")
-                    .replace("_youtube", "")
-                )
-                target = str(last.get("target", ""))
-                resolved = f"{action} {target}".strip()
-                return resolved
 
         # G5: pronoun → active_entity, then session last_target fallback
         if re.search(r"\b(it|that|this)\b", lower):
