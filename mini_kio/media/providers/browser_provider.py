@@ -76,6 +76,18 @@ class BrowserProvider(MediaProvider):
             return MediaResult(success=False, error="No active browser media", player="browser")
         return self._execute("stop", tab_id)
 
+    def mute(self) -> MediaResult:
+        tab_id = self._resolve_tab()
+        if not tab_id:
+            return MediaResult(success=False, error="No active browser media", player="browser")
+        return self._execute("mute", tab_id)
+
+    def unmute(self) -> MediaResult:
+        tab_id = self._resolve_tab()
+        if not tab_id:
+            return MediaResult(success=False, error="No active browser media", player="browser")
+        return self._execute("unmute", tab_id)
+
     def next_track(self) -> MediaResult:
         return MediaResult(success=False, error="Next track not supported for browser media", player="browser")
 

@@ -46,6 +46,13 @@ _PAUSE_SCRIPTS = {
     "pause", "stop",
 }
 
+# Scripts whose success must be proven by the observed muted state, not the
+# ACK alone (the extension's v.muted assignment may not have taken effect,
+# or an autoplay/unmute event may have raced it).
+_MUTE_SCRIPTS = {
+    "mute", "unmute",
+}
+
 _FAILED_STATUSES = {
     "no media", "blocked", "no_video", "player_not_ready",
     "player_lost", "video_lost", "ended", "aborted",
@@ -202,6 +209,9 @@ class VerifiedConnector:
         if script in _PAUSE_SCRIPTS:
             return await self._verify_paused(res, tab_id, script)
 
+        if script in _MUTE_SCRIPTS:
+            return await self._verify_muted(res, tab_id, script)
+
         if status == "playing" or script in _PLAY_SCRIPTS:
             return await self._verify_playback(res, tab_id, script)
 
@@ -280,6 +290,37 @@ class VerifiedConnector:
         res.verification = VerificationCode.TIMEOUT.value
         res.success = False
         res.error = f"media still not paused after '{script}'"
+        return res
+
+    async def _verify_muted(self, res: TabResult, tab_id: int,
+                            script: str) -> TabResult:
+        """Prove the muted state from Chrome's own state, not the ACK.
+
+        The mute/unmute ACK (extension set v.muted) is not proof: the element
+        it muted may differ from the audible one, or an autoplay/unmute event
+        may have raced the assignment. Probe a fresh sample_media snapshot and
+        require the element to report the intended muted value.
+        """
+        want = script == "mute"
+        deadline = time.time() + _PAUSE_DEADLINE_S
+        while time.time() < deadline:
+            await asyncio.sleep(_MUTATE_POLL_STEP_S)
+            sample = await self._raw.execute_script(tab_id, "sample_media")
+            if not sample.success or not isinstance(sample.message, dict):
+                continue
+            msg = sample.message
+            status = (msg.get("status") or "").strip()
+            if status == "no media":
+                res.verification = VerificationCode.FAILED.value
+                res.success = False
+                res.error = f"script '{script}': no media present after action"
+                return res
+            if msg.get("muted") is want:
+                res.verification = VerificationCode.VERIFIED.value
+                return res
+        res.verification = VerificationCode.TIMEOUT.value
+        res.success = False
+        res.error = f"media still not {'muted' if want else 'unmuted'} after '{script}'"
         return res
 
     # ── Internals ──────────────────────────────────────────────────────

@@ -6,8 +6,21 @@ triggered the full bootstrap/autoplay loop and accept_offer (which calls
 prov.search() for candidates then plays the best) played twice. Search must
 route through the controlled browser connector and return candidates, never
 start playback.
+
+Note: the scrape runs through the extension's MV3-safe `search_results`
+script. The original implementation used a `"eval"` script that never existed
+in the extension's SCRIPTS registry, silently breaking search.
 """
 from mini_kio.browser_connector.protocol import TabResult
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_api_discovery(monkeypatch):
+    """RC8: these tests exercise the controlled scrape path deterministically.
+    The live YouTube Data API (real key, real network) must not influence them."""
+    from mini_kio.media.providers import youtube_provider as yp
+    monkeypatch.setattr(yp.YouTubeProvider, "_api_search_candidates", lambda self, q: [])
 
 
 class _FakeConn:
@@ -24,7 +37,7 @@ class _FakeConn:
 
     async def execute_script(self, tab_id, script, args=None):
         self.calls.append(("execute_script", tab_id, script))
-        if script == "eval":
+        if script == "search_results":
             return TabResult(success=True, message=[
                 {"title": "Believer - Imagine Dragons", "url": "https://www.youtube.com/watch?v=7wtfhZwyrcc", "video_id": "7wtfhZwyrcc"},
                 {"title": "Believer - Imagine Dragons (Lyrics)", "url": "https://www.youtube.com/watch?v=wGB0xDDDEFAULT", "video_id": "wGB0xDDDEFAULT"},
@@ -73,8 +86,8 @@ def test_search_goes_through_controlled_connector():
 
     assert any(action == "open_tab" for action, *_ in conn.calls)
     assert any(
-        args[2] == "eval" for args in conn.calls if args[0] == "execute_script"
-    ), "search must scrape results through the connector, not webbrowser.open"
+        args[2] == "search_results" for args in conn.calls if args[0] == "execute_script"
+    ), "search must scrape results through the connector's search_results script, not webbrowser.open"
 
 
 def test_search_never_invokes_play():
@@ -87,3 +100,16 @@ def test_search_never_invokes_play():
         args[2] in ("play", "youtube_bootstrap")
         for args in conn.calls if args[0] == "execute_script"
     ), "search must not start the bootstrap/play loop"
+
+
+def test_search_keeps_results_tab_open():
+    """The search page must stay open in the controlled connector world so
+    KIO can still control the tab afterwards (no close_tab after scraping)."""
+    conn = _FakeConn()
+    prov = _provider(conn)
+
+    prov.search("believer imagine dragons")
+
+    assert not any(args[0] == "close_tab" for args in conn.calls), (
+        "search must keep the results tab open (KIO retains control)"
+    )

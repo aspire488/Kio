@@ -27,6 +27,7 @@ class MediaSession:
     duration_s: float = 0.0
     position_s: float = 0.0
     is_livestream: bool = False
+    muted: bool = False
 
     def touch(self):
         self.updated_at = time.time()
@@ -49,6 +50,7 @@ class MediaSession:
             "duration_s": self.duration_s,
             "position_s": self.position_s,
             "is_livestream": self.is_livestream,
+            "muted": self.muted,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

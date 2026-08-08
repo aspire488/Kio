@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 import urllib.parse
+import urllib.request
 from typing import Optional
 
 from mini_kio.browser_connector.connector import Connector
@@ -19,36 +22,222 @@ _YOUTUBE_SEARCH_URL = (
     "https://www.youtube.com/results?search_query={encoded}&sp=EgIQAQ%253D%253D"
 )
 
+_YOUTUBE_API_SEARCH = "https://www.googleapis.com/youtube/v3/search"
 
-def _score_candidate(title: str, url: str, query: str) -> int:
-    """Relevance score of a YouTube search result against the requested query.
+# RC9: generic channel-authority provenance words — markers of official
+# studios / labels / broadcasters. Deliberately NOT an entity list (no
+# franchise, movie, or artist names), so the signal generalizes to any query
+# without hardcoding specific channels.
+_AUTHORITY_MARKERS = (
+    "official", "vevo", "pictures", "studios", "entertainment", "records",
+    "films", "networks", "trailers", "presents", "distribution", "label",
+)
+
+# RC8: terms that carry no relevance signal on their own. Excluded from
+# query tokenization so "a song by the weeknd" ranks on "weeknd" only and
+# generic titles cannot win on filler words alone.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "to", "in", "on", "for", "and", "or",
+    "with", "me", "my", "your", "you", "it", "its", "is", "are",
+    "was", "be", "that", "this", "at", "by", "from", "as",
+    "official", "video", "song", "trailer", "review", "lyrics",
+})
+
+
+def _query_terms(query: str) -> list[str]:
+    """Significant word-boundary tokens of a query (stopwords removed)."""
+    return [
+        t for t in re.findall(r"[a-z0-9']+", query.lower())
+        if len(t) > 1 and t not in _STOPWORDS
+    ]
+
+
+def _video_id_from_url(url: str) -> str:
+    """Extract the canonical YouTube video ID from a watch URL (or "")."""
+    try:
+        return urllib.parse.parse_qs(
+            urllib.parse.urlparse(url).query
+        ).get("v", [""])[0]
+    except Exception:
+        return ""
+
+
+def _score_candidate(
+    title: str,
+    url: str,
+    query: str,
+    channel: str = "",
+    description: str = "",
+) -> int:
+    """Relevance score of a YouTube result against the requested query.
 
     Shared by the controlled search path (_search_metadata) and direct
-    playback candidate selection (RC7) so both pick the best-matching result
-    instead of blindly clicking the first link.
+    playback candidate selection (RC7/RC8/RC9) so both pick the best-matching
+    result instead of blindly clicking the first link.
+
+    RC8: word-boundary tokens, stopword filtering, distinctive-term weights,
+    channel matches, and a coverage gate so weakly-related results cannot win
+    on filler alone.
+
+    RC9: the score used to saturate — a title containing the full query phrase
+    and all its terms scored IDENTICALLY to every other such title (live proof:
+    8/8 candidates for "brand new day" all scored 44, so Python's max() picked
+    the FIRST in API order — a random Spider-Verse|Avengers|Venom compilation —
+    over Sony Pictures' official trailers). This version adds discriminating,
+    query-agnostic signals:
+      * phrase POSITION (leading title = subject; buried = aggregation)
+      * aggregation/dash-chain penalty (multi-IP mashup titles)
+      * channel authority (generic provenance markers, not entity names)
+      * exact-title bonus (title is essentially the query itself)
+      * description coverage (API snippet corroboration)
     """
-    score = 0
     tl = title.lower()
     ql = query.lower()
-    if ql in tl:
-        score += 20
-    for term in ql.split():
-        if term and term in tl:
-            score += 2
-    if "trailer" in ql and "trailer" in tl:
-        score += 10
-    if "highlight" in ql and "highlight" in tl:
-        score += 10
-    if "interview" in ql and "interview" in tl:
-        score += 10
-    if "music video" in ql and "music video" in tl:
-        score += 10
-    if "live" in ql and "live" in tl:
-        score += 5
+    terms = _query_terms(query)
+    if not terms:
+        return 0
+
+    score = 0
+    phrase_at = tl.find(ql)
+    phrase_full = 30
+    rel_pos = 0.0
+    tail_len = 0
+    if phrase_at >= 0:
+        rel_pos = phrase_at / len(tl)
+        tail_len = len(tl) - (phrase_at + len(ql))
+        score += phrase_full  # full contiguous phrase -> strong signal
+    else:
+        # RC9: separator-tolerant phrase — the same significant terms in the
+        # same order with only light punctuation/separators between them
+        # ("The Weeknd - Blinding Lights (Official Video)" matches the query
+        # "the weeknd blinding lights"). Half the contiguous-phrase weight, so
+        # the canonical upload can outrank a keyword-stuffed bootleg.
+        _sep = r"[\s\-\u2013\u2014|:()&,.'\"]*"
+        ordered = _sep.join(re.escape(t) for t in terms)
+        if len(terms) >= 2 and re.search(rf"\b{ordered}\b", tl):
+            score += 15
+
+    matched = 0
+    for term in terms:
+        if re.search(rf"\b{re.escape(term)}\b", tl):
+            # Distinctive (rarer) terms carry more weight than filler.
+            score += 8 if len(term) >= 5 else 3
+            matched += 1
+
+    if matched == 0:
+        return -100  # clearly unrelated
+    coverage = matched / len(terms)
+    if coverage < 0.5:
+        score -= 25  # half the query missing -> strong negative signal
+
+    # Channel identity is a strong relevance signal (e.g. the query names
+    # a channel, or the channel is the canonical uploader of the track).
+    if channel:
+        cl = channel.lower()
+        for term in terms:
+            if len(term) >= 5 and term in cl:
+                score += 10
+                break
+
+    # Artifact keywords must be present when requested ("trailer" query ->
+    # a video literally containing "trailer" scores higher than a clip).
+    for kw in ("trailer", "highlight", "interview", "music video", "live",
+               "official", "review", "song", "lyrics", "podcast", "episode"):
+        if kw in ql and kw in tl:
+            score += 6
+            # "Official Trailer" / "Official Video": canonical upload of the
+            # requested artifact gets a strong bonus.
+            if "official" in tl:
+                score += 12
+
+    # RC9: generic "official" marker in a title is an authoritative-upload
+    # signal even when the user didn't name the artifact kind explicitly.
     if "official" in tl:
-        score += 3
+        score += 6
+
+    # ── RC9: phrase POSITION ────────────────────────────────────────────
+    # A title that LEADS with the requested subject is the subject itself
+    # ("LIONEL MESSI INTERVIEW | quote"); a buried phrase
+    # ("... | Avengers: Brand New Day - Venom 3") is an aggregation.
+    if phrase_at >= 0 and len(tl) > 0:
+        if rel_pos <= 0.20 and tail_len <= 40:
+            score += 10  # title IS the query (quote suffix still allowed)
+        elif rel_pos >= 0.60:
+            score -= 10  # phrase buried at the end
+
+    # ── RC9: "live" bootleg penalty ─────────────────────────────────────
+    # "...LIVE" / "live at..." titles are concert recordings — not the
+    # canonical studio upload. Penalized unless the user asked for live OR
+    # already requested a live-captured artifact (interview, podcast, concert,
+    # match) where a live recording is exactly the canonical content.
+    if "live" in tl and "live" not in ql:
+        _live_exempt = any(k in ql for k in
+                           ("interview", "podcast", "concert", "live performance",
+                            "match", "game", "highlight", "set", "gig"))
+        if not _live_exempt:
+            score -= 10
+
+    # ── RC9: analysis/framing penalty ───────────────────────────────────
+    # Reaction / breakdown / explained / leaked / review titles ride the
+    # query phrase but are NOT the canonical media ("Avengers Doomsday
+    # Trailer: What Happens To...", "Avengers Doomsday Trailer Review | ...",
+    # "...Ending Explained"). Penalized unless the user explicitly asked for
+    # that framing ("play messi interview review" must still pick reviews).
+    _FRAMING = ("breakdown", "reaction", "reacts", "explained", "explains",
+                "explain", "theory", "theories", "recap", "analysis",
+                "what happens", "leaked", "leak", "ending", "review")
+    framing_penalty = 0
+    for fw in _FRAMING:
+        if fw in tl and fw not in ql:
+            framing_penalty += 12
+            if framing_penalty >= 24:
+                break
+    score -= framing_penalty
+
+    # ── RC9: aggregation / mashup penalty ──────────────────────────────
+    # Multi-IP compilation titles chain dash-separated subjects
+    # ("... Brand New Day - Spiderman - Venom 3"). Pipes are NOT penalized:
+    # "Title | Official Trailer | In Theaters Dec 18" is the canonical
+    # official-upload format. Two dashes are common in legit official titles
+    # ("Interstellar - Trailer 2 - Official WB"), so the full mashup penalty
+    # requires dash-chains to coexist with a pipe separator — the true
+    # multi-subject signature — or a bare 3+ dash chain.
+    dash_chains = len(re.findall(r"\s-\s", tl))
+    pipe_count = tl.count("|")
+    if dash_chains >= 3 or (dash_chains >= 2 and pipe_count >= 1):
+        score -= 14
+    elif dash_chains == 2:
+        score -= 4  # mild: official multi-segment titles stay competitive
+    if pipe_count >= 3:
+        score -= 8
+    if len(title) > 90:
+        score -= 6
+    if re.search(r"\bvs\b", tl) and not re.search(r"\bvs\b", ql):
+        score -= 8  # "A vs B" mashup/duel titles when user didn't ask for one
+
+    # ── RC9: channel authority (generic provenance markers) ─────────────
+    if channel:
+        cl = channel.lower()
+        auth = 0
+        if "vevo" in cl:
+            auth += 10  # VEVO is the canonical music-video publisher
+        for marker in _AUTHORITY_MARKERS:
+            if marker in cl:
+                auth += 4
+        score += min(auth, 14)
+
+    # ── RC9: description corroboration (weak, bounded) ──────────────────
+    if description:
+        dl = description.lower()
+        desc_hits = sum(
+            1 for t in terms
+            if re.search(rf"\b{re.escape(t)}\b", dl)
+        )
+        if desc_hits >= max(1, len(terms) // 2):
+            score += 6
+
     if "/shorts/" in url:
-        score -= 2
+        score -= 5
     return score
 
 
@@ -70,19 +259,67 @@ class YouTubeProvider(MediaProvider):
             self._conn = _get_connector()
         return self._conn
 
-    def _select_best_candidate(self, tab_id: int, query: str) -> Optional[str]:
-        """RC7: choose the best-matching YouTube result instead of the first.
+    def _api_search_candidates(self, query: str) -> list[dict]:
+        """Discover candidates via the YouTube Data API when a key exists.
 
-        Scrapes the open results page via the extension MV3-safe
-        search_results script (retried until the page renders), scores
-        each candidate against the requested query, and returns the best
-        URL — or None when nothing relevant is available (the caller falls
-        back to youtube_bootstrap).
+        Returns [{title, url, video_id, channel}]. Any failure (missing key,
+        network, quota) degrades silently to the browser-scrape path — the
+        API enhances discovery but never becomes a hard dependency.
+        """
+        key = (getattr(config, "YOUTUBE_API_KEY", "") or "").strip()
+        if not key:
+            return []
+        try:
+            params = urllib.parse.urlencode({
+                "part": "snippet",
+                "type": "video",
+                "maxResults": 15,
+                "q": query,
+                "key": key,
+            })
+            req = urllib.request.Request(
+                f"{_YOUTUBE_API_SEARCH}?{params}",
+                headers={"User-Agent": "KIO/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            out = []
+            for item in data.get("items", []):
+                vid = (item.get("id") or {}).get("videoId")
+                sn = item.get("snippet") or {}
+                title = (sn.get("title") or "").strip()
+                if not vid or not title:
+                    continue
+                out.append({
+                    "title": title,
+                    "url": f"https://www.youtube.com/watch?v={vid}",
+                    "video_id": vid,
+                    "channel": (sn.get("channelTitle") or "").strip(),
+                    "description": (sn.get("description") or "").strip(),
+                })
+            logger.info("[YT_API_SEARCH] query=%s results=%d", query, len(out))
+            return out
+        except Exception as exc:
+            logger.warning("[YT_API_SEARCH] failed query=%s err=%s", query, exc)
+            return []
+
+    def _select_best_candidate(self, tab_id: int, query: str) -> Optional[dict]:
+        """RC7/RC8: choose the best-matching YouTube result instead of the first.
+
+        Discovery source order:
+          1. YouTube Data API (when YOUTUBE_API_KEY is configured) — high-quality
+             metadata with channel identity and canonical video IDs.
+          2. Browser scrape of the open results page via the MV3-safe
+             search_results script (retried until the page renders).
+        Candidates are merged, scored against the query, and the best is
+        returned as {title, url, video_id, channel} — or None when nothing
+        relevant is available (the caller falls back to youtube_bootstrap).
         """
         conn = self._get_conn()
         if not conn:
             return None
-        candidates = []
+        candidates: list[dict] = []
+        candidates.extend(self._api_search_candidates(query))
         for _attempt in range(4):
             scrape = safe_run_async(conn.execute_script(tab_id, "search_results"))
             if scrape.success and isinstance(scrape.message, list):
@@ -95,14 +332,31 @@ class YouTubeProvider(MediaProvider):
         if not candidates:
             logger.info("[YT_CANDIDATE] no candidates scraped for query=%s", query)
             return None
-        best = max(candidates, key=lambda c: _score_candidate(c["title"], c["url"], query))
-        score = _score_candidate(best["title"], best["url"], query)
+
+        # RC9: deterministic selection. max() alone returns the FIRST candidate
+        # on a score tie — the exact failure that let a random 44-scoring mashup
+        # beat Sony's official trailers (all 8 tied at 44). Break ties by
+        # (score, -title_length): among equal scores, the shorter, more
+        # canonical title wins.
+        def _candidate_key(c: dict) -> tuple:
+            return (
+                _score_candidate(
+                    c.get("title", ""), c.get("url", ""), query,
+                    channel=c.get("channel", "") or "",
+                    description=c.get("description", "") or "",
+                ),
+                -len(c.get("title", "") or ""),
+            )
+
+        best = max(candidates, key=_candidate_key)
+        score, _ = _candidate_key(best)
         if score <= 0:
             logger.info("[YT_CANDIDATE] best score=%d too weak for query=%s title=%s",
                         score, query, best.get("title", ""))
             return None
-        logger.info("[YT_CANDIDATE] query=%s selected=%s score=%d", query, best.get("title", ""), score)
-        return best["url"]
+        logger.info("[YT_CANDIDATE] query=%s selected=%s score=%d video_id=%s",
+                    query, best.get("title", ""), score, best.get("video_id", ""))
+        return best
 
     def play(self, query: str, **kwargs) -> MediaResult:
         logger.info("[ROOT_YT] ENTER query=%s kwargs=%s", query, kwargs)
@@ -159,6 +413,8 @@ class YouTubeProvider(MediaProvider):
             logger.info("[ROOT_YT] tab_id=%s", tab_id)
 
             playback_state = MediaState.IDLE
+            _identity_fail: Optional[str] = None
+            _actual_watch_url = ""
             if not tab_id:
                 logger.info("[ROOT_YT] tab_id is None — no tab returned by connector")
             else:
@@ -177,11 +433,17 @@ class YouTubeProvider(MediaProvider):
                     logger.warning("[YT_INSTRUMENT] pre-bootstrap page info failed: %s", _pbe)
                 # ────────────────────────────────────────────────────────
 
-                # RC7: controlled candidate selection BEFORE any blind click.
-                _candidate_url = self._select_best_candidate(tab_id, clean_query)
+                # RC7/RC8: controlled candidate selection BEFORE any blind click.
+                # _select_best_candidate returns {title, url, video_id, channel}
+                # so the actual playing video can be identity-verified against
+                # the selected candidate (RC8), not just trusted by URL.
+                _selected = self._select_best_candidate(tab_id, clean_query)
+                _selected_video_id = (_selected or {}).get("video_id", "") or ""
+                _selected_title = (_selected or {}).get("title", "") or ""
                 _navigated = False
-                if _candidate_url:
-                    logger.info("[ROOT_YT] candidate_navigate url=%s", _candidate_url)
+                if _selected:
+                    _candidate_url = _selected["url"]
+                    logger.info("[ROOT_YT] candidate_navigate url=%s title=%s", _candidate_url, _selected_title)
                     try:
                         _nav = safe_run_async(conn.open_tab(_candidate_url))
                         _navigated = bool(_nav.success)
@@ -210,20 +472,45 @@ class YouTubeProvider(MediaProvider):
                             break
                     if _navigated:
                         # ── INSTRUMENTATION: URL immediately after bootstrap ──
+                        _actual_watch_url = ""
                         try:
                             _post_bootstrap = safe_run_async(conn.execute_script(tab_id, "get_page_info"))
                             if _post_bootstrap.success and isinstance(_post_bootstrap.message, dict):
+                                _actual_watch_url = _post_bootstrap.message.get("url") or ""
                                 logger.info("[YT_INSTRUMENT] post-bootstrap url=%s title=%s hasVideo=%s hasWatchFlexy=%s hasMoviePlayer=%s",
-                                            _post_bootstrap.message.get("url"), _post_bootstrap.message.get("title"),
+                                            _actual_watch_url, _post_bootstrap.message.get("title"),
                                             _post_bootstrap.message.get("hasVideo"), _post_bootstrap.message.get("hasWatchFlexy"),
                                             _post_bootstrap.message.get("hasMoviePlayer"))
                         except Exception as _pbe2:
                             logger.warning("[YT_INSTRUMENT] post-bootstrap page info failed: %s", _pbe2)
                         # ───────────────────────────────────────────────────────
 
+                        # ── RC8: identity gate — the loaded page MUST be the ──
+                        # selected candidate. If the API/browser selected video
+                        # ID does not match the page's actual video ID, the
+                        # content is wrong: fail truthfully, never report
+                        # success on the wrong video.
+                        if _selected_video_id and _identity_fail is None:
+                            _loaded_id = _video_id_from_url(_actual_watch_url)
+                            if _loaded_id and _loaded_id != _selected_video_id:
+                                logger.warning(
+                                    "[YT_IDENTITY] mismatch selected=%s loaded=%s url=%s",
+                                    _selected_video_id, _loaded_id, _actual_watch_url,
+                                )
+                                playback_state = MediaState.IDLE
+                                _identity_fail = (
+                                    f"Wrong video loaded: selected {_selected_title} "
+                                    f"(id={_selected_video_id}) but Chrome loaded id={_loaded_id}"
+                                )
+
                         # Poll for video element with shorter intervals since
                         # bootstrap already verified the URL transition.
+                        # RC8: when the identity gate already failed, do NOT
+                        # attempt play on the wrong video — fail fast.
                         for attempt in range(5):
+                            if _identity_fail is not None:
+                                logger.info("[ROOT_YT] skipping play attempts (identity_fail)")
+                                break
                             time.sleep(1.0)
 
                             # ── INSTRUMENTATION: URL before each play attempt ──
@@ -402,7 +689,20 @@ class YouTubeProvider(MediaProvider):
                 _title = _parts[0].strip()
                 _artist = _parts[1].strip()
 
+            # RC8: a selected-video identity mismatch is a truthful PLAY FAILURE.
+            # Never report success on the wrong video.
+            if _identity_fail:
+                logger.info("[ROOT_YT] RETURN=R9 identity_fail %s", _identity_fail)
+                return MediaResult(
+                    success=False,
+                    error=_identity_fail,
+                    player="youtube",
+                )
+
             self._tab_id = tab_id
+            # RC8: the session's canonical URL must be the ACTUAL loaded watch
+            # URL (the video really playing), not the search-results URL.
+            _session_url = _actual_watch_url or url
             self._session = MediaSession(
                 player=PlayerType.YOUTUBE,
                 tab_id=tab_id,
@@ -410,7 +710,7 @@ class YouTubeProvider(MediaProvider):
                 query=clean_query,
                 title=_title,
                 artist=_artist,
-                url=url,
+                url=_session_url,
                 domain_hint="youtube.com",
                 media_type=self._detect_type(clean_query),
             )
@@ -424,13 +724,7 @@ class YouTubeProvider(MediaProvider):
                 "Video ready on YouTube." if playback_state == MediaState.READY else
                 f"Opened on YouTube: {display_query}"
             )
-            return MediaResult(
-                success=playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
-                message=message,
-                session=self._session,
-                player="youtube",
-            )
-            logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=%s has_session=%s message=%s", 
+            logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=%s has_session=%s message=%s",
                         playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
                         playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
                         self._session is not None,
@@ -454,6 +748,12 @@ class YouTubeProvider(MediaProvider):
 
     def stop(self) -> MediaResult:
         return self._transport("stop")
+
+    def mute(self) -> MediaResult:
+        return self._transport("mute")
+
+    def unmute(self) -> MediaResult:
+        return self._transport("unmute")
 
     def _url_changed(self, msg: dict) -> bool:
         """Truthful 'did the video actually change' check.
@@ -610,11 +910,20 @@ class YouTubeProvider(MediaProvider):
             tab_id = result.tab.tab_id
             time.sleep(1.0)  # Wait for results to load
             
-            # R11: scrape via the extension's MV3-safe search_results script.
-            # (The previous inline "eval" script never existed in the
-            # extension's SCRIPTS registry — search was silently broken.)
-            scrape_res = safe_run_async(conn.execute_script(tab_id, "search_results"))
+            # RC8/RC9: merge YouTube Data API candidates (channel identity +
+            # video IDs + description) with the extension MV3-safe
+            # search_results scrape so search quality matches playback
+            # discovery and the same discriminating ranker is applied.
             candidates = []
+            for _api in self._api_search_candidates(query):
+                candidates.append({
+                    "title": _api.get("title", ""),
+                    "url": _api.get("url", ""),
+                    "video_id": _api.get("video_id", ""),
+                    "channel": _api.get("channel", "") or "",
+                    "description": _api.get("description", "") or "",
+                })
+            scrape_res = safe_run_async(conn.execute_script(tab_id, "search_results"))
             if scrape_res.success and isinstance(scrape_res.message, list):
                 for item in scrape_res.message:
                     if not isinstance(item, dict):
@@ -623,11 +932,24 @@ class YouTubeProvider(MediaProvider):
                     url = item.get("url")
                     video_id = item.get("video_id")
                     if title and url and video_id:
-                        candidates.append((title, url, video_id))
+                        candidates.append({
+                            "title": title, "url": url, "video_id": video_id,
+                            "channel": "", "description": "",
+                        })
 
             if candidates:
-                best = max(candidates, key=lambda item: _score_candidate(item[0], item[1], query))
-                title, url, video_id = best
+                def _art_key(item: dict) -> tuple:
+                    return (
+                        _score_candidate(
+                            item.get("title", ""), item.get("url", ""), query,
+                            channel=item.get("channel", "") or "",
+                            description=item.get("description", "") or "",
+                        ),
+                        -len(item.get("title", "") or ""),
+                    )
+
+                best = max(candidates, key=_art_key)
+                title, url, video_id = best.get("title", ""), best.get("url", ""), best.get("video_id", "")
                 logger.info("[YOUTUBE_ARTIFACT] query='%s' selected_title=%s url=%s", query, title, url)
                 # Keep the results tab OPEN: KIO retains control of the search
                 # page, and the candidate feeds the reference flow ('play it' /
@@ -752,6 +1074,7 @@ class YouTubeProvider(MediaProvider):
                         self._session.position_s = msg.get("currentTime", self._session.position_s)
                         self._session.duration_s = msg.get("duration", self._session.duration_s)
                         self._session.volume = msg.get("volume", self._session.volume)
+                        self._session.muted = msg.get("muted", self._session.muted)
                         self._session.touch()
                     
                     # Return the full dict as message to allow rich result inspection
@@ -772,6 +1095,10 @@ class YouTubeProvider(MediaProvider):
                         self._session.state = new_state
                         self._session.touch()
                     return MediaResult(success=True, message=result.message or f"{action.capitalize()}d", session=self._session, player="youtube")
+
+            # Truthful failure: the extension reported a failed/absent action.
+            # The state contract stays intact — never convert a failure into
+            # "muted." / "unmuted." / "paused." / "resumed.".
             return MediaResult(success=False, error=result.error, player="youtube")
         except Exception as exc:
             return MediaResult(success=False, error=str(exc), player="youtube")

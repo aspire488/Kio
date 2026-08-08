@@ -1225,10 +1225,18 @@ class _ResponseComposer:
         """Remove implementation verbosity from any message at a central point."""
         if not message:
             return message
+        term = message.strip()[-1:] if message.strip() else ""
+        had_terminal = term in (".", "!", "?")
         stripped = self._LEAK_PATTERNS.sub("", message)
         stripped = re.sub(r"\s{2,}", " ", stripped).strip()
         stripped = self._LEAK_WORDS.sub("", stripped)
-        stripped = re.sub(r"\s{2,}", " ", stripped).strip(" .,;\n\t")
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip(" ,;\n\t")
+        # Preserve a legitimate sentence-final period ("Paused.", "Resumed.") —
+        # punctuation-stripping exists to clean leak-removal residue, not to
+        # eat the composer's own terminal punctuation. The EXACT terminal
+        # character (., !, ?) is restored, never converted.
+        if had_terminal and stripped and stripped[-1] not in (".", "!", "?"):
+            stripped += term
         return stripped
 
     def compose(

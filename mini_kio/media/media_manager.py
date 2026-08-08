@@ -739,6 +739,13 @@ class MediaManager:
                         logger.info("[PRONOUN_RESOLVE_RUNTIME] original=%s resolved=%s", query, ql)
                 except Exception:
                     pass
+            # Truthfulness: an unresolved pronoun must NEVER be played as the
+            # literal word ("Play it" -> YouTube search for "it"). That both
+            # misleads the user and registers a garbage entity that poisons
+            # later pronoun resolutions. Say there is nothing to play instead.
+            if not _pronoun_resolved:
+                logger.info("[PRONOUN_RESOLVE] unresolved=%r — nothing to resolve to", ql)
+                return {"success": True, "message": "I don't have a previous media to play — tell me what you'd like."}
 
         # ── Step -2: Bare artifact resolution — prepend last entity name ──
         _bare_artifact_patterns = {
@@ -940,6 +947,9 @@ class MediaManager:
             return {"success": False, "message": f"Couldn't play {query_clean} on YouTube."}
         return {"success": False, "message": "Nothing to play."}
 
+    # BUG 2: pause/resume user-facing replies are clean, but the full state
+    # object (session) and verification remain internally intact. A failed
+    # operation is never converted into "Paused." / "Resumed.".
     def pause(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=pause")
         active = self._registry.get_active_by_player()
@@ -954,7 +964,9 @@ class MediaManager:
                         state = result.session.state
                     self._registry.update_state(pname, state)
                     self._log_media_state("pause")
-                    return self._to_dict(result)
+                    d = self._to_dict(result)
+                    d["message"] = "Paused."
+                    return d
                 return {"success": False, "message": result.error or "Pause failed."}
 
         prov = self._get_provider("browser")
@@ -963,7 +975,9 @@ class MediaManager:
             if result.success:
                 self._register_session("browser", result)
                 self._log_media_state("pause")
-                return self._to_dict(result)
+                d = self._to_dict(result)
+                d["message"] = "Paused."
+                return d
             return {"success": False, "message": result.error or "Pause failed."}
 
         return {"success": False, "message": "No media to pause."}
@@ -982,7 +996,9 @@ class MediaManager:
                         state = result.session.state
                     self._registry.update_state(pname, state)
                     self._log_media_state("resume")
-                    return self._to_dict(result)
+                    d = self._to_dict(result)
+                    d["message"] = "Resumed."
+                    return d
                 return {"success": False, "message": result.error or "Resume failed."}
 
         prov = self._get_provider("browser")
@@ -991,7 +1007,9 @@ class MediaManager:
             if result.success:
                 self._register_session("browser", result)
                 self._log_media_state("resume")
-                return self._to_dict(result)
+                d = self._to_dict(result)
+                d["message"] = "Resumed."
+                return d
             return {"success": False, "message": result.error or "Resume failed."}
 
         return {"success": False, "message": "No media to resume."}
@@ -1042,25 +1060,56 @@ class MediaManager:
                 return {"success": False, "message": result.error}
         return {"success": False, "message": "No active media session for previous track."}
 
+    # BUG 3: mute/unmute route through the ACTIVE provider (which owns the
+    # extension `mute`/`unmute` scripts) and the state is verified — the
+    # reply is only sent when the player actually reports muted/unmuted.
     def mute(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=mute")
+        active = self._registry.get_active_by_player()
+        if active:
+            pname, _ = active
+            prov = self._get_provider(pname)
+            if prov and hasattr(prov, "mute"):
+                result = prov.mute()
+                if result.success:
+                    if result.session and result.session.muted is True:
+                        self._log_media_state("mute")
+                        return {"success": True, "message": "Muted."}
+                    return {"success": False, "message": "Mute not verified on the player."}
+                return {"success": False, "message": result.error or "Mute failed."}
+
         prov = self._get_provider("browser")
-        if prov:
-            result = prov.volume(level=0.0)
+        if prov and hasattr(prov, "mute"):
+            result = prov.mute()
             if result.success:
                 self._log_media_state("mute")
-                return self._to_dict(result)
-        return {"success": True, "message": "No media to mute."}
+                return {"success": True, "message": "Muted."}
+            return {"success": False, "message": result.error or "Mute failed."}
+        return {"success": False, "message": "No media to mute."}
 
     def unmute(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=unmute")
+        active = self._registry.get_active_by_player()
+        if active:
+            pname, _ = active
+            prov = self._get_provider(pname)
+            if prov and hasattr(prov, "unmute"):
+                result = prov.unmute()
+                if result.success:
+                    if result.session and result.session.muted is False:
+                        self._log_media_state("unmute")
+                        return {"success": True, "message": "Unmuted."}
+                    return {"success": False, "message": "Unmute not verified on the player."}
+                return {"success": False, "message": result.error or "Unmute failed."}
+
         prov = self._get_provider("browser")
-        if prov:
-            result = prov.volume(level=0.7)
+        if prov and hasattr(prov, "unmute"):
+            result = prov.unmute()
             if result.success:
                 self._log_media_state("unmute")
-                return self._to_dict(result)
-        return {"success": True, "message": "No media to unmute."}
+                return {"success": True, "message": "Unmuted."}
+            return {"success": False, "message": result.error or "Unmute failed."}
+        return {"success": False, "message": "No media to unmute."}
 
     def volume_up(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=volume_up")

@@ -154,6 +154,12 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 SPOTIFY_API_ENABLED = bool(SPOTIFY_CLIENT_ID.strip() and SPOTIFY_CLIENT_SECRET.strip())
 
+# ── YouTube Data API Configuration (media discovery) ──────────────
+# Used by YouTubeProvider to discover high-quality candidates before
+# falling back to a browser-scrape of the results page.
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
+YOUTUBE_ENABLED = bool(YOUTUBE_API_KEY)
+
 # ── Browser Connector V1 ───────────────────────────────────────────
 BROWSER_CONNECTOR_ENABLED = os.getenv("BROWSER_CONNECTOR_ENABLED", "").strip().lower() == "true"
 BROWSER_CONNECTOR_PORT = int(os.getenv("BROWSER_CONNECTOR_PORT", "9877"))
