@@ -260,7 +260,11 @@ def test_r5_ordinal_play_accepts_pending_offer():
     )
     result = mm.play("play the second one")
     assert mgr.has_pending_offer() is False, "offer must be consumed"
-    assert "Second Movie" in (result.get("message") or ""), "must target candidate 1"
+    last = mgr.get_last_accepted_offer()
+    assert last is not None, "ordinal play must accept the pending offer"
+    assert last.accepted_index == 1, "must accept candidate index 1"
+    entity = mgr.get_accepted_entity(last)
+    assert entity and entity.name == "Second Movie", "must target candidate 1"
     mgr.clear_all()
 
 

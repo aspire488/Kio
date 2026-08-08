@@ -412,7 +412,11 @@ class YouTubeProvider(MediaProvider):
         return self._transport("volume_up" if direction != "down" else "volume_down")
 
     def search(self, query: str) -> MediaResult:
-        return self.play(query)
+        # R11: a search must stay a controlled search — scrape candidates from
+        # the results page via the browser connector and return them. It must
+        # NOT alias play(), which would trigger the full bootstrap/autoplay
+        # loop and make accept_offer play twice.
+        return self._search_metadata(query)
 
     def search_trailer(self, query: str) -> MediaResult:
         return self._search_metadata(f"{query} trailer")
@@ -524,19 +528,15 @@ class YouTubeProvider(MediaProvider):
                 best = max(candidates, key=lambda item: _score_candidate(item[0], item[1]))
                 title, url, video_id = best
                 logger.info("[YOUTUBE_ARTIFACT] query='%s' selected_title=%s url=%s", query, title, url)
-                candidate = MediaCandidate(
-                    title=title,
-                    url=url,
-                    provider="youtube",
-                    source="youtube",
-                    confidence=1.0,
-                )
                 safe_run_async(conn.close_tab(tab_id))
+                candidate = MediaCandidate(
+                    title=title, url=url, provider="youtube",
+                    source="youtube", confidence=1.0,
+                )
                 return MediaResult(
                     success=True,
                     message=f"Found artifact: {title}",
                     candidates=[candidate],
-                    url=url,
                     player="youtube",
                 )
 
