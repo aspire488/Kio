@@ -912,7 +912,7 @@ class MediaManager:
                     self._registry.update_state(pname, state)
                     self._log_media_state("pause")
                     return self._to_dict(result)
-                return {"success": True, "message": "Paused."}
+                return {"success": False, "message": result.error or "Pause failed."}
 
         prov = self._get_provider("browser")
         if prov:
@@ -921,8 +921,9 @@ class MediaManager:
                 self._register_session("browser", result)
                 self._log_media_state("pause")
                 return self._to_dict(result)
+            return {"success": False, "message": result.error or "Pause failed."}
 
-        return {"success": True, "message": "No media to pause."}
+        return {"success": False, "message": "No media to pause."}
 
     def resume(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=resume")
@@ -939,7 +940,7 @@ class MediaManager:
                     self._registry.update_state(pname, state)
                     self._log_media_state("resume")
                     return self._to_dict(result)
-                return {"success": True, "message": "Resumed."}
+                return {"success": False, "message": result.error or "Resume failed."}
 
         prov = self._get_provider("browser")
         if prov:
@@ -948,8 +949,9 @@ class MediaManager:
                 self._register_session("browser", result)
                 self._log_media_state("resume")
                 return self._to_dict(result)
+            return {"success": False, "message": result.error or "Resume failed."}
 
-        return {"success": True, "message": "No media to resume."}
+        return {"success": False, "message": "No media to resume."}
 
     def stop(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=stop")
@@ -966,7 +968,8 @@ class MediaManager:
                     self._registry.update_state(pname, state)
                     self._log_media_state("stop")
                     return self._to_dict(result)
-        return {"success": True, "message": "No media to stop."}
+                return {"success": False, "message": result.error or "Stop failed."}
+        return {"success": False, "message": "No media to stop."}
 
     def next_track(self) -> dict:
         logger.info("[MM] action=next")
