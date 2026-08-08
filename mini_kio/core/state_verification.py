@@ -257,4 +257,12 @@ def _is_playing_snapshot(msg: dict) -> bool:
     """True when a sample_media snapshot proves real playback: the element
     reports status=="playing" with a loaded duration (>0)."""
     dur = _float(msg.get("duration"))
-    return msg.get("status") == "playing" and dur is not None and dur > 0
+    if not (msg.get("status") == "playing" and dur is not None and dur > 0):
+        return False
+    # Player identity guard: if the page hosts a real media player
+    # (#movie_player on YouTube) but the sampled element is NOT inside it,
+    # a stray ad/hover <video> is being mistaken for the requested player.
+    # The extension resolves through _playerVideo() and reports these fields.
+    if msg.get("hasMoviePlayer") is True and msg.get("isPlayerVideo") is not True:
+        return False
+    return True

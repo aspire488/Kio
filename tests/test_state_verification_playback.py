@@ -119,3 +119,80 @@ def test_no_media_still_hard_failure(monkeypatch):
         VerificationCode.FAILED.value, VerificationCode.TIMEOUT.value,
         VerificationCode.NOT_VERIFIED.value,
     )
+
+
+class StrayAdVideoRaw:
+    """A page hosting the real #movie_player but only a stray ad/hover
+    <video> reports "playing". The sampled element is NOT the YouTube player,
+    so identity must fail — KIO must not claim the requested player is on."""
+
+    async def execute_script(self, tab_id, script, args=None):
+        if script == "sample_media":
+            return TabResult(success=True, message={
+                "ok": True,
+                "status": "playing",
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "paused": False,
+                "ended": False,
+                "currentTime": 10.0,
+                "duration": 142.0,
+                "readyState": 4,
+                "networkState": 2,
+                "muted": False,
+                "volume": 1.0,
+                "playerState": -1,
+                "hasMoviePlayer": True,
+                "isPlayerVideo": False,
+            })
+        if script == "play":
+            return TabResult(success=True, message={
+                "status": "playing", "paused": False, "currentTime": 10.0,
+            })
+        raise AssertionError(f"unexpected script {script!r}")
+
+
+class RealPlayerRaw:
+    """The sampled element is inside #movie_player (real YouTube player):
+    identity passes, playback verified."""
+
+    async def execute_script(self, tab_id, script, args=None):
+        if script == "sample_media":
+            return TabResult(success=True, message={
+                "ok": True,
+                "status": "playing",
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "paused": False,
+                "ended": False,
+                "currentTime": 0.0,
+                "duration": 142.0,
+                "readyState": 4,
+                "networkState": 2,
+                "muted": False,
+                "volume": 1.0,
+                "playerState": 1,
+                "hasMoviePlayer": True,
+                "isPlayerVideo": True,
+            })
+        if script == "play":
+            return TabResult(success=True, message={
+                "status": "playing", "paused": False, "currentTime": 0.0,
+            })
+        raise AssertionError(f"unexpected script {script!r}")
+
+
+def test_stray_ad_video_not_the_player_is_rejected(monkeypatch):
+    monkeypatch.setattr(sv, "_play_deadline_s", lambda: 0.2)
+    monkeypatch.setattr(sv, "_MUTATE_POLL_STEP_S", 0.05)
+    res = _run(StrayAdVideoRaw())
+    assert res.success is False, "a stray <video> is not the YouTube player"
+    assert res.verification in (
+        VerificationCode.TIMEOUT.value, VerificationCode.NOT_VERIFIED.value,
+    )
+
+
+def test_real_player_element_is_verified(monkeypatch):
+    monkeypatch.setattr(sv, "_play_deadline_s", lambda: 0.2)
+    monkeypatch.setattr(sv, "_MUTATE_POLL_STEP_S", 0.05)
+    res = _run(RealPlayerRaw())
+    assert res.success is True
+    assert res.verification == VerificationCode.VERIFIED.value

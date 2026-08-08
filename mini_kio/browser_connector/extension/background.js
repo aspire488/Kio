@@ -122,6 +122,28 @@ async function handleNavigateTab(msg) {
 // Pre-defined functions for all supported operations.
 // No eval(), no new Function() — fully MV3 CSP compliant.
 
+// Player identity: YouTube pages host the real player in #movie_player.
+// Every script that touches a media element resolves through _playerVideo()
+// so a stray ad/hover <video> is never mistaken for (or controlled as) the
+// actual YouTube player. _playerIdentity() reports what was resolved so the
+// verification pipeline can reject false "playing" snapshots.
+function _playerVideo() {
+  const player = document.getElementById('movie_player');
+  if (player) {
+    const inner = player.querySelector('video');
+    if (inner) return inner;
+  }
+  return document.querySelector('video,audio');
+}
+
+function _playerIdentity(v) {
+  const player = document.getElementById('movie_player');
+  return {
+    hasMoviePlayer: !!player,
+    isPlayerVideo: !!(player && v && player.contains(v)),
+  };
+}
+
 const SCRIPTS = {
   play: async () => {
     // ── Initial Page Diagnostics ────────────────────────────────────
@@ -148,7 +170,7 @@ const SCRIPTS = {
       exceptionStack: '',
     };
 
-    let v = document.querySelector('video,audio');
+    let v = _playerVideo();
     if (!v) {
       diag.player_status = 'no_video';
       console.log('[PLAY_SCRIPT] no video element found');
@@ -173,7 +195,7 @@ const SCRIPTS = {
     let lastLoggedState = -1;
 
     while (waited < MAX_WAIT_MS) {
-      v = document.querySelector('video,audio');
+      v = _playerVideo();
       if (!v) {
         diag.transitions.push(`waited=${waited}ms VIDEO_LOST`);
         diag.player_status = 'video_lost_during_wait';
@@ -286,7 +308,7 @@ const SCRIPTS = {
     }
   },
   pause: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.pause();
     return JSON.stringify({
@@ -298,7 +320,7 @@ const SCRIPTS = {
     });
   },
   stop: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.pause();
     v.currentTime = 0;
@@ -311,7 +333,7 @@ const SCRIPTS = {
     });
   },
   mute: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.muted = true;
     return JSON.stringify({
@@ -323,7 +345,7 @@ const SCRIPTS = {
     });
   },
   unmute: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.muted = false;
     return JSON.stringify({
@@ -335,7 +357,7 @@ const SCRIPTS = {
     });
   },
   volume_up: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.volume = Math.min(1, v.volume + 0.1);
     return JSON.stringify({
@@ -347,7 +369,7 @@ const SCRIPTS = {
     });
   },
   volume_down: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.volume = Math.max(0, v.volume - 0.1);
     return JSON.stringify({
@@ -376,7 +398,7 @@ const SCRIPTS = {
     return JSON.stringify({ success: false, error: 'no player found' });
   },
   seek_forward: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
@@ -395,7 +417,7 @@ const SCRIPTS = {
     });
   },
   seek_backward: () => {
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
@@ -553,7 +575,7 @@ const SCRIPTS = {
     // Returns an idempotent snapshot of the current media element so the
     // connector can prove time progression (currentTime advancing) instead of
     // trusting the play ACK alone.
-    const v = document.querySelector('video,audio');
+    const v = _playerVideo();
     let playerState = -1;
     try {
       const player = document.getElementById('movie_player');
@@ -567,6 +589,7 @@ const SCRIPTS = {
       return JSON.stringify({
         ok: false, status: 'no media', url: location.href,
         currentTime: 0, duration: 0, paused: true, playerState,
+        ..._playerIdentity(null),
       });
     }
     return JSON.stringify({
@@ -575,6 +598,7 @@ const SCRIPTS = {
       currentTime: v.currentTime, duration: v.duration,
       readyState: v.readyState, networkState: v.networkState,
       muted: v.muted, volume: v.volume, playerState,
+      ..._playerIdentity(v),
     });
   },
 };
