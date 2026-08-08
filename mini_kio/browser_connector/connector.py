@@ -50,6 +50,14 @@ _MEDIA_DOMAINS = [
     "disneyplus.com",
 ]
 
+# RC1: the extension build the runtime expects. Chrome serves a cached copy
+# of an unpacked MV3 service worker, so the loaded build can lag the working
+# tree while answering basic DOM reads. The extension sends its build in the
+# connect message; a stale/unknown build is REJECTED at registration so a
+# current-build service worker always wins the single connection slot (the
+# stale one would otherwise keep stealing it via its 3s reconnect loop).
+_EXPECTED_EXTENSION_BUILD = "0.2.0"
+
 # ── Thread exception hook (global, installed once) ────────────────────
 
 _original_thread_excepthook: Any = None
@@ -467,10 +475,17 @@ class Connector:
             return None
 
         # 2. Audible tabs (requires extension enhancement — audible field)
+        # RC2: ONLY media-domain tabs may be targeted. An active/audible
+        # non-media tab (e.g. Telegram Web) must never become the transport
+        # target — the extension lacks host permissions for it and KIO would
+        # report "Cannot access contents".
         try:
             res = await self.list_tabs()
             if res.success and res.tabs:
-                audible_tabs = [t for t in res.tabs if getattr(t, "audible", False)]
+                audible_tabs = [
+                    t for t in res.tabs
+                    if getattr(t, "audible", False) and self._is_media_host(t.url or "")
+                ]
                 if audible_tabs:
                     # Prefer active tab among audible ones
                     for t in audible_tabs:
@@ -495,14 +510,24 @@ class Connector:
         try:
             res = await self.list_tabs()
             if res.success and res.tabs:
-                for domain in _MEDIA_DOMAINS:
-                    for t in res.tabs:
-                        if t.url and domain.lower() in t.url.lower():
-                            return t
+                for t in res.tabs:
+                    if t.url and self._is_media_host(t.url):
+                        return t
         except Exception:
             pass
 
         return None
+
+    @staticmethod
+    def _is_media_host(url: str) -> bool:
+        """True when the URL's host is a known media domain."""
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            return False
+        if not host:
+            return False
+        return any(host == d or host.endswith("." + d) for d in _MEDIA_DOMAINS)
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -806,6 +831,29 @@ class Connector:
             logger.warning("[CONNECTOR] auth FAILED from %s - token mismatch, sending updated token", remote)
             await websocket.send(serialize(Message(
                 type="set_token", token=self._token,
+            )))
+            return
+
+        # RC1: reject stale/unknown extension builds at registration.
+        # The current background.js sends build=<BUILD_VERSION> in the
+        # connect message. A missing or mismatched build means Chrome is
+        # still executing an old service worker — registering it would
+        # reproduce every "non-state payload" / false-failure symptom.
+        # Rejecting it lets the current-build SW (which reconnects on its
+        # own alarm cadence) claim the slot instead.
+        ext_build = (msg.build or "").strip()
+        if ext_build != _EXPECTED_EXTENSION_BUILD:
+            logger.warning(
+                "[CONNECTOR] auth REJECTED stale build from %s "
+                "(loaded=%r expected=%r) - keeping slot free for current build",
+                remote, ext_build or None, _EXPECTED_EXTENSION_BUILD,
+            )
+            await websocket.send(serialize(Message(
+                type=MessageType.ERROR,
+                error=(
+                    f"stale extension build (loaded={ext_build or 'unknown'}, "
+                    f"expected={_EXPECTED_EXTENSION_BUILD}) - reload the KIO Chrome extension"
+                ),
             )))
             return
 

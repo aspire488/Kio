@@ -39,6 +39,7 @@ class Message:
     type: str
     command_id: Optional[str] = None
     token: Optional[str] = None
+    build: Optional[str] = None
     url: Optional[str] = None
     tab_id: Optional[int] = None
     title: Optional[str] = None

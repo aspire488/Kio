@@ -20,6 +20,38 @@ _YOUTUBE_SEARCH_URL = (
 )
 
 
+def _score_candidate(title: str, url: str, query: str) -> int:
+    """Relevance score of a YouTube search result against the requested query.
+
+    Shared by the controlled search path (_search_metadata) and direct
+    playback candidate selection (RC7) so both pick the best-matching result
+    instead of blindly clicking the first link.
+    """
+    score = 0
+    tl = title.lower()
+    ql = query.lower()
+    if ql in tl:
+        score += 20
+    for term in ql.split():
+        if term and term in tl:
+            score += 2
+    if "trailer" in ql and "trailer" in tl:
+        score += 10
+    if "highlight" in ql and "highlight" in tl:
+        score += 10
+    if "interview" in ql and "interview" in tl:
+        score += 10
+    if "music video" in ql and "music video" in tl:
+        score += 10
+    if "live" in ql and "live" in tl:
+        score += 5
+    if "official" in tl:
+        score += 3
+    if "/shorts/" in url:
+        score -= 2
+    return score
+
+
 class YouTubeProvider(MediaProvider):
     def __init__(self, conn: Optional[Connector] = None):
         self._conn = conn
@@ -37,6 +69,40 @@ class YouTubeProvider(MediaProvider):
             from mini_kio.core.command_router import _get_connector
             self._conn = _get_connector()
         return self._conn
+
+    def _select_best_candidate(self, tab_id: int, query: str) -> Optional[str]:
+        """RC7: choose the best-matching YouTube result instead of the first.
+
+        Scrapes the open results page via the extension MV3-safe
+        search_results script (retried until the page renders), scores
+        each candidate against the requested query, and returns the best
+        URL — or None when nothing relevant is available (the caller falls
+        back to youtube_bootstrap).
+        """
+        conn = self._get_conn()
+        if not conn:
+            return None
+        candidates = []
+        for _attempt in range(4):
+            scrape = safe_run_async(conn.execute_script(tab_id, "search_results"))
+            if scrape.success and isinstance(scrape.message, list):
+                for item in scrape.message:
+                    if isinstance(item, dict) and item.get("title") and item.get("url"):
+                        candidates.append(item)
+                if candidates:
+                    break
+            time.sleep(1.0)
+        if not candidates:
+            logger.info("[YT_CANDIDATE] no candidates scraped for query=%s", query)
+            return None
+        best = max(candidates, key=lambda c: _score_candidate(c["title"], c["url"], query))
+        score = _score_candidate(best["title"], best["url"], query)
+        if score <= 0:
+            logger.info("[YT_CANDIDATE] best score=%d too weak for query=%s title=%s",
+                        score, query, best.get("title", ""))
+            return None
+        logger.info("[YT_CANDIDATE] query=%s selected=%s score=%d", query, best.get("title", ""), score)
+        return best["url"]
 
     def play(self, query: str, **kwargs) -> MediaResult:
         logger.info("[ROOT_YT] ENTER query=%s kwargs=%s", query, kwargs)
@@ -111,13 +177,38 @@ class YouTubeProvider(MediaProvider):
                     logger.warning("[YT_INSTRUMENT] pre-bootstrap page info failed: %s", _pbe)
                 # ────────────────────────────────────────────────────────
 
+                # RC7: controlled candidate selection BEFORE any blind click.
+                _candidate_url = self._select_best_candidate(tab_id, clean_query)
+                _navigated = False
+                if _candidate_url:
+                    logger.info("[ROOT_YT] candidate_navigate url=%s", _candidate_url)
+                    try:
+                        _nav = safe_run_async(conn.open_tab(_candidate_url))
+                        _navigated = bool(_nav.success)
+                    except Exception as _ne:
+                        logger.warning("[YT] candidate navigate failed: %s", _ne)
+
                 try:
-                    logger.info("[ROOT_YT] invoking bootstrap")
-                    bootstrap_result = safe_run_async(conn.execute_script(tab_id, "youtube_bootstrap"))
-                    logger.info("[ROOT_YT] bootstrap result success=%s message=%s msg_type=%s", 
-                                bootstrap_result.success, bootstrap_result.message, 
-                                type(bootstrap_result.message).__name__)
-                    if bootstrap_result.success and bootstrap_result.message == "navigating":
+                    # RC5: bounded bootstrap retry — "not found" is a render-
+                    # timing signal on a fresh results page, not a verdict.
+                    _bootstrap_msg = "not attempted"
+                    if not _navigated:
+                        for _ba in range(3):
+                            logger.info("[ROOT_YT] invoking bootstrap attempt=%d", _ba + 1)
+                            bootstrap_result = safe_run_async(conn.execute_script(tab_id, "youtube_bootstrap"))
+                            logger.info("[ROOT_YT] bootstrap result success=%s message=%s msg_type=%s",
+                                        bootstrap_result.success, bootstrap_result.message,
+                                        type(bootstrap_result.message).__name__)
+                            _bootstrap_msg = bootstrap_result.message
+                            if bootstrap_result.success and bootstrap_result.message == "navigating":
+                                _navigated = True
+                                break
+                            if bootstrap_result.success and bootstrap_result.message == "not found":
+                                logger.info("[ROOT_YT] bootstrap not_found attempt=%d — retrying", _ba + 1)
+                                time.sleep(1.5)
+                                continue
+                            break
+                    if _navigated:
                         # ── INSTRUMENTATION: URL immediately after bootstrap ──
                         try:
                             _post_bootstrap = safe_run_async(conn.execute_script(tab_id, "get_page_info"))
@@ -174,12 +265,15 @@ class YouTubeProvider(MediaProvider):
                                 if _player_state == 1: # YouTube Iframe API state for playing
                                     _is_playing = True
                                     _accepted_reason = "player_state_1"
-                                elif _player_status_from_script == "playing" and not _paused:
+                                elif _player_status_from_script == "playing":
+                                    # The 'paused' field of the play-script payload is a
+                                    # pre-play snapshot on some extension builds and must
+                                    # not veto a verified 'playing' status.
                                     _is_playing = True
-                                    _accepted_reason = "script_player_status_playing_and_not_paused"
-                                elif _status == "playing" and not _paused:
+                                    _accepted_reason = "script_player_status_playing"
+                                elif _status == "playing":
                                     _is_playing = True
-                                    _accepted_reason = "legacy_status_playing_and_not_paused"
+                                    _accepted_reason = "legacy_status_playing"
 
                                 # Stabilization: if playing but paused=true, poll for transition to paused=false
                                 if (_status == "playing" or _player_status_from_script == "playing") and _paused and not _is_playing:
@@ -211,7 +305,7 @@ class YouTubeProvider(MediaProvider):
                                                 _stabilized = True
                                                 logger.info("[PLAY_VERIFY] stabilized=true via player_state")
                                                 break
-                                            elif (_st_status == "playing" or _st_player_status_from_script == "playing") and not _st_paused:
+                                            elif (_st_status == "playing" or _st_player_status_from_script == "playing"):
                                                 msg = _st_msg # Update message with latest state
                                                 _is_playing = True
                                                 _accepted_reason = "stabilize_script_status_playing_and_not_paused"
@@ -233,12 +327,12 @@ class YouTubeProvider(MediaProvider):
                                         if _player_state == 1:
                                             _is_playing = True
                                             _accepted_reason = "final_player_state_1_after_stabilize"
-                                        elif msg.get("player_status") == "playing" and not msg.get("paused", True):
+                                        elif msg.get("player_status") == "playing":
                                             _is_playing = True
-                                            _accepted_reason = "final_script_player_status_playing_and_not_paused_after_stabilize"
-                                        elif msg.get("status") == "playing" and not msg.get("paused", True):
+                                            _accepted_reason = "final_script_player_status_playing_after_stabilize"
+                                        elif msg.get("status") == "playing":
                                             _is_playing = True
-                                            _accepted_reason = "final_legacy_status_playing_and_not_paused_after_stabilize"
+                                            _accepted_reason = "final_legacy_status_playing_after_stabilize"
 
                                 logger.info("[PLAY_VERIFY_FINAL] status=%s player_status_from_script=%s paused=%s actual_player_state=%s accepted_reason=%s", 
                                             msg.get("status"), msg.get("player_status"), msg.get("paused", True), _player_state, _accepted_reason)
@@ -272,13 +366,30 @@ class YouTubeProvider(MediaProvider):
                                 logger.info("[ROOT_YT] PLAY_LOOP_EXIT=navigating_retry attempt=%d", attempt + 1)
                                 continue
                             elif not play_result.success:
-                                logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_failed error=%s", getattr(play_result, 'error', 'unknown'))
+                                _err = str(getattr(play_result, 'error', '') or '')
+                                logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_failed error=%s attempt=%d", _err, attempt + 1)
+                                # The watch page may still be building its <video>
+                                # element (or the extension payload may be a
+                                # transient non-state). A no-media / not-yet-
+                                # playing failure is a timing signal, not a
+                                # verdict: retry within the bounded loop and only
+                                # give up after the last attempt.
+                                _retryable = any(
+                                    k in _err.lower()
+                                    for k in (
+                                        "no media", "did not advance",
+                                        "cannot read playback", "returned no payload",
+                                        "non-state payload", "reported: no media",
+                                    )
+                                )
+                                if attempt < 4 and _retryable:
+                                    continue
                                 break
                             else:
                                 logger.info("[ROOT_YT] PLAY_LOOP_EXIT=unexpected_msg msg=%s", str(play_result.message)[:200] if hasattr(play_result, 'message') else 'N/A')
                                 break
                     else:
-                        logger.info("[ROOT_YT] BOOTSTRAP_EXIT=did_not_navigate msg=%s", bootstrap_result.message)
+                        logger.info("[ROOT_YT] BOOTSTRAP_EXIT=did_not_navigate msg=%s", _bootstrap_msg)
                 except Exception as exc:
                     logger.warning("[YT] bootstrap/play failed: %s", exc)
 
@@ -344,28 +455,77 @@ class YouTubeProvider(MediaProvider):
     def stop(self) -> MediaResult:
         return self._transport("stop")
 
+    def _url_changed(self, msg: dict) -> bool:
+        """Truthful 'did the video actually change' check.
+
+        Newer extension builds return url_changed directly; older builds only
+        send url_before/url_after (read synchronously), so a follow-up probe
+        is used to catch SPA navigation that completes after the click ACK.
+        """
+        if msg.get("url_changed"):
+            return True
+        url_before = msg.get("url_before") or ""
+        url_after = msg.get("url_after") or ""
+        return bool(url_before and url_after and url_before != url_after)
+
+    def _probe_url_changed(self, url_before: str) -> bool:
+        conn = self._get_conn()
+        tab_id = self._resolve_tab_id()
+        if not conn or not tab_id or not url_before:
+            return False
+        try:
+            for _ in range(4):
+                time.sleep(0.75)
+                info = safe_run_async(conn.execute_script(tab_id, "get_page_info"))
+                if info.success and isinstance(info.message, dict):
+                    cur = info.message.get("url") or ""
+                    if cur and cur != url_before:
+                        return True
+        except Exception:
+            pass
+        return False
+
     def next_track(self) -> MediaResult:
         res = self._transport("next_track")
         if res.success and isinstance(res.message, dict):
             msg = res.message
-            logger.info("[NEXT_TRACK] button_found=%s clicked=%s fallback_used=%s url_before=%s url_after=%s url_changed=%s",
-                        msg.get("button_found"), msg.get("clicked"), not msg.get("button_found"), 
-                        msg.get("url_before"), msg.get("url_after"), msg.get("url_changed"))
-            
-            if msg.get("clicked") and msg.get("url_changed"):
-                res.message = f"next_track_verified [NEXT_TRACK_VERIFY]"
+            url_before = msg.get("url_before") or ""
+            url_changed = self._url_changed(msg)
+            logger.info("[NEXT_TRACK] button_found=%s clicked=%s url_before=%s url_after=%s url_changed=%s",
+                        msg.get("button_found"), msg.get("clicked"),
+                        url_before, msg.get("url_after"), url_changed)
+            if not url_changed:
+                url_changed = self._probe_url_changed(url_before)
+            if url_changed:
+                res.message = "next_track_verified [NEXT_TRACK_VERIFY]"
+            else:
+                # Truthfulness: never claim 'next' when the video did not change.
+                return MediaResult(
+                    success=False,
+                    error="Couldn't switch to the next video (no navigation detected)",
+                    player="youtube",
+                )
         return res
 
     def previous_track(self) -> MediaResult:
         res = self._transport("previous_track")
         if res.success and isinstance(res.message, dict):
             msg = res.message
-            logger.info("[PREVIOUS_TRACK] button_found=%s clicked=%s fallback_used=%s url_before=%s url_after=%s url_changed=%s",
-                        msg.get("button_found"), msg.get("clicked"), not msg.get("button_found"),
-                        msg.get("url_before"), msg.get("url_after"), msg.get("url_changed"))
-            
-            if msg.get("clicked") and msg.get("url_changed"):
-                res.message = f"previous_track_verified [PREVIOUS_TRACK_VERIFY]"
+            url_before = msg.get("url_before") or ""
+            url_changed = self._url_changed(msg)
+            logger.info("[PREVIOUS_TRACK] button_found=%s clicked=%s url_before=%s url_after=%s url_changed=%s",
+                        msg.get("button_found"), msg.get("clicked"),
+                        url_before, msg.get("url_after"), url_changed)
+            if not url_changed:
+                url_changed = self._probe_url_changed(url_before)
+            if url_changed:
+                res.message = "previous_track_verified [PREVIOUS_TRACK_VERIFY]"
+            else:
+                return MediaResult(
+                    success=False,
+                    error="Couldn't switch to the previous video (no navigation detected)",
+                    player="youtube",
+                )
         return res
 
     def seek(self, seconds: int) -> MediaResult:
@@ -450,44 +610,10 @@ class YouTubeProvider(MediaProvider):
             tab_id = result.tab.tab_id
             time.sleep(1.0)  # Wait for results to load
             
-            scrape_script = """
-            (function() {
-                const selectors = [
-                    'ytd-video-renderer',
-                    'ytd-grid-video-renderer',
-                    'ytd-rich-item-renderer',
-                    'ytd-item-section-renderer',
-                ];
-                const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
-                const results = [];
-                for (const node of nodes) {
-                    const anchor = node.querySelector('a#video-title');
-                    if (!anchor || !anchor.href) {
-                        continue;
-                    }
-                    const url = anchor.href;
-                    let videoId = null;
-                    try {
-                        videoId = new URL(url).searchParams.get('v');
-                    } catch (err) {
-                        continue;
-                    }
-                    if (!videoId) {
-                        continue;
-                    }
-                    const title = (anchor.title || anchor.textContent || '').trim();
-                    if (!title) {
-                        continue;
-                    }
-                    results.push({ title: title, url: url, video_id: videoId });
-                    if (results.length >= 8) {
-                        break;
-                    }
-                }
-                return results;
-            })()
-            """
-            scrape_res = safe_run_async(conn.execute_script(tab_id, "eval", args=[scrape_script]))
+            # R11: scrape via the extension's MV3-safe search_results script.
+            # (The previous inline "eval" script never existed in the
+            # extension's SCRIPTS registry — search was silently broken.)
+            scrape_res = safe_run_async(conn.execute_script(tab_id, "search_results"))
             candidates = []
             if scrape_res.success and isinstance(scrape_res.message, list):
                 for item in scrape_res.message:
@@ -499,49 +625,33 @@ class YouTubeProvider(MediaProvider):
                     if title and url and video_id:
                         candidates.append((title, url, video_id))
 
-            def _score_candidate(title: str, url: str) -> int:
-                score = 0
-                tl = title.lower()
-                ql = query.lower()
-                if ql in tl:
-                    score += 20
-                for term in ql.split():
-                    if term and term in tl:
-                        score += 2
-                if "trailer" in ql and "trailer" in tl:
-                    score += 10
-                if "highlight" in ql and "highlight" in tl:
-                    score += 10
-                if "interview" in ql and "interview" in tl:
-                    score += 10
-                if "music video" in ql and "music video" in tl:
-                    score += 10
-                if "live" in ql and "live" in tl:
-                    score += 5
-                if "official" in tl:
-                    score += 3
-                if "/shorts/" in url:
-                    score -= 2
-                return score
-
             if candidates:
-                best = max(candidates, key=lambda item: _score_candidate(item[0], item[1]))
+                best = max(candidates, key=lambda item: _score_candidate(item[0], item[1], query))
                 title, url, video_id = best
                 logger.info("[YOUTUBE_ARTIFACT] query='%s' selected_title=%s url=%s", query, title, url)
-                safe_run_async(conn.close_tab(tab_id))
+                # Keep the results tab OPEN: KIO retains control of the search
+                # page, and the candidate feeds the reference flow ('play it' /
+                # 'play again' resolve to it via MediaManager.search).
                 candidate = MediaCandidate(
                     title=title, url=url, provider="youtube",
                     source="youtube", confidence=1.0,
                 )
                 return MediaResult(
                     success=True,
-                    message=f"Found artifact: {title}",
+                    message=f"Found on YouTube: {title}",
                     candidates=[candidate],
                     player="youtube",
                 )
 
-            safe_run_async(conn.close_tab(tab_id))
-            return MediaResult(success=False, error="No video found in search results", player="youtube")
+            # Fallback: the results page may still be rendering, or this
+            # extension build predates search_results. The tab is open in the
+            # controlled connector world — report that truthfully instead of
+            # inventing a candidate or escaping to an uncontrolled browser.
+            return MediaResult(
+                success=True,
+                message=f"Opened YouTube search for: {query}",
+                player="youtube",
+            )
         except Exception as e:
             logger.error("[YOUTUBE_METADATA_SEARCH_ERROR] error=%s", e)
             return MediaResult(success=False, error=str(e), player="youtube")

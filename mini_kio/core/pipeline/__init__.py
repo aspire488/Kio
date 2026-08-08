@@ -656,6 +656,24 @@ class _CapabilityResolver:
     """
 
     def resolve(self, decision: RoutingDecision) -> tuple[str, dict[str, Any]]:
+        # R11 convergence: "search X in youtube" is a controlled-media search
+        # owned by YouTubeProvider (connector world). Routing it to the desktop
+        # capability sent it through browser_operator, which could fall back to
+        # an uncontrolled external browser KIO cannot subsequently control.
+        if (
+            decision.intent_type == IntentType.SEARCH
+            and decision.action == "search_youtube"
+        ):
+            return (
+                "media",
+                {
+                    "action": "search",
+                    "target": decision.target,
+                    "platform": "youtube",
+                    "raw": decision.raw_text,
+                },
+            )
+
         mapping = {
             IntentType.GREETING: ("conversation", {"template": "greeting"}),
             IntentType.SOCIAL: ("conversation", {"template": "social"}),
@@ -730,6 +748,11 @@ class _ExecutionCoordinator:
 
         if action == "play":
             return mm.play(params.get("target", ""), platform=params.get("platform"))
+        if action == "search":
+            return mm.search(
+                params.get("target", ""),
+                platform=params.get("platform", ""),
+            )
         if action == "set_volume":
             return mm.set_volume(int(params["target"]))
         if action == "information_query":

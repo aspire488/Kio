@@ -2,6 +2,13 @@
 // WebSocket ↔ Chrome Extension bridge
 
 const WS_URL = "ws://127.0.0.1:9877";
+
+// Build fingerprint: the runtime compares this against its expected build so
+// a stale service worker (Chrome serving a cached copy of background.js) is
+// detected and reported clearly instead of producing cryptic "non-state
+// payload" failures. Bump together with manifest.json version.
+const BUILD_VERSION = "0.2.0";
+
 let AUTH_TOKEN = "";  // Set by runtime message or storage
 
 let socket = null;
@@ -122,11 +129,16 @@ async function handleNavigateTab(msg) {
 // Pre-defined functions for all supported operations.
 // No eval(), no new Function() — fully MV3 CSP compliant.
 
-// Player identity: YouTube pages host the real player in #movie_player.
-// Every script that touches a media element resolves through _playerVideo()
-// so a stray ad/hover <video> is never mistaken for (or controlled as) the
-// actual YouTube player. _playerIdentity() reports what was resolved so the
-// verification pipeline can reject false "playing" snapshots.
+// NOTE: chrome.scripting.executeScript({func}) serializes ONLY the function
+// body and re-injects it into the page context. Outer-scope identifiers
+// (helpers defined in this service worker, BUILD_VERSION, etc.) are NOT
+// visible inside the injected function — referencing them makes the script
+// return undefined ("success" with no payload). Every script below must
+// therefore be FULLY SELF-CONTAINED: inline the #movie_player resolution and
+// the build literal. Do not call shared helpers from inside a SCRIPTS fn.
+
+// Player resolution used by the injected scripts. Kept here only as the
+// reference implementation; each SCRIPTS fn inlines this exact logic.
 function _playerVideo() {
   const player = document.getElementById('movie_player');
   if (player) {
@@ -146,6 +158,16 @@ function _playerIdentity(v) {
 
 const SCRIPTS = {
   play: async () => {
+    // Self-contained player resolution (see SCRIPTS header note).
+    const _playerVideoLocal = () => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    };
+
     // ── Initial Page Diagnostics ────────────────────────────────────
     const diag = {
       url: location.href,
@@ -170,7 +192,7 @@ const SCRIPTS = {
       exceptionStack: '',
     };
 
-    let v = _playerVideo();
+    let v = _playerVideoLocal();
     if (!v) {
       diag.player_status = 'no_video';
       console.log('[PLAY_SCRIPT] no video element found');
@@ -195,7 +217,7 @@ const SCRIPTS = {
     let lastLoggedState = -1;
 
     while (waited < MAX_WAIT_MS) {
-      v = _playerVideo();
+      v = _playerVideoLocal();
       if (!v) {
         diag.transitions.push(`waited=${waited}ms VIDEO_LOST`);
         diag.player_status = 'video_lost_during_wait';
@@ -274,16 +296,25 @@ const SCRIPTS = {
       // Success
       console.log('[PLAY_SCRIPT] play_succeeded');
       diag.player_status = 'playing';
+      // Truthfulness contract: live state captured AFTER play() resolved must
+      // win over the pre-play snapshot in `diag`. The old order spread `diag`
+      // last, so diag.paused (captured before play -> true) clobbered the real
+      // post-play state -> a self-contradictory payload {status:'playing',
+      // paused:true} that made KIO report "Couldn't play" while playing.
       return JSON.stringify({
+        ...diag,
         status: 'playing',
+        player_status: 'playing',
         currentTime: v.currentTime,
         duration: v.duration,
         volume: v.volume,
         muted: v.muted,
+        paused: v.paused,
+        ended: v.ended,
+        readyState: v.readyState,
         _audio_before_muted: _before_muted,
         _audio_before_volume: _before_volume,
         _audio_restored: true,
-        ...diag,
       });
 
     } catch (e) {
@@ -308,11 +339,28 @@ const SCRIPTS = {
     }
   },
   pause: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
-    v.pause();
+    try {
+      v.pause();
+    } catch (e) {
+      return JSON.stringify({ status: 'error', error: e.name || 'pause_exception' });
+    }
+    // Truthfulness: report the observed state, not the intention. An ACK
+    // without proof let KIO claim "Paused" while the video kept playing.
+    if (v.paused !== true) {
+      return JSON.stringify({ status: 'error', error: 'pause_failed', paused: v.paused });
+    }
     return JSON.stringify({
       status: 'paused',
+      paused: true,
       currentTime: v.currentTime,
       duration: v.duration,
       volume: v.volume,
@@ -320,12 +368,27 @@ const SCRIPTS = {
     });
   },
   stop: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
-    v.pause();
-    v.currentTime = 0;
+    try {
+      v.pause();
+      v.currentTime = 0;
+    } catch (e) {
+      return JSON.stringify({ status: 'error', error: e.name || 'stop_exception' });
+    }
+    if (v.paused !== true) {
+      return JSON.stringify({ status: 'error', error: 'stop_failed', paused: v.paused });
+    }
     return JSON.stringify({
       status: 'stopped',
+      paused: true,
       currentTime: v.currentTime,
       duration: v.duration,
       volume: v.volume,
@@ -333,7 +396,14 @@ const SCRIPTS = {
     });
   },
   mute: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.muted = true;
     return JSON.stringify({
@@ -345,7 +415,14 @@ const SCRIPTS = {
     });
   },
   unmute: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.muted = false;
     return JSON.stringify({
@@ -357,7 +434,14 @@ const SCRIPTS = {
     });
   },
   volume_up: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.volume = Math.min(1, v.volume + 0.1);
     return JSON.stringify({
@@ -369,7 +453,14 @@ const SCRIPTS = {
     });
   },
   volume_down: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     v.volume = Math.max(0, v.volume - 0.1);
     return JSON.stringify({
@@ -398,7 +489,14 @@ const SCRIPTS = {
     return JSON.stringify({ success: false, error: 'no player found' });
   },
   seek_forward: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
@@ -417,7 +515,14 @@ const SCRIPTS = {
     });
   },
   seek_backward: () => {
-    const v = _playerVideo();
+    const v = (() => {
+      const player = document.getElementById('movie_player');
+      if (player) {
+        const inner = player.querySelector('video');
+        if (inner) return inner;
+      }
+      return document.querySelector('video,audio');
+    })();
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
@@ -435,7 +540,7 @@ const SCRIPTS = {
       _audio_restored: v.muted === _before_muted && v.volume === _before_volume,
     });
   },
-  next_track: () => {
+  next_track: async () => {
     const url_before = location.href;
     const btn = document.querySelector('.ytp-next-button') || document.querySelector('a[aria-label="Next (Shift+N)"]') || document.querySelector('a[aria-label="Next video"]');
     let clicked = false;
@@ -450,10 +555,18 @@ const SCRIPTS = {
       document.dispatchEvent(ev);
       clicked = true;
     }
-    const url_after = location.href;
-    return JSON.stringify({ status: 'navigating', action: 'next', button_found, clicked, url_before, url_after });
+    // Wait up to 4s for the SPA route change so url_changed is truthful,
+    // not a synchronous read racing the player's navigation.
+    const deadline = Date.now() + 4000;
+    let url_after = location.href;
+    while (Date.now() < deadline && url_after === url_before) {
+      await new Promise(r => setTimeout(r, 250));
+      url_after = location.href;
+    }
+    const url_changed = url_after !== url_before;
+    return JSON.stringify({ status: url_changed ? 'navigating' : 'no_change', action: 'next', button_found, clicked, url_before, url_after, url_changed });
   },
-  previous_track: () => {
+  previous_track: async () => {
     const url_before = location.href;
     const btn = document.querySelector('.ytp-prev-button') || document.querySelector('a[aria-label="Back (Shift+P)"]') || document.querySelector('a[aria-label="Previous video"]');
     let clicked = false;
@@ -468,8 +581,14 @@ const SCRIPTS = {
       document.dispatchEvent(ev);
       clicked = true;
     }
-    const url_after = location.href;
-    return JSON.stringify({ status: 'navigating', action: 'previous', button_found, clicked, url_before, url_after });
+    const deadline = Date.now() + 4000;
+    let url_after = location.href;
+    while (Date.now() < deadline && url_after === url_before) {
+      await new Promise(r => setTimeout(r, 250));
+      url_after = location.href;
+    }
+    const url_changed = url_after !== url_before;
+    return JSON.stringify({ status: url_changed ? 'navigating' : 'no_change', action: 'previous', button_found, clicked, url_before, url_after, url_changed });
   },
   get_page_info: () => {
     return JSON.stringify({
@@ -570,17 +689,56 @@ const SCRIPTS = {
     }
     return JSON.stringify({ playerState: -1 }); // Unknown or not available
   },
+  get_build_info: () => {
+    // MV3-safe build fingerprint. The build literal is INLINED because the
+    // injected function cannot see the outer BUILD_VERSION const (see SCRIPTS
+    // header note). Keep in sync with BUILD_VERSION above and manifest.json.
+    return JSON.stringify({ build: '0.2.0' });
+  },
+  search_results: () => {
+    // MV3-safe candidate scrape for controlled YouTube search (R11).
+    // Returns the top results as [{title, url, video_id}] — never plays.
+    const selectors = [
+      'ytd-video-renderer',
+      'ytd-grid-video-renderer',
+      'ytd-rich-item-renderer',
+      'ytd-item-section-renderer',
+    ];
+    const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+    const results = [];
+    for (const node of nodes) {
+      const anchor = node.querySelector('a#video-title');
+      if (!anchor || !anchor.href) continue;
+      let videoId = null;
+      try {
+        videoId = new URL(anchor.href).searchParams.get('v');
+      } catch (e) {
+        continue;
+      }
+      if (!videoId) continue;
+      const title = (anchor.title || anchor.textContent || '').trim();
+      if (!title) continue;
+      results.push({ title: title, url: anchor.href, video_id: videoId });
+      if (results.length >= 8) break;
+    }
+    return JSON.stringify(results);
+  },
   sample_media: () => {
     // State probe used by the verification pipeline. NEVER mutates playback.
     // Returns an idempotent snapshot of the current media element so the
     // connector can prove time progression (currentTime advancing) instead of
-    // trusting the play ACK alone.
-    const v = _playerVideo();
+    // trusting the play ACK alone. Fully self-contained (see SCRIPTS header
+    // note) — _playerVideo/_playerIdentity logic inlined below.
+    const playerEl = document.getElementById('movie_player');
+    const v = (playerEl && playerEl.querySelector('video')) || document.querySelector('video,audio');
+    const identity = {
+      hasMoviePlayer: !!playerEl,
+      isPlayerVideo: !!(playerEl && v && playerEl.contains(v)),
+    };
     let playerState = -1;
     try {
-      const player = document.getElementById('movie_player');
-      if (player && typeof player.getPlayerState === 'function') {
-        playerState = player.getPlayerState();
+      if (playerEl && typeof playerEl.getPlayerState === 'function') {
+        playerState = playerEl.getPlayerState();
       }
     } catch (e) {
       console.warn("[KIO_SAMPLE_MEDIA] Failed to get player state:", e);
@@ -589,7 +747,7 @@ const SCRIPTS = {
       return JSON.stringify({
         ok: false, status: 'no media', url: location.href,
         currentTime: 0, duration: 0, paused: true, playerState,
-        ..._playerIdentity(null),
+        ...identity,
       });
     }
     return JSON.stringify({
@@ -598,7 +756,7 @@ const SCRIPTS = {
       currentTime: v.currentTime, duration: v.duration,
       readyState: v.readyState, networkState: v.networkState,
       muted: v.muted, volume: v.volume, playerState,
-      ..._playerIdentity(v),
+      ...identity,
     });
   },
 };
@@ -694,7 +852,7 @@ function connect() {
 
   socket.onopen = () => {
     log("SUCCESS", "WebSocket opened");
-    const authMsg = { type: "connect", token: AUTH_TOKEN };
+    const authMsg = { type: "connect", token: AUTH_TOKEN, build: BUILD_VERSION };
     socket.send(JSON.stringify(authMsg));
   };
 

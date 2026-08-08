@@ -39,6 +39,13 @@ _PLAY_SCRIPTS = {
     "play", "resume", "seek_forward", "seek_backward",
 }
 
+# Scripts whose success must be proven by an observed paused state, not the
+# ACK alone (the extension may have paused a stray element, or an autoplay
+# may have raced the pause).
+_PAUSE_SCRIPTS = {
+    "pause", "stop",
+}
+
 _FAILED_STATUSES = {
     "no media", "blocked", "no_video", "player_not_ready",
     "player_lost", "video_lost", "ended", "aborted",
@@ -51,6 +58,15 @@ def _play_deadline_s() -> float:
 
 _MUTATE_POLL_STEP_S = 0.5
 _MUTATE_DEADLINE_S = 15.0
+_PAUSE_DEADLINE_S = 10.0
+
+
+# RC1: the expected extension build fingerprint. Chrome serves a cached copy
+# of an unpacked MV3 service worker, so the loaded build can lag the working
+# tree. When a play-family script returns an empty/non-dict payload, probe
+# get_build_info and surface a clear "reload the extension" diagnostic instead
+# of the generic (and misleading) "non-state payload" error.
+_EXPECTED_BUILD = "0.2.0"
 
 
 class VerifiedConnector:
@@ -58,6 +74,7 @@ class VerifiedConnector:
 
     def __init__(self, raw: Any):
         self._raw = raw
+        self._build_probed = False
 
     # ── Raw passthrough (non-mutating / infos) ─────────────────────────
 
@@ -166,7 +183,11 @@ class VerifiedConnector:
             if script in _PLAY_SCRIPTS:
                 res.verification = VerificationCode.NOT_VERIFIED.value
                 res.success = False
-                res.error = f"script '{script}' returned non-state payload"
+                stale = await self._stale_build(tab_id)
+                if stale:
+                    res.error = stale
+                else:
+                    res.error = f"script '{script}' returned non-state payload"
             else:
                 res.verification = VerificationCode.VERIFIED.value
             return res
@@ -177,6 +198,9 @@ class VerifiedConnector:
             res.success = False
             res.error = f"script '{script}' reported: {status}"
             return res
+
+        if script in _PAUSE_SCRIPTS:
+            return await self._verify_paused(res, tab_id, script)
 
         if status == "playing" or script in _PLAY_SCRIPTS:
             return await self._verify_playback(res, tab_id, script)
@@ -228,7 +252,66 @@ class VerifiedConnector:
         res.error = "media position did not advance"
         return res
 
+    async def _verify_paused(self, res: TabResult, tab_id: int,
+                             script: str) -> TabResult:
+        """Prove the media actually paused from Chrome's own state.
+
+        The ACK (extension called v.pause()) is not proof: the element it
+        paused may differ from the one the user hears (stray ad/hover video),
+        or an autoplay may have raced the pause. Probe a fresh sample_media
+        snapshot and require the element to report paused.
+        """
+        deadline = time.time() + _PAUSE_DEADLINE_S
+        while time.time() < deadline:
+            await asyncio.sleep(_MUTATE_POLL_STEP_S)
+            sample = await self._raw.execute_script(tab_id, "sample_media")
+            if not sample.success or not isinstance(sample.message, dict):
+                continue
+            msg = sample.message
+            status = (msg.get("status") or "").strip()
+            if status == "no media":
+                res.verification = VerificationCode.FAILED.value
+                res.success = False
+                res.error = f"script '{script}': no media present after action"
+                return res
+            if status == "paused" or msg.get("paused") is True:
+                res.verification = VerificationCode.VERIFIED.value
+                return res
+        res.verification = VerificationCode.TIMEOUT.value
+        res.success = False
+        res.error = f"media still not paused after '{script}'"
+        return res
+
     # ── Internals ──────────────────────────────────────────────────────
+
+    async def _stale_build(self, tab_id: int) -> Optional[str]:
+        """Detect a Chrome extension running an outdated build.
+
+        Returns a clear diagnostic when the loaded build is stale or
+        unverifiable; returns None when the build matches (so the caller keeps
+        the generic error). Cached per connector so repeated failures do not
+        re-probe on every retry attempt.
+        """
+        if self._build_probed:
+            return None
+        self._build_probed = True
+        try:
+            probe = await self._raw.execute_script(tab_id, "get_build_info")
+            if probe.success and isinstance(probe.message, dict):
+                loaded = probe.message.get("build", "")
+                if loaded != _EXPECTED_BUILD:
+                    return (
+                        f"extension build out of date (loaded={loaded or 'unknown'}, "
+                        f"expected={_EXPECTED_BUILD}) - reload the KIO Chrome extension"
+                    )
+            else:
+                return (
+                    f"extension build out of date (no get_build_info, "
+                    f"expected={_EXPECTED_BUILD}) - reload the KIO Chrome extension"
+                )
+        except Exception:
+            return None
+        return None
 
     def _verification(self, res: TabResult) -> TabResult:
         res.verification = VerificationCode.FAILED.value

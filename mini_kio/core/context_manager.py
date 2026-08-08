@@ -90,7 +90,7 @@ _RUNTIME_REF_RE = re.compile(r"\b(again|do that again|do it again)\b", re.I)
 # "watch again", "open again", ...). Deliberately verb-scoped so phrases with
 # a real target ("play messi again") do not match — they keep their target.
 _AGAIN_SUFFIX_RE = re.compile(
-    r"^(?:play|watch|search|open|show|go|run|start|find|read|write|create)"
+    r"^(play|watch|search|open|show|go|run|start|find|read|write|create)"
     r"(?:\s+(?:it|that|this))?\s+again$",
     re.I,
 )
@@ -475,13 +475,39 @@ class SessionContext:
         # "again" suffix reach it instead of the playback passthrough; the
         # variant regex is verb-scoped, so targets ("play messi again") still
         # fall through to G1 untouched. G1/G2/G3/S1/S2 blocks are unchanged.
-        if (
-            lower == "again"
-            or lower == "do it again"
-            or _AGAIN_SUFFIX_RE.fullmatch(lower)
-        ):
+        # RC3/RC4: verb-scoped again-replay.
+        # - "play again"/"play it again"/"watch again" must replay the last
+        #   successful PLAY interaction only — never a pause/resume/search
+        #   (previously "play again" replayed the last arbitrary success, so
+        #   "Play X, Pause, Play again" replied "Paused").
+        # - "search again" must re-run the same controlled action:
+        #   search_youtube is preserved so the R11 controlled path is reused
+        #   instead of degrading into a generic Google search.
+        _again_match = _AGAIN_SUFFIX_RE.fullmatch(lower)
+        _again_verb = _again_match.group(1).lower() if _again_match else None
+        if _again_verb or lower in ("again", "do it again"):
             from mini_kio.core.runtime import get_last_successful_interaction
-            last = get_last_successful_interaction(must_have_target=False)
+            last = None
+            if _again_verb in ("play", "watch"):
+                last = get_last_successful_interaction(
+                    action_type="play", must_have_target=True,
+                )
+                if not last:
+                    # Fall through: MediaManager._AGAIN handles bare "play
+                    # again" truthfully ("Nothing to replay") when no play
+                    # has succeeded yet.
+                    return text
+            elif _again_verb in ("search", "find"):
+                for _at in ("search_youtube", "search", "search_web"):
+                    last = get_last_successful_interaction(
+                        action_type=_at, must_have_target=True,
+                    )
+                    if last:
+                        break
+                if not last:
+                    return text
+            else:
+                last = get_last_successful_interaction(must_have_target=False)
             if last:
                 action = (
                     last.get("action", "")
@@ -489,11 +515,19 @@ class SessionContext:
                     .replace("_web", "")
                     .replace("_system", "")
                     .replace("_folder", "")
-                    .replace("_youtube", "")
                 )
+                # "_youtube" is intentionally preserved above: "Search again"
+                # must keep the controlled search_youtube action (R11), not
+                # become a generic Google search_web.
                 target = str(last.get("target", ""))
+                if action == "search_youtube" and target:
+                    return f"search {target} in youtube"
+                if action == "play":
+                    return f"play {target}" if target else "play"
                 resolved = f"{action} {target}".strip()
-                return resolved
+                if resolved:
+                    return resolved
+            return text
 
         # G1: media passthrough — do not resolve pronouns inside playback verbs
         if lower.startswith(("play ", "watch ", "seek ", "turn ")):

@@ -482,7 +482,15 @@ class MediaManager:
                     logger.info("[SKIP_ENTITY_REG] generic play query=%s — preserving existing entity", _lq)
 
             # Automatically register entity in memory (Part A)
-            if result.session.state == MediaState.PLAYING and self._intelligence_adapter and not _skip_entity_reg:
+            # RC6: the write boundary must refuse garbage — the session itself
+            # is registered above (so controls still work), but nothing is
+            # persisted to entity/artifact memory when the query/URL fails the
+            # sanity checks (scraped page text, markdown dumps, huge URLs).
+            _sane_reg = (
+                self._is_sane_media_query(result.session.query or "")
+                and self._is_sane_media_url(result.session.url or "")
+            )
+            if result.session.state == MediaState.PLAYING and self._intelligence_adapter and not _skip_entity_reg and _sane_reg:
                 try:
                     from mini_kio.media.intelligence.media_entity_memory import ResolvedEntity, EntityType, MediaProvider, HistoricalMediaSession
                     from mini_kio.media.media_state import MediaType
@@ -658,6 +666,36 @@ class MediaManager:
             and result.session.state == MediaState.PLAYING
         )
 
+    @staticmethod
+    def _is_sane_media_query(q: str) -> bool:
+        """A resolved play query must look like a search target, never scraped
+        page text: no URL scheme, no markdown-link syntax, bounded length."""
+        if not q:
+            return False
+        if len(q) > 150:
+            return False
+        if q.startswith(("http://", "https://", "www.")):
+            return False
+        if "http" in q.lower() or "](" in q or ")" in q:
+            return False
+        return bool(re.search(r"[a-z0-9]{2,}", q, re.IGNORECASE))
+
+    @staticmethod
+    def _is_sane_media_url(url: str) -> bool:
+        """RC6: a stored media URL must be a real YouTube URL — never scraped
+        page text, markdown-link dumps, or whitespace-laden navigation garbage.
+        The write boundary refuses such values so garbage is never persisted as
+        the canonical media reference."""
+        u = (url or "").strip()
+        if not u or len(u) > 400:
+            return False
+        if not u.startswith(("https://www.youtube.com/", "https://youtu.be/",
+                             "https://music.youtube.com/")):
+            return False
+        if any(ch in u for ch in (" ", "\n", "\t")) or ")[" in u or "](" in u:
+            return False
+        return True
+
     def play(self, query: str = "", platform: str = "") -> dict:
         logger.info("[MM] action=play query=%s platform=%s", query, platform)
         logger.info("[MM_TRACE] enter query=%s platform=%s", query, platform)
@@ -766,10 +804,15 @@ class MediaManager:
             try:
                 res = self._intelligence_adapter.handle(query, execute=False)
                 if res.source in ("continuity", "recommendation", "followup", "artifact", "acceptance") and res.subject:
-                    logger.info("[MEDIA_INTELLIGENCE_RESOLVE] source=%s original=%s resolved=%s", 
-                                res.source, ql, res.subject)
-                    query = res.subject
-                    ql = query.lower().strip()
+                    _resolved = str(res.subject)
+                    if self._is_sane_media_query(_resolved):
+                        logger.info("[MEDIA_INTELLIGENCE_RESOLVE] source=%s original=%s resolved=%s",
+                                    res.source, ql, _resolved)
+                        query = _resolved
+                        ql = query.lower().strip()
+                    else:
+                        logger.warning("[MM_QUERY_GUARD] rejected resolution source=%s resolved=%r keeping=%r",
+                                       res.source, _resolved[:80], query)
                 elif _saved_subject is not None and self._intelligence_adapter:
                     # Result not applied — roll back side effects
                     self._intelligence_adapter.context.set_subject(_saved_subject, _saved_topic or None)
@@ -1088,8 +1131,65 @@ class MediaManager:
             prov = self._get_provider(platform)
             if prov:
                 result = prov.search(query)
+                self._register_search_candidate(platform, query, result)
                 return self._to_dict(result)
         return {"success": False, "message": "No provider for search."}
+
+    def _register_search_candidate(self, provider_name: str, query: str, result) -> None:
+        """Register a successful search's best candidate so follow-up
+        references ('play it', 'play again') resolve to it (E/F/G support).
+
+        The search page stays open in the controlled connector world; the
+        candidate becomes the current media context and the remembered entity.
+        """
+        if not (result and getattr(result, "success", False)):
+            return
+        try:
+            candidates = list(getattr(result, "candidates", None) or [])
+            if not candidates:
+                return
+            cand = candidates[0]
+            # RC6: refuse to persist garbage candidates (scraped page text or
+            # markdown-link dumps) as the canonical search reference.
+            if not (self._is_sane_media_query(cand.title or query)
+                    and self._is_sane_media_url(cand.url or "")):
+                logger.warning("[MM_SEARCH_REGISTER] skipping garbage candidate title=%r url=%r",
+                               (cand.title or "")[:60], (cand.url or "")[:80])
+                return
+            self._context.set_current(cand)
+            self._context.last_query = query
+            if self._intelligence_adapter is None:
+                return
+            from mini_kio.media.intelligence.media_entity_memory import (
+                ResolvedEntity, EntityType, MediaProvider, HistoricalMediaSession,
+            )
+            import time as _t
+            m_map = {
+                MediaType.MUSIC: EntityType.SONG,
+                MediaType.VIDEO: EntityType.YOUTUBER,
+                MediaType.TRAILER: EntityType.MOVIE,
+                MediaType.TUTORIAL: EntityType.YOUTUBER,
+            }
+            etype = m_map.get(cand.media_type, EntityType.SONG)
+            p_map = {
+                "youtube": MediaProvider.YOUTUBE,
+                "spotify": MediaProvider.SPOTIFY,
+                "browser": MediaProvider.BROWSER,
+            }
+            entity = ResolvedEntity(
+                name=cand.title or query,
+                entity_type=etype,
+                provider=p_map.get(provider_name, MediaProvider.UNKNOWN),
+                url=cand.url,
+                metadata={"query": query, "platform": provider_name},
+            )
+            self._intelligence_adapter._mem.push_session(HistoricalMediaSession(
+                session_id=str(int(_t.time())), entity=entity, started_at=_t.time(),
+            ))
+            self._intelligence_adapter.context.set_subject(entity.name)
+            logger.info("[MM_SEARCH_REGISTER] candidate=%s entity=%s", cand.title, entity.name)
+        except Exception as exc:
+            logger.warning("[MM_SEARCH_REGISTER] failed: %s", exc)
 
     def resolve_query(self, text: str) -> Optional[str]:
         return self._context.resolve_reference(text)
