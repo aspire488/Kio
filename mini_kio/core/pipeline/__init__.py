@@ -433,11 +433,20 @@ class _IntentClassifier:
         return None
 
     def _classify_media_transport(self, lower, text):
-        # R4: bare offer-acceptance followups that look like media commands
-        # ("play it", "show it", "watch it") — classified as accept_offer before
-        # the play-target branch can grab them.
-        if lower in ("play it", "play that", "show it", "watch it", "play video"):
+        # R-EFG: "play it"/"play that" are media-continuity commands resolved
+        # by MediaManager.play's pronoun handling — NOT offer acceptance.
+        # ("show it"/"watch it"/"play video" keep the R4 offer-acceptance path.)
+        if lower in ("show it", "watch it", "play video"):
             return RoutingDecision(IntentType.CONVERSATION, "accept_offer", "", text, lower, confidence=0.9)
+
+        # R-EFG: "play next/previous video" must resolve to the real transport
+        # action. The generic scan below would take the first word ("play") as
+        # the action and drop the target, routing to a play("") resume/gate
+        # instead of the actual next/previous-track action.
+        if lower == "play next video":
+            return RoutingDecision(IntentType.MEDIA_TRANSPORT, "next", "", text, lower, confidence=1.0)
+        if lower == "play previous video":
+            return RoutingDecision(IntentType.MEDIA_TRANSPORT, "previous", "", text, lower, confidence=1.0)
 
         if any(re.search(rf"\b{re.escape(cmd)}\b", lower) for cmd in self.MEDIA_TRANSPORT):
             return RoutingDecision(IntentType.MEDIA_TRANSPORT, lower.split()[0], "", text, lower, confidence=1.0)
@@ -743,9 +752,11 @@ class _ExecutionCoordinator:
             "volume_up": lambda: mm.volume_up(), "volume_down": lambda: mm.volume_down(),
             "continue": mm.resume,
         }
-        first_word = decision.normalized_text.split()[0] if decision.normalized_text.split() else ""
-        if first_word in transport_actions:
-            return transport_actions[first_word]()
+        # R-EFG: dispatch on the classifier action, not the first word of the
+        # utterance, so "play next video" (action=next) reaches next_track
+        # instead of being treated as a play command.
+        if action in transport_actions:
+            return transport_actions[action]()
         if decision.normalized_text.startswith("seek "):
             return mm.seek_forward()
         if decision.normalized_text == "play":

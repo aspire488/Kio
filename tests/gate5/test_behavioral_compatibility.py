@@ -122,7 +122,7 @@ def test_elaborate_classification(query):
 # ── Context followup: "yes" / affirmative ───────────────────────────────
 
 @pytest.mark.parametrize("query", [
-    "yes", "yeah", "sure", "ok", "play it", "play that",
+    "yes", "yeah", "sure", "ok",
     "show it", "watch it", "do it", "go ahead", "play video",
 ])
 def test_affirmative_accept_offer(query):
@@ -276,10 +276,15 @@ def test_r5_ordinal_play_no_offer_falls_through():
 # ── R4: media-shaped affirmatives classify as accept_offer ───────────────
 
 @pytest.mark.parametrize("query", [
-    "play it", "play that", "show it", "watch it", "play video",
+    "show it", "watch it", "play video",
 ])
 def test_r4_media_affirmative_accept_offer(query):
-    """'play it'/'show it' must accept the pending offer, not literal-play."""
+    """'show it'/'watch it' must accept the pending offer, not literal-play.
+
+    R-EFG: "play it"/"play that" are deliberately excluded — they are
+    media-continuity commands resolved by MediaManager.play pronoun handling,
+    not offer acceptance.
+    """
     d = _classify(query)
     assert d.intent_type == IntentType.CONVERSATION
     assert d.action == "accept_offer"

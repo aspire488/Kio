@@ -676,16 +676,31 @@ class MediaManager:
         # ── Step -2.5: Pronoun resolution — "it" / "that" / "this" → last entity name ──
         _PRONOUNS = frozenset(("it", "that", "this", "them", "those"))
         _pronoun_resolved = False
-        if ql in _PRONOUNS and self._intelligence_adapter:
-            try:
-                last_e = self._intelligence_adapter._mem.get_last_entity()
-                if last_e and last_e.name:
-                    logger.info("[PRONOUN_RESOLVE] original=%s resolved=%s", query, last_e.name)
-                    query = last_e.name
-                    ql = query.lower().strip()
-                    _pronoun_resolved = True
-            except Exception:
-                pass
+        if ql in _PRONOUNS:
+            last_e = None
+            if self._intelligence_adapter:
+                try:
+                    last_e = self._intelligence_adapter._mem.get_last_entity()
+                except Exception:
+                    pass
+            if last_e and last_e.name:
+                logger.info("[PRONOUN_RESOLVE] original=%s resolved=%s", query, last_e.name)
+                query = last_e.name
+                ql = query.lower().strip()
+                _pronoun_resolved = True
+            else:
+                # R-EFG: fall back to the session's last successful play so
+                # "play it" resolves through the same continuity state G4 uses.
+                try:
+                    from mini_kio.core.runtime import get_last_successful_interaction
+                    last_play = get_last_successful_interaction(action_type="play", must_have_target=True)
+                    if last_play and str(last_play.get("target", "")).strip():
+                        query = str(last_play["target"])
+                        ql = query.lower().strip()
+                        _pronoun_resolved = True
+                        logger.info("[PRONOUN_RESOLVE_RUNTIME] original=%s resolved=%s", query, ql)
+                except Exception:
+                    pass
 
         # ── Step -2: Bare artifact resolution — prepend last entity name ──
         _bare_artifact_patterns = {
@@ -718,6 +733,23 @@ class MediaManager:
                         ql = query.lower().strip()
             except Exception:
                 pass
+
+        # R-EFG: bare "again" → replay last successful media via the session
+        # continuity state (same source as G4); otherwise a truthful no-op
+        # instead of searching the word "again".
+        if ql == "again":
+            try:
+                from mini_kio.core.runtime import get_last_successful_interaction
+                last = get_last_successful_interaction(action_type="play", must_have_target=True)
+            except Exception:
+                last = None
+            if last and str(last.get("target", "")).strip():
+                query = str(last["target"])
+                ql = query.lower().strip()
+                logger.info("[MM_AGAIN] replaying last successful media: %s", query)
+            else:
+                logger.info("[MM_AGAIN] no previous media to replay")
+                return {"success": True, "message": "Nothing to replay — no previous media."}
 
         # ── Step -1: Intelligence / Continuity / Recommendation Resolution ──
         _skip_intel = _pronoun_resolved or not self._intelligence_adapter or not ql
