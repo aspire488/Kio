@@ -758,16 +758,42 @@ function scheduleReconnect() {
   }, 3000);
 }
 
+// R9: MV3 service workers are terminated after ~30s idle, killing
+// setInterval/setTimeout (heartbeat + reconnect). chrome.alarms survives
+// termination and wakes the worker, so the extension reconnects even after
+// an idle kill instead of waiting for a browser restart / extension reload.
+const KEEPALIVE_ALARM = "kio-keepalive";
+
+function ensureKeepaliveAlarm() {
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 }, () => {
+    if (chrome.runtime.lastError) {
+      log("WARN", "alarm create failed", { error: chrome.runtime.lastError.message });
+    }
+  });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    log("INFO", "Keepalive alarm fired while disconnected — reconnecting");
+    connect();
+  } else {
+    sendPing();
+  }
+});
+
 // ── Init ────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async () => {
   log("INFO", "Extension installed/updated");
+  ensureKeepaliveAlarm();
   await loadToken();
   connect();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   log("INFO", "Browser started");
+  ensureKeepaliveAlarm();
   await loadToken();
   connect();
 });
@@ -780,4 +806,5 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
   }
 });
 
+ensureKeepaliveAlarm();
 loadToken().then(() => connect());

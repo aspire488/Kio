@@ -81,6 +81,15 @@ def _kio_thread_excepthook(args: Any) -> None:
 
 NOT_CONNECTED = "not_connected"
 
+# R9: server-side extension connection state model.
+# DISCONNECTED → HANDSHAKING → REGISTERED → READY. The liveness watchdog
+# clears a stale/closed handle back to DISCONNECTED so a fresh extension
+# connection (MV3 service worker restart) registers cleanly.
+STATE_DISCONNECTED = "DISCONNECTED"
+STATE_HANDSHAKING = "HANDSHAKING"
+STATE_REGISTERED = "REGISTERED"
+STATE_READY = "READY"
+
 
 class MockExtension:
     """Simulates Chrome Extension responses for offline testing.
@@ -205,6 +214,7 @@ class Connector:
         self._thread: Optional[threading.Thread] = None
         self._started = False
         self._port = port
+        self._extension_state = STATE_DISCONNECTED
 
         if mock:
             self._mock = MockExtension(mode=mock_mode)
@@ -237,6 +247,34 @@ class Connector:
         if self._mock:
             return True
         return self._extension is not None
+
+    @property
+    def state(self) -> str:
+        """R9: current extension connection state."""
+        return self._extension_state
+
+    def _clear_stale_extension(self) -> None:
+        """R9: drop a closed/stale extension handle so a fresh connection registers.
+
+        MV3 service workers can die without a clean WS close. The liveness
+        watchdog calls this periodically; otherwise a dead handle would keep
+        is_connected() True and every command would hang until timeout.
+        """
+        ext = self._extension
+        if ext is None:
+            return
+        ws_state = getattr(ext, "state", None)
+        if ws_state is None:
+            stale = not bool(getattr(ext, "open", True))
+        else:
+            stale = getattr(ws_state, "name", str(ws_state)) != "OPEN"
+        if stale:
+            logger.warning(
+                "[CONNECTOR] stale extension handle cleared (ws_state=%s)",
+                getattr(ws_state, "name", ws_state),
+            )
+            self._extension = None
+            self._extension_state = STATE_DISCONNECTED
 
     # ── Public Async API ─────────────────────────────────────────────
 
@@ -531,6 +569,7 @@ class Connector:
             while True:
                 await asyncio.sleep(30)
                 beat += 1
+                self._clear_stale_extension()
                 logger.info("[INSTRUMENT] heartbeat=%d thread=%s loop_running=%s ws_server=%s",
                             beat, threading.current_thread().name,
                             self._loop.is_running() if self._loop else "N/A",
@@ -584,6 +623,7 @@ class Connector:
                 fut.cancel()
         self._pending.clear()
         self._extension = None
+        self._extension_state = STATE_DISCONNECTED
         logger.info("[INSTRUMENT] stop() post-cleanup: thread_alive=%s loop_closed=%s",
                     self._thread.is_alive() if self._thread else "N/A",
                     self._loop.is_closed() if self._loop else "N/A")
@@ -733,6 +773,7 @@ class Connector:
         """Handle a WebSocket connection from the Chrome extension (RFC 6455)."""
         remote = websocket.remote_address
         logger.info("[CONNECTOR] WebSocket connection from %s:%s", remote[0], remote[1])
+        self._extension_state = STATE_HANDSHAKING
 
         try:
             raw = await asyncio.wait_for(websocket.recv(), timeout=10.0)
@@ -774,7 +815,9 @@ class Connector:
             type=MessageType.CONNECTED, success=True,
         )))
         self._extension = websocket
+        self._extension_state = STATE_REGISTERED
         logger.info("[CONNECTOR] extension registered: remote=%s", remote)
+        self._extension_state = STATE_READY
 
         try:
             async for raw in websocket:
@@ -817,3 +860,4 @@ class Connector:
             if self._extension is websocket:
                 logger.info("[CONNECTOR] extension disconnected: remote=%s", remote)
                 self._extension = None
+                self._extension_state = STATE_DISCONNECTED
