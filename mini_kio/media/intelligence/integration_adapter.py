@@ -891,6 +891,22 @@ class MediaIntelligenceAdapter:
             # Fall back to topic classifier if resolver couldn't determine entity type
             if topic == TopicType.UNKNOWN and entity.name:
                 topic = classify_topic(entity.name).topic
+            # RC10: execute=False is a PROBE (MediaManager.play calls
+            # handle(query, execute=False) before dispatching). It must
+            # never mutate memory or fire retrieval — return the resolution
+            # verdict only. The caller (MediaManager) decides whether to apply
+            # the subject; the old code ran _safe_retrieve + _register_entity
+            # here even in probe mode, which registered garbage entities
+            # (live proof: "lm game trailer" → registered "gaming music
+            # playlist" into entity memory).
+            if not execute:
+                return IntelligenceResult(
+                    topic=topic,
+                    response_text="",
+                    subject=entity.name,
+                    confidence=ref.confidence,
+                    source="resolver",
+                )
             if self.play and execute:
                 play_target = entity.url or entity.name
                 if entity.url and not entity.url.startswith(("http://", "https://")):
@@ -922,6 +938,15 @@ class MediaIntelligenceAdapter:
             )
         
         if ref.query_override:
+            # RC10: probe mode — no retrieval, no memory writes.
+            if not execute:
+                return IntelligenceResult(
+                    topic=TopicType.UNKNOWN,
+                    response_text="",
+                    subject=ref.query_override,
+                    confidence=ref.confidence,
+                    source="resolver",
+                )
             res = self._safe_retrieve(ref.query_override, topic=TopicType.UNKNOWN.value)
             text = self._compose_answer(res, ref.query_override) if res else ""
             self._register_entity(ref.query_override, TopicType.UNKNOWN, result=res, confidence=ref.confidence)

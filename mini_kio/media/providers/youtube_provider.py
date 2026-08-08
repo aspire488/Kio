@@ -53,11 +53,32 @@ def _query_terms(query: str) -> list[str]:
 
 
 def _video_id_from_url(url: str) -> str:
-    """Extract the canonical YouTube video ID from a watch URL (or "")."""
+    """Extract the canonical YouTube video ID from a URL (or "").
+
+    Handles all three canonical forms so the RC8 identity gate works for
+    watch pages AND Shorts:
+      * https://www.youtube.com/watch?v=VIDEO_ID
+      * https://youtu.be/VIDEO_ID
+      * https://www.youtube.com/shorts/VIDEO_ID
+    """
     try:
-        return urllib.parse.parse_qs(
-            urllib.parse.urlparse(url).query
-        ).get("v", [""])[0]
+        u = (url or "").strip()
+        if not u:
+            return ""
+        parsed = urllib.parse.urlparse(u)
+        qid = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
+        if qid:
+            return qid
+        # https://youtu.be/VIDEO_ID
+        if parsed.netloc.lower() == "youtu.be":
+            seg = parsed.path.strip("/")
+            return seg.split("?")[0].split("/")[0] if seg else ""
+        # https://www.youtube.com/shorts/VIDEO_ID (Shorts pages have no ?v=)
+        if parsed.netloc.lower().endswith("youtube.com"):
+            parts = [p for p in parsed.path.split("/") if p]
+            if len(parts) >= 2 and parts[0].lower() == "shorts":
+                return parts[1].split("?")[0]
+        return ""
     except Exception:
         return ""
 
@@ -68,6 +89,7 @@ def _score_candidate(
     query: str,
     channel: str = "",
     description: str = "",
+    media_type: str = "",
 ) -> int:
     """Relevance score of a YouTube result against the requested query.
 
@@ -90,6 +112,14 @@ def _score_candidate(
       * channel authority (generic provenance markers, not entity names)
       * exact-title bonus (title is essentially the query itself)
       * description coverage (API snippet corroboration)
+
+    RC10: content-type validation. The caller detects the user's requested
+    media type ("trailer", "review", "interview", "gameplay", ...) before
+    selection. When a VISUAL/artifact type is requested, an audio-only
+    candidate (YouTube auto-generated "- Topic" channel, or a title carrying
+    soundtrack/theme/OST markers) is a TYPE MISMATCH, not a candidate — the
+    official film trailer must beat its own "Trailer Theme - Malayalam"
+    soundtrack. Also applies an emoji/clickbait penalty (reupload spam).
     """
     tl = title.lower()
     ql = query.lower()
@@ -198,9 +228,12 @@ def _score_candidate(
     # Multi-IP compilation titles chain dash-separated subjects
     # ("... Brand New Day - Spiderman - Venom 3"). Pipes are NOT penalized:
     # "Title | Official Trailer | In Theaters Dec 18" is the canonical
-    # official-upload format. Two dashes are common in legit official titles
-    # ("Interstellar - Trailer 2 - Official WB"), so the full mashup penalty
-    # requires dash-chains to coexist with a pipe separator — the true
+    # official-upload format, and RC10 live proof shows a 3-pipe official
+    # trailer ("I'M GAME TRAILER (Malayalam) | Dulquer Salmaan | Nahas
+    # Hidhayath | Wayfarer Films Music") losing to its own soundtrack because
+    # of a standalone pipe penalty. Two dashes are common in legit official
+    # titles ("Interstellar - Trailer 2 - Official WB"), so the full mashup
+    # penalty requires dash-chains to coexist with a pipe separator — the true
     # multi-subject signature — or a bare 3+ dash chain.
     dash_chains = len(re.findall(r"\s-\s", tl))
     pipe_count = tl.count("|")
@@ -208,8 +241,6 @@ def _score_candidate(
         score -= 14
     elif dash_chains == 2:
         score -= 4  # mild: official multi-segment titles stay competitive
-    if pipe_count >= 3:
-        score -= 8
     if len(title) > 90:
         score -= 6
     if re.search(r"\bvs\b", tl) and not re.search(r"\bvs\b", ql):
@@ -235,6 +266,31 @@ def _score_candidate(
         )
         if desc_hits >= max(1, len(terms) // 2):
             score += 6
+
+    # ── RC10: content-type validation (requested media type ≠ audio-only) ──
+    # A "trailer"/"review"/"interview"/"gameplay"/etc. request must not select
+    # the soundtrack/theme upload of that same title. YouTube's auto-generated
+    # music channels end in " - Topic"; soundtrack uploads announce themselves
+    # in the title. Both are strong type-mismatch signals.
+    _VISUAL_TYPES = {
+        "trailer", "video", "movie", "review", "interview", "gameplay",
+        "highlights", "music video", "podcast", "episode", "teaser",
+        "clips", "official video", "live performance",
+    }
+    if media_type in _VISUAL_TYPES:
+        cl = (channel or "").lower().rstrip()
+        is_audio_channel = cl.endswith("- topic")
+        _AUDIO_TITLE_MARKERS = ("soundtrack", "theme", "ost", "score from",
+                                "music from", "theme song")
+        is_audio_title = any(m in tl for m in _AUDIO_TITLE_MARKERS)
+        if is_audio_channel or is_audio_title:
+            score -= 14
+
+    # ── RC10: emoji / clickbait reupload penalty ─────────────────────────
+    # "I'm Game - Trailer 🥵🔥 Latest Update | ..." is a fan reupload; the
+    # emoji is a clickbait signature. Generic — no entity or channel names.
+    if re.search(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B50\u2764\uFE0F]", title):
+        score -= 8
 
     if "/shorts/" in url:
         score -= 5
@@ -303,7 +359,8 @@ class YouTubeProvider(MediaProvider):
             logger.warning("[YT_API_SEARCH] failed query=%s err=%s", query, exc)
             return []
 
-    def _select_best_candidate(self, tab_id: int, query: str) -> Optional[dict]:
+    def _select_best_candidate(self, tab_id: int, query: str,
+                               media_type: str = "") -> Optional[dict]:
         """RC7/RC8: choose the best-matching YouTube result instead of the first.
 
         Discovery source order:
@@ -314,6 +371,10 @@ class YouTubeProvider(MediaProvider):
         Candidates are merged, scored against the query, and the best is
         returned as {title, url, video_id, channel} — or None when nothing
         relevant is available (the caller falls back to youtube_bootstrap).
+
+        RC10: media_type (the caller's detected requested content type) is
+        forwarded into the scorer so content-type validation runs BEFORE
+        selection — an official trailer beats its own soundtrack upload.
         """
         conn = self._get_conn()
         if not conn:
@@ -344,6 +405,7 @@ class YouTubeProvider(MediaProvider):
                     c.get("title", ""), c.get("url", ""), query,
                     channel=c.get("channel", "") or "",
                     description=c.get("description", "") or "",
+                    media_type=media_type,
                 ),
                 -len(c.get("title", "") or ""),
             )
@@ -397,8 +459,16 @@ class YouTubeProvider(MediaProvider):
             logger.info("[ROOT_YT] RETURN=R3 empty_query")
             return MediaResult(success=False, error="No query", player="youtube")
 
-        encoded = urllib.parse.quote_plus(clean_query)
-        url = _YOUTUBE_SEARCH_URL.format(encoded=encoded)
+        # RC11: a direct YouTube URL (watch / youtu.be / SHORTS) must be
+        # navigated to directly — searching for the URL text was a proven
+        # retrieval bug ("play https://www.youtube.com/shorts/..." opened a
+        # search for the URL string and landed on an unrelated video).
+        _is_direct_url = clean_query.startswith(("http://", "https://", "www."))
+        if _is_direct_url:
+            url = clean_query
+        else:
+            encoded = urllib.parse.quote_plus(clean_query)
+            url = _YOUTUBE_SEARCH_URL.format(encoded=encoded)
         logger.info("[ROOT_YT] search_url=%s", url)
 
         try:
@@ -418,7 +488,7 @@ class YouTubeProvider(MediaProvider):
             if not tab_id:
                 logger.info("[ROOT_YT] tab_id is None — no tab returned by connector")
             else:
-                # Brief pause for the search results page to render
+                # Brief pause for the page to render
                 time.sleep(0.5)
 
                 # ── INSTRUMENTATION: URL before bootstrap ──────────────
@@ -437,7 +507,22 @@ class YouTubeProvider(MediaProvider):
                 # _select_best_candidate returns {title, url, video_id, channel}
                 # so the actual playing video can be identity-verified against
                 # the selected candidate (RC8), not just trusted by URL.
-                _selected = self._select_best_candidate(tab_id, clean_query)
+                # RC10: forward the caller's detected media type so content-type
+                # validation (official trailer vs soundtrack upload) runs here.
+                # RC11: for a direct URL query the URL IS the selected candidate
+                # (watch, youtu.be, or shorts) — no search/scrape needed, and the
+                # identity gate verifies against the URL's own video ID.
+                _mt_hint = (kwargs.get("media_type") or "").strip().lower()
+                if _is_direct_url:
+                    _direct_vid = _video_id_from_url(url)
+                    _selected = {
+                        "title": clean_query,
+                        "url": url,
+                        "video_id": _direct_vid,
+                        "channel": "",
+                    } if _direct_vid else None
+                else:
+                    _selected = self._select_best_candidate(tab_id, clean_query, media_type=_mt_hint)
                 _selected_video_id = (_selected or {}).get("video_id", "") or ""
                 _selected_title = (_selected or {}).get("title", "") or ""
                 _navigated = False
@@ -938,12 +1023,30 @@ class YouTubeProvider(MediaProvider):
                         })
 
             if candidates:
+                # RC10: detect the requested content type from the search query
+                # so the same type-validation runs on the search path too.
+                _st = ""
+                _ql = query.lower()
+                if "trailer" in _ql:
+                    _st = "trailer"
+                elif "review" in _ql:
+                    _st = "review"
+                elif "interview" in _ql:
+                    _st = "interview"
+                elif "gameplay" in _ql:
+                    _st = "gameplay"
+                elif "music video" in _ql or "official video" in _ql:
+                    _st = "music video"
+                elif "podcast" in _ql or "episode" in _ql:
+                    _st = "podcast"
+
                 def _art_key(item: dict) -> tuple:
                     return (
                         _score_candidate(
                             item.get("title", ""), item.get("url", ""), query,
                             channel=item.get("channel", "") or "",
                             description=item.get("description", "") or "",
+                            media_type=_st,
                         ),
                         -len(item.get("title", "") or ""),
                     )

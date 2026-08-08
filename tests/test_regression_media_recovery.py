@@ -348,3 +348,137 @@ def test_rc9_unresolved_pronoun_resolves_last_entity(monkeypatch):
     msg = result.get("message", "") or ""
     assert "interstellar" in msg, msg
     assert " play it" not in msg.lower() and not msg.lower().endswith("it"), msg
+
+
+# ---------------------------------------------------------------------------
+# RC10 — entity-resolution boundary: explicit media queries must NEVER be
+# reinterpreted as mood/activity/variant references (the "lm game trailer" →
+# "gaming music playlist" hijack), and candidate selection must reject
+# audio-only content when a visual content type (trailer/review/...) is
+# requested.
+# ---------------------------------------------------------------------------
+
+def test_rc10_explicit_entity_query_never_hijacked():
+    """A fresh entity query containing a coincidental activity word ("game")
+    must NOT resolve as an activity reference."""
+    from mini_kio.media.intelligence.media_reference_resolver import (
+        MediaReferenceResolver, ReferenceType,
+    )
+    from mini_kio.media.media_context import MediaContext
+
+    r = MediaReferenceResolver(MediaContext())
+    for q in ("lm game trailer", "play lm game trailer", "brand new day",
+              "messi interview", "interstellar trailer",
+              "avengers doomsday trailer"):
+        res = r.resolve(q)
+        assert res.success is False, f"{q!r} must not resolve as a reference"
+        assert res.reference_type == ReferenceType.UNKNOWN, (
+            f"{q!r} resolved as {res.reference_type.value}"
+        )
+
+
+def test_rc10_bare_references_still_resolve():
+    from mini_kio.media.intelligence.media_reference_resolver import (
+        MediaReferenceResolver, ReferenceType,
+    )
+    from mini_kio.media.media_context import MediaContext
+
+    r = MediaReferenceResolver(MediaContext())
+    assert r.resolve("play chill music").reference_type == ReferenceType.MOOD
+    assert r.resolve("play gym music").reference_type == ReferenceType.ACTIVITY
+
+
+def test_rc10_probe_mode_has_no_side_effects(monkeypatch):
+    """handle(query, execute=False) must not register entities or run
+    retrieval — the old code registered the hijacked "gaming music playlist"
+    entity into memory even when only probing."""
+    from mini_kio.media.intelligence.integration_adapter import MediaIntelligenceAdapter
+    from mini_kio.media.intelligence.media_reference_resolver import (
+        MediaReferenceResolver,
+    )
+    from mini_kio.media.media_context import MediaContext
+
+    ctx = MediaContext()
+    # A bare reference with no memory: variant/pronoun returns UNKNOWN, but
+    # a resolution with query_override must not retrieve or register in probe
+    # mode. Simulate by stubbing the resolver to return a variant override.
+    class _FakeResolver:
+        def resolve(self, utterance):
+            from mini_kio.media.intelligence.media_reference_resolver import (
+                ReferenceResolution, ReferenceType, VariantType,
+            )
+            return ReferenceResolution(
+                reference_type=ReferenceType.VARIANT,
+                resolved_entity=None,
+                confidence=0.9,
+                query_override="believer remix",
+                variant=VariantType.REMIX,
+            )
+
+    adapter = MediaIntelligenceAdapter(retrieval_fn=lambda *a, **k: None)
+    adapter._resolver = _FakeResolver()
+    adapter._safe_retrieve = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("probe must not retrieve")
+    )
+
+    res = adapter.handle("play the remix", execute=False)
+    assert res.source == "resolver", res
+    assert res.subject == "believer remix", res.subject
+    # No entity registered, no retrieval fired.
+    assert adapter._mem.get_last_entity() is None
+
+
+def test_rc10_trailer_query_rejects_audio_only_candidate():
+    """For a "trailer" request, an official film trailer must outrank its own
+    soundtrack/theme upload (live proof: "I'M Game Trailer Theme - Malayalam"
+    from a "- Topic" auto channel beat the Wayfarer Films official trailer)."""
+    from mini_kio.media.providers.youtube_provider import _score_candidate
+
+    official = _score_candidate(
+        "I'M GAME TRAILER (Malayalam) | Dulquer Salmaan | Nahas Hidhayath | Wayfarer Films Music",
+        "https://www.youtube.com/watch?v=OFFICIAL",
+        "lm game trailer",
+        channel="Wayfarer Films Music",
+        media_type="trailer",
+    )
+    theme = _score_candidate(
+        "I'M Game Trailer Theme - Malayalam",
+        "https://www.youtube.com/watch?v=THEME",
+        "lm game trailer",
+        channel="Jakes Bejoy - Topic",
+        media_type="trailer",
+    )
+    emoji_reupload = _score_candidate(
+        "I'm Game - Trailer 🥵🔥 Latest Update | Dulquer Salmaan",
+        "https://www.youtube.com/watch?v=REUPLOAD",
+        "lm game trailer",
+        channel="WonDer BoSs Cafe",
+        media_type="trailer",
+    )
+
+    assert official > theme, f"official({official}) must beat theme({theme})"
+    assert official > emoji_reupload, (
+        f"official({official}) must beat emoji reupload({emoji_reupload})"
+    )
+
+
+def test_rc10_no_pipe_penalty_for_official_titles():
+    """A standalone pipe chain ("Title | Studio | Cast | Channel") is the
+    canonical official-upload format and must NOT be penalized (RC9's own
+    design comment states pipes are not penalized; a stale standalone rule
+    made the official I'M GAME trailer lose to its own soundtrack)."""
+    from mini_kio.media.providers.youtube_provider import _score_candidate
+
+    s1 = _score_candidate(
+        "I'M GAME TRAILER (Malayalam) | Dulquer Salmaan | Nahas Hidhayath | Wayfarer Films Music",
+        "https://www.youtube.com/watch?v=A", "lm game trailer",
+        channel="Wayfarer Films Music", media_type="trailer",
+    )
+    # Same title with a dash-chain instead of pipes: dash chains ARE the
+    # multi-subject mashup signature and should score no higher.
+    s2 = _score_candidate(
+        "I'M GAME TRAILER - Dulquer Salmaan - Nahas Hidhayath - Wayfarer Films Music",
+        "https://www.youtube.com/watch?v=B", "lm game trailer",
+        channel="Wayfarer Films Music", media_type="trailer",
+    )
+    assert s1 > s2, f"pipe title({s1}) must outscore dash-chain title({s2})"

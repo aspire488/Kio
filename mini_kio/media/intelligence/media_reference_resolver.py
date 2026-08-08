@@ -160,6 +160,43 @@ _BY_PRONOUN = re.compile(r"\bby (him|her|them|the (band|group|artist))\b", re.I)
 
 # ─────────────────────────── resolver ───────────────────────────
 
+# RC10: vocabulary of BARE reference utterances. Built from the existing
+# pattern tables below (variant/mood/activity/continuation/ordinal/temporal/
+# pronoun/popular) so the guard stays in sync with the resolver itself.
+# A token that is NOT in this vocabulary is explicit entity content
+# (a title/name, a content-type word like "trailer"/"review", a typo'd
+# fragment) — and an utterance carrying explicit content is a FRESH media
+# query, never a mood/activity/pronoun/variant reference.
+_REFERENCE_VOCAB: frozenset = frozenset(
+    # play verb + generic media fillers
+    {
+        "play", "watch", "show", "listen", "open", "the", "a", "an",
+        "some", "me", "my", "please", "pls", "music", "song", "songs",
+        "playlist", "playlists", "track", "tracks", "video", "videos",
+        "something", "anything", "stuff", "for", "to", "from", "with",
+        "about", "of", "up", "down", "one", "time", "what",
+    }
+    # pronoun keywords
+    | {"him", "his", "her", "she", "hers", "them", "their", "they",
+       "it", "that", "this", "those", "these"}
+    # continuation / replay keywords
+    | {"another", "next", "more", "continue", "resume", "keep", "going",
+       "same", "again", "once", "replay"}
+    # "by him/her/them" continuation keywords
+    | {"by", "band", "group", "artist"}
+    # ordinal keywords
+    | {"first", "second", "third", "fourth", "fifth", "number"}
+    # temporal keywords
+    | {"yesterday", "last", "night", "week", "earlier", "morning",
+       "while", "bit", "ago"}
+    # popular keywords
+    | {"most", "popular", "famous", "biggest", "hit", "top", "best"}
+)
+for _map in (_VARIANT_MAP, _MOOD_MAP, _ACTIVITY_MAP):
+    for _phrase in _map:
+        _REFERENCE_VOCAB |= frozenset(_phrase.split())
+
+
 class MediaReferenceResolver:
     """
     Resolves reference-laden user utterances into concrete entities.
@@ -170,6 +207,26 @@ class MediaReferenceResolver:
         if result.success:
             entity = result.resolved_entity   # pass to MediaManager
     """
+
+    @staticmethod
+    def _has_explicit_content(text: str) -> bool:
+        """RC10: does the utterance carry its own entity/content words?
+
+        A BARE reference is only mood/activity/pronoun/variant/etc. plus
+        generic filler ("play chill music", "play the remix", "play it").
+        When the utterance also contains explicit content words (an entity
+        name, a content-type word like "trailer"/"review", a typo'd title
+        fragment), it is a FRESH media query and must NOT be resolved as a
+        reference. Live proof: "lm game trailer" contains the activity word
+        "game", and the old code rewrote the whole query to
+        "gaming music playlist" before ever searching for the movie.
+        """
+        tokens = re.findall(r"[a-z0-9']+", text.lower())
+        content = [
+            t for t in tokens
+            if t not in _REFERENCE_VOCAB
+        ]
+        return len(content) >= 1
 
     def __init__(self, media_context: MediaContext):
         self._media_context = media_context
@@ -187,6 +244,18 @@ class MediaReferenceResolver:
         Returns ReferenceResolution. Caller checks .success before acting.
         """
         text = utterance.strip()
+
+        # RC10: explicit entity queries are NOT references. Guard BEFORE the
+        # chain so a fresh play query ("lm game trailer", "avengers doomsday
+        # trailer") can never be reinterpreted as a mood/activity/variant
+        # reference by a coincidental vocabulary word.
+        if self._has_explicit_content(text):
+            return ReferenceResolution(
+                reference_type=ReferenceType.UNKNOWN,
+                resolved_entity=None,
+                confidence=0.0,
+                reason="explicit entity query — not a reference utterance",
+            )
 
         # Priority order matters — most specific first
         result = (
