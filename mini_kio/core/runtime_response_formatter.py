@@ -25,6 +25,14 @@ _DEV_PATTERNS = re.compile(
 _PID_PATTERN = re.compile(r'\s*\(pid \d+\)')
 _BROWSER_NAME_OVERRIDES = {"chrome": "Chrome", "edge": "Edge", "firefox": "Firefox", "brave": "Brave", "comet": "Comet", "opera": "Opera"}
 
+# Slice 7 (B.1): internal prerequisite identifiers -> natural user language.
+# Internal identifiers (browser_backend, credential ids, etc.) must never
+# surface; unknown ids collapse to a generic, still-truthful phrase.
+_PREREQUISITE_LABELS = {
+    "browser_backend": "the browser to be connected",
+}
+_GENERIC_PREREQUISITE_PHRASE = "some setup before I can do that"
+
 
 def reset_diag():
     _DIAG["runtime_response_formatted"] = 0
@@ -198,9 +206,38 @@ def _ensure_str(value: Any) -> str:
     return str(value)
 
 
+def _format_prerequisite(details: Dict[str, Any]) -> str:
+    """Slice 7: render a fail-closed prerequisite gate naturally.
+
+    "I need <what> before I can do that." — no internal prerequisite ids,
+    class names, or gate metadata. Unknown ids fold into a generic phrase.
+    """
+    gate = details.get("prerequisite_gate")
+    missing = gate.get("missing") if isinstance(gate, dict) else None
+    if not missing:
+        return "I need some setup before I can do that."
+    labels = [
+        _PREREQUISITE_LABELS.get(str(m), "")
+        for m in missing
+    ]
+    labels = [label for label in labels if label]
+    if not labels:
+        return "I need some setup before I can do that."
+    if len(labels) == 1:
+        return f"I need {labels[0]} before I can do that."
+    if len(labels) == 2:
+        return f"I need {labels[0]} and {labels[1]} before I can do that."
+    return f"I need {', '.join(labels[:-1])}, and {labels[-1]} before I can do that."
+
+
 def format_result(
     action: str, target: str, success: bool, details: Dict[str, Any]
 ) -> str:
+    # Slice 7: a fail-closed prerequisite gate always gets its natural
+    # explanation regardless of the operator message.
+    if isinstance(details.get("prerequisite_gate"), dict):
+        _DIAG["runtime_response_formatted"] += 1
+        return _format_prerequisite(details)
     message = _ensure_str(details.get("message", ""))
     # BUG 7: a PARTIAL close (primary terminated, background components remain)
     # must be rendered by the structured formatter so the residual note

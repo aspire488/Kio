@@ -313,7 +313,7 @@ Statuses below are reconciled from source + tests + live evidence (`KIO_MASTER_P
 | 4 — canonical provider abstraction | IMPLEMENTED (D-08 resolved 2026-08-09) | Canonical contract = `core/provider_contract.py` `ExecutionProvider` (ABC), wired via `core/provider_registry.py` + `register_all_providers()`; dead top-level `providers/` Protocol package deleted (zero importers; restores earlier cleanup) |
 | 5 — decision logging | IMPLEMENTED | Structured routing/trace logs (`trace_logger.py`, execution metrics) |
 | 6 — dead code + C-09 unification | IMPLEMENTED | `resolve_capability()` in `routing_utils.py`; dead stubs deleted |
-| 7 — execution gate protocol | IMPLEMENTED | `execution_boundary.py` LOCKED; boundary gates execution (prerequisite gate not a separate module — see 8/9) |
+| 7 — execution gate protocol | **VERIFIED (2026-08-09)** | `PrerequisiteGate` + `resolve_prerequisites()` in `execution_boundary.py`, fail-closed before handler; 21 targeted tests; live smoke no-regression (prerequisite satisfied live) |
 | 8-9 — credential vault | NOT STARTED | Only stale `__pycache__/credential_vault*.pyc`; no source file exists |
 | 10 — identity resolver | IMPLEMENTED | `mini_kio/resolvers/identity_resolver.py` exists |
 | 11-12 — session continuity | IMPLEMENTED | `memory_store.py`, `get_last_successful_interaction()`, continuity resolver |
@@ -372,6 +372,19 @@ Structured log entry for every routing decision: action, intent, confidence, saf
 
 ### Slice 7 — Execution Gate Protocol (B.1)
 Add `resolve_prerequisites()` to `execution_boundary.py` between safety check and handler invocation. Define `PrerequisiteGate(action, missing=[], severity=blocking)` dataclass. Wire propagation: execution boundary → runtime → user-facing "I need X" message. On user response → validate → store → retry. **Fail-closed**: missing prerequisite = execution never reaches handler.
+
+**Slice 7 Completion (2026-08-09)**:
+
+| Objective | Status | Evidence |
+|-----------|--------|----------|
+| `resolve_prerequisites()` in `execution_boundary.py` | **COMPLETE** | Added, wired into `execute_action()` between the safety policy check and handler invocation. Canonical `_PREREQUISITE_RESOLVERS` registry + `register_prerequisite_resolver()`. Action names canonicalized through `_ACTION_MAP` so aliases (`click` → `browser_click`) cannot bypass the gate. |
+| `PrerequisiteGate(action, missing=[], severity=blocking)` | **COMPLETE** | Dataclass in `execution_boundary.py` with `blocks` predicate and `to_dict()`; `FAILURE_MISSING_PREREQUISITE` failure class; blocked results carry structured `prerequisite_gate` metadata. |
+| Fail-closed | **COMPLETE** | Blocking gate returns `OUTCOME_BLOCKED` before the handler is invoked; handler never runs, no false success. Verified by spy-handler tests. |
+| Wire propagation boundary → runtime → user-facing | **COMPLETE** | Result rides the structured execution result; `runtime_response_formatter._format_prerequisite()` renders natural "I need X before I can do that." with no internal ids. |
+| Real registered prerequisite | **COMPLETE** | `browser_backend` resolver for all 14 `browser_*` DOM/scripting actions (BrowserRuntime or connected connector satisfies). |
+| On user response → validate → store → retry | **DEFERRED to Slice 8-9** | The credential-vault lifecycle (validate/store/retry with user consent) is the Credential Vault slice; Slice 7 delivers the gate mechanism + propagation only, per plan sequencing. |
+
+Tests: `tests/test_slice7_prerequisite_gate.py` (21 tests — construction, resolution, alias canonicalization, fail-closed handler prevention, satisfied-path execution, advisory non-blocking, natural response rendering, no internal leakage).
 
 ### Slice 8 — Credential Vault: Core (B.2)
 `keyring`-backed credential store. OAuth flow template: auth URL → callback → token exchange → encrypted storage. Schema: provider, credential_type, expires_at, metadata JSON. Only store on explicit user consent.

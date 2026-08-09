@@ -518,8 +518,8 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Dependencies: execution_boundary, capability_registry, provider_registry.
 - Incoming links: core runtime → engine.
 - Outgoing links: → providers, mcp_runtime, browser_runtime, filesystem.
-- Required completion Tier: Tier 1 (Prerequisite Resolution per Slice 8) → Tier 2 (cross-process event bus).
-- Validation: execution integration tests; prerequisite gate tests.
+- Required completion Tier: Tier 1 (Prerequisite Resolution per Slice 7 — DONE 2026-08-09: `PrerequisiteGate` + `resolve_prerequisites()` in `execution_boundary.py`, fail-closed) → Tier 2 (cross-process event bus).
+- Validation: execution integration tests; prerequisite gate tests (21 passed in `tests/test_slice7_prerequisite_gate.py`).
 - Blocking risks: scattered async/sync bridging per SEC.002.
 - Canonical Owner: Execution Team. Consumes: routed actions. Produces: execution results, observations. Depends On: execution_boundary, capability_registry, providers. Used By: runtime, desktop, voice (future), browser. Retirement Plan: none.
 
@@ -563,11 +563,11 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 **7. Execution Boundary (mini_kio/core/execution_boundary.py, LOCKED ~620 lines)**
 - Purpose: Safety gateway. Classify → gate → resolve → validate → execute → verify.
 - Maturity: CURRENT (LOCKED).
-- Final vision: Hard safety gate; no bypass; prerequisite resolution per Slice 8.
+- Final vision: Hard safety gate; no bypass; prerequisite resolution per Slice 7 (gate mechanism DONE 2026-08-09; credential resolvers land with Slice 8-9).
 - Dependencies: intent_validator.
 - Incoming links: core runtime, execution engine.
 - Outgoing links: → execution engine (after gate).
-- Required completion Tier: Tier 1 (prerequisite gate per Slice 8).
+- Required completion Tier: Tier 1 (prerequisite gate per Slice 7 — mechanism DONE 2026-08-09).
 - Validation: boundary tests; safety integration tests.
 - Blocking risks: bypass routes (verify none exist after Slice 6).
 - Canonical Owner: Safety Team. Consumes: action + context. Produces: gated execution or structured block. Depends On: intent_validator. Used By: core runtime, execution engine. Future Owner: unchanged. Retirement Plan: none.

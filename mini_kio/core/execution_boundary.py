@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from mini_kio.core.runtime import (
@@ -71,6 +72,124 @@ OUTCOME_BLOCKED = "BLOCKED"
 OUTCOME_DEGRADED = "DEGRADED"
 OUTCOME_INVALID_RESULT = "INVALID_RESULT"
 OUTCOME_TIMEOUT = "TIMEOUT"
+
+PREREQ_SEVERITY_BLOCKING = "blocking"
+PREREQ_SEVERITY_ADVISORY = "advisory"
+FAILURE_MISSING_PREREQUISITE = "missing_prerequisite"
+
+
+# ---------------------------------------------------------------------------
+# Execution Gate Protocol (Slice 7 / B.1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PrerequisiteGate:
+    """Result of prerequisite resolution for one action.
+
+    Slice 7 (B.1) — Execution Gate Protocol. Fail-closed: when `missing` is
+    non-empty and `severity` is BLOCKING, the action must NOT execute and a
+    structured prerequisite result propagates upward instead.
+
+    Attributes:
+        action: canonical action being gated.
+        missing: internal prerequisite identifiers that are not satisfied.
+        severity: "blocking" (action prevented) or "advisory" (recorded, not
+            enforced). The plan does not specify advisory enforcement semantics,
+            so advisory gates only attach structured metadata, never block.
+    """
+
+    action: str
+    missing: list[str] = field(default_factory=list)
+    severity: str = PREREQ_SEVERITY_BLOCKING
+
+    @property
+    def blocks(self) -> bool:
+        return self.severity == PREREQ_SEVERITY_BLOCKING and bool(self.missing)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "missing": list(self.missing),
+            "severity": self.severity,
+        }
+
+
+# Canonical prerequisite resolver registry. Key = action name (or "*" for all
+# actions); value = resolver(target: str) -> list[str] of missing prerequisite
+# identifiers. Registered by Slice 7 wiring; future slices (8-9 credentials,
+# 14 startup validation) register their own resolvers through the same registry
+# instead of adding parallel mechanisms.
+_PREREQUISITE_RESOLVERS: dict[str, Callable[[str], list[str]]] = {}
+
+
+def register_prerequisite_resolver(
+    action: str, resolver: Callable[[str], list[str]]
+) -> None:
+    """Register a prerequisite resolver for an action (or "*" for all).
+
+    The resolver receives the raw target and returns a list of internal
+    prerequisite identifiers that are currently MISSING."""
+    _PREREQUISITE_RESOLVERS[action] = resolver
+
+
+def resolve_prerequisites(action: str, target: str = "") -> PrerequisiteGate:
+    """Resolve prerequisites for an action through the canonical registry.
+
+    The action is canonicalized through _ACTION_MAP first so aliases (e.g.
+    "click" -> "browser_click") resolve to the same gate as the canonical name
+    — otherwise the gate could be silently bypassed via an alias. Runs the
+    action-specific resolver (or the "*" fallback) and aggregates the missing
+    prerequisite identifiers into a PrerequisiteGate. Default gate severity is
+    blocking; severity is a plan-defined field reserved for future slices.
+    """
+    canonical = _ACTION_MAP.get(action, action)
+    resolver = _PREREQUISITE_RESOLVERS.get(canonical)
+    if resolver is None:
+        resolver = _PREREQUISITE_RESOLVERS.get("*")
+    if resolver is None:
+        return PrerequisiteGate(action=canonical)
+    try:
+        missing = resolver(target or "")
+    except Exception as exc:
+        logger.warning(
+            "[PREREQ] resolver for %s failed (fail-open: not blocking): %s",
+            canonical, exc,
+        )
+        missing = []
+    return PrerequisiteGate(action=canonical, missing=list(missing or []))
+
+
+def _browser_backend_missing(target: str) -> list[str]:
+    """Browser DOM/scripting prerequisite: a browser backend must be reachable.
+
+    BrowserRuntime or the Browser Connector (extension connected) both count.
+    Fail-closed: if neither is available the action cannot observe Chrome, so
+    it must not claim success.
+    """
+    try:
+        from mini_kio.core.command_router import _use_browser_runtime
+        if _use_browser_runtime():
+            return []
+    except Exception:
+        pass
+    try:
+        from mini_kio.core.command_router import _get_connector
+        conn = _get_connector()
+        if conn is not None and conn.is_connected():
+            return []
+    except Exception:
+        pass
+    return ["browser_backend"]
+
+
+_BROWSER_BACKEND_ACTIONS = frozenset(
+    {"browser_goto", "browser_click", "browser_hover", "browser_scroll",
+     "browser_drag", "browser_select", "browser_fill", "browser_type",
+     "browser_keypress", "browser_evaluate", "browser_extract_text",
+     "browser_extract_html", "browser_screenshot", "browser_pdf"}
+)
+for _prereq_action in _BROWSER_BACKEND_ACTIONS:
+    register_prerequisite_resolver(_prereq_action, _browser_backend_missing)
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +640,9 @@ def _apply_verification(result: dict[str, Any]) -> dict[str, Any]:
     if blocked:
         verification_status = "blocked"
         outcome_class = OUTCOME_BLOCKED
-        failure_class = "blocked_action"
+        # Preserve an explicit reason (e.g. restricted_target, missing_prerequisite);
+        # default to the generic blocked_action only when none was provided.
+        failure_class = result.get("failure_class") or "blocked_action"
     elif message == "Operator returned invalid result":
         verification_status = "failed"
         outcome_class = OUTCOME_INVALID_RESULT
@@ -768,6 +889,60 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "test_mode": True,
             "execution_id": execution_id,
         })
+
+    # Slice 7 (B.1): Execution Gate Protocol — fail-closed prerequisite gate.
+    # Runs between the safety policy check and the handler invocation. If a
+    # blocking prerequisite is missing, the action MUST NOT execute; the
+    # structured prerequisite result propagates upward instead of guessing or
+    # silently continuing.
+    gate = resolve_prerequisites(action, target)
+    if gate.blocks:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        blocked_result = {
+            "success": False,
+            "message": f"Action '{action}' requires prerequisites that are not available.",
+            "action": action,
+            "target": target,
+            "category": category,
+            "blocked": True,
+            "elapsed_ms": elapsed_ms,
+            "execution_id": execution_id,
+            "failure_class": FAILURE_MISSING_PREREQUISITE,
+            "outcome_class": OUTCOME_BLOCKED,
+            "prerequisite_gate": gate.to_dict(),
+            "tool_version": descriptor.get("tool_version", "unknown"),
+        }
+        _log_execution_event(
+            "exec_prerequisite_blocked",
+            execution_id=execution_id,
+            action=action,
+            category=category,
+            target=target,
+            missing=gate.missing,
+            severity=gate.severity,
+            elapsed_ms=elapsed_ms,
+            runtime=runtime_snapshot,
+        )
+        record_runtime_integrity_warning(
+            "blocked_attempt",
+            {
+                "action": action,
+                "target": target,
+                "reason": "missing_prerequisite",
+                "missing": list(gate.missing),
+            },
+        )
+        remember_runtime_context(
+            "prerequisite_blocked",
+            {
+                "action": action,
+                "target": target,
+                "missing": list(gate.missing),
+                "severity": gate.severity,
+                "execution_id": execution_id,
+            },
+        )
+        return _apply_verification(blocked_result)
 
     try:
         handler_name = f"{handler.__module__}.{handler.__name__}"
@@ -1045,4 +1220,6 @@ def execute_mcp_tool(tool_name: str, arguments: dict, *, server_id: str | None =
         return {"success": False, "message": f"MCP tool call failed: {exc}", "action": "mcp_tool", "target": tool_name}
 
 
-__all__ = ["classify_action", "execute_action", "execute_mcp_tool"]
+__all__ = ["classify_action", "execute_action", "execute_mcp_tool",
+           "resolve_prerequisites", "register_prerequisite_resolver",
+           "PrerequisiteGate"]
