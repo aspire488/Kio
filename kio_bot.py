@@ -62,6 +62,33 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(reply)
 
 
+async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Thin interface wiring for operational slash commands.
+
+    /health /status /uptime /system /systemhealth — the capability itself is
+    system-level (deterministic classifier + mini_kio.core.operational_health);
+    this handler only routes the command text through the same canonical path
+    every message uses, so all interfaces behave identically.
+    """
+    if not update.effective_user or not update.message:
+        return
+    user_id = update.effective_user.id
+    if user_id not in ALLOWED_USER_IDS:
+        await update.message.reply_text("Unauthorized.")
+        return
+    command = (update.message.text or "/status").split()[0].split("@")[0]
+    logger.info(f"[TELEGRAM] uid={user_id} cmd={command!r}")
+    try:
+        reply = await asyncio.to_thread(route, command, user_id)
+        logger.info(f"[TELEGRAM_REPLY] uid={user_id} reply={reply!r}")
+        await update.message.reply_text(reply)
+    except BaseException as exc:
+        logger.exception(f"[TELEGRAM] operational handler error: {exc}")
+        await update.message.reply_text(
+            "KIO encountered an error but is still running."
+        )
+
+
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle unrecognized /commands — prevents silent drop."""
     if not update.effective_user or not update.message:
@@ -171,6 +198,12 @@ def _build_app() -> Application:
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(
+        CommandHandler(
+            ["health", "status", "uptime", "system", "systemhealth"],
+            cmd_operational,
+        )
+    )
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(handle_error)

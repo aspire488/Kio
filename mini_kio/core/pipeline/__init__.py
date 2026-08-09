@@ -324,6 +324,10 @@ class _IntentClassifier:
         if focus_routing:
             return focus_routing
 
+        operational_routing = self._detect_operational(lower, text)
+        if operational_routing:
+            return operational_routing
+
         if self._detect_list_tabs(lower):
             return RoutingDecision(IntentType.BROWSER_TABS, "list_tabs", "", text, lower, confidence=1.0)
 
@@ -446,6 +450,104 @@ class _IntentClassifier:
         # Capability A: contextual desktop-state queries — tabs + KIO-tracked
         # apps, composed from verified runtime state (never LLM-generated).
         return any(p.match(lower) for p in self._STATE_QUERY_PATTERNS)
+
+    # Operational-awareness family (Capability G): KIO health / status /
+    # uptime, system health + metrics, component status, "what's wrong".
+    # Deterministic, anchored, synonym-based — command-style ("/health") and
+    # natural-style share one path (slash stripped in _detect_operational).
+    # Knowledge questions that merely share a word ("what is running time",
+    # "how much does the ram cost", "what's open source") stay on the
+    # knowledge path. Runs BEFORE the desktop-state family so "what's open"
+    # keeps routing to BROWSER_TABS.
+    _OPERATIONAL_ROUTES: tuple[tuple[object, str, str], ...] = (
+        # --- KIO health ---
+        (re.compile(r"^health\s*$"), "health", ""),
+        (re.compile(r"^are\s+you\s+(?:feeling\s+)?(?:healthy|ok(?:ay)?|fine|alright|good)\b"), "health", ""),
+        (re.compile(r"^is\s+everything\s+(?:working|ok(?:ay)?|fine|good)\b"), "health", ""),
+        (re.compile(r"^how\s+is\s+(?:kio|everything)\b"), "health", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+going\s+on\s*$"), "health", ""),
+        (re.compile(r"^show\s+(?:me\s+)?(?:kio(?:'s)?\s+)?health\b"), "health", ""),
+        # --- status / activity ---
+        (re.compile(r"^status\s*$"), "status", ""),
+        (re.compile(r"^ping\s*$"), "status", ""),
+        (re.compile(r"^are\s+you\s+(?:there|awake|busy)\b"), "status", ""),
+        (re.compile(r"^what\s+are\s+you\s+(?:currently\s+)?doing\b"), "status", ""),
+        (re.compile(r"^what\s+is\s+kio\s+(?:currently\s+)?doing\b"), "status", ""),
+        (re.compile(r"^what\s+are\s+you\s+currently\s+(?:handling|working\s+on)\b"), "status", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+your\s+(?:current\s+)?(?:status|state)\b"), "status", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:kio(?:'s)?\s+)?(?:status|state)\b"), "status", ""),
+        (re.compile(r"^tell\s+me\s+(?:your\s+|kio(?:'s)?\s+)?status\b"), "status", ""),
+        # --- uptime ---
+        (re.compile(r"^uptime\s*$"), "uptime", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+your\s+uptime\b"), "uptime", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:kio(?:'s)?\s+)?uptime\b"), "uptime", ""),
+        (re.compile(r"^tell\s+me\s+(?:your\s+|kio(?:'s)?\s+)?uptime\b"), "uptime", ""),
+        (re.compile(r"^how\s+long\s+(?:have\s+you|has\s+kio|has\s+the\s+bot|has\s+it)\s+been\s+(?:running|up|online)\b"), "uptime", ""),
+        # --- system health ---
+        (re.compile(r"^system(?:health)?\s*$"), "system", ""),
+        (re.compile(r"^system\s+(?:health|status)\b"), "system", ""),
+        (re.compile(r"^computer\s+(?:health|status)\b"), "system", ""),
+        (re.compile(r"^pc\s+(?:health|status)\b"), "system", ""),
+        (re.compile(r"^how\s+(?:is|are)\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|machine|system)\b"), "system", ""),
+        (re.compile(r"^is\s+my\s+(?:computer|pc|laptop)\s+(?:ok(?:ay)?|fine|healthy|good)\b"), "system", ""),
+        (re.compile(r"^show\s+(?:me\s+)?(?:system|computer|pc)\s+(?:health|status)\b"), "system", ""),
+        # --- system uptime ---
+        (re.compile(r"^(?:system|pc|computer)\s+uptime\b"), "system_uptime", ""),
+        (re.compile(r"^how\s+long\s+has\s+(?:my\s+|the\s+)?(?:computer|pc|system|laptop)\s+been\s+(?:running|on|up)\b"), "system_uptime", ""),
+        # --- metrics ---
+        (re.compile(r"^cpu\b"), "cpu", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+my\s+cpu\s+(?:usage|load)\b"), "cpu", ""),
+        (re.compile(r"^how\s+much\s+cpu\b"), "cpu", ""),
+        (re.compile(r"^how\s+busy\s+is\s+the\s+cpu\b"), "cpu", ""),
+        (re.compile(r"^ram\s*$"), "ram", ""),
+        (re.compile(r"^memory\s*$"), "ram", ""),
+        (re.compile(r"^(?:ram|memory)\s+usage\b"), "ram", ""),
+        (re.compile(r"^how\s+much\s+(?:ram|memory)\s+am\s+i\s+using\b"), "ram", ""),
+        (re.compile(r"^how\s+much\s+memory\s+is\s+left\b"), "ram", ""),
+        (re.compile(r"^gpu\b"), "gpu", ""),
+        (re.compile(r"^gpu\s+(?:usage|load)\b"), "gpu", ""),
+        (re.compile(r"^is\s+my\s+gpu\s+being\s+used\b"), "gpu", ""),
+        (re.compile(r"^storage\s*$"), "storage", ""),
+        (re.compile(r"^disk\s*$"), "storage", ""),
+        (re.compile(r"^(?:storage|disk)\s+(?:usage|space)\b"), "storage", ""),
+        (re.compile(r"^how\s+much\s+(?:storage|disk\s+space)\s+do\s+i\s+have\b"), "storage", ""),
+        (re.compile(r"^how\s+much\s+disk\s+space\s+is\s+left\b"), "storage", ""),
+        (re.compile(r"^battery\s*$"), "battery", ""),
+        (re.compile(r"^battery\s+(?:status|level)\b"), "battery", ""),
+        (re.compile(r"^is\s+my\s+battery\s+charging\b"), "battery", ""),
+        # --- components / services ---
+        (re.compile(r"^is\s+(?:the\s+)?(?:browser|chrome|edge|firefox|brave)\s+(?:connected|working|ready|up|online|available|running)\b"), "components", "browser"),
+        (re.compile(r"^is\s+(?:the\s+)?(?:telegram|bot|discord)\s+(?:connected|working|ready|up|online|available|running|alive)\b"), "components", "telegram"),
+        (re.compile(r"^is\s+(?:the\s+)?media\s+(?:working|ready|up|available|connected)\b"), "components", "media"),
+        (re.compile(r"^are\s+(?:the\s+)?(?:providers|services|subsystems)\s+(?:healthy|connected|working|ready|up|ok(?:ay)?)\b"), "components", "services"),
+        (re.compile(r"^is\s+(?:the\s+)?(?:mcp|tools?)\s+(?:connected|working|ready|up|available)\b"), "components", "tools"),
+        (re.compile(r"^is\s+(?:the\s+)?kio(?:'s)?\s+(?:runtime\s+)?(?:working|ok(?:ay)?|healthy|fine)\b"), "components", "kio"),
+        (re.compile(r"^what\s+(?:services|components|systems|things)\s+are\s+(?:connected|working|running|active)\b"), "components", ""),
+        # --- whats wrong / diagnose ---
+        (re.compile(r"^what(?:'s|s| is)?\s+wrong\s*$"), "whats_wrong", ""),
+        (re.compile(r"^is\s+(?:there\s+)?(?:anything|something)\s+wrong\b"), "whats_wrong", ""),
+        (re.compile(r"^why\s+(?:are\s+you|is\s+kio)\s+(?:unhealthy|degraded|not\s+working)\b"), "whats_wrong", ""),
+        (re.compile(r"^why\s+isn'?t\s+(?:something|anything)\s+working\b"), "whats_wrong", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+failing\b"), "whats_wrong", ""),
+        (re.compile(r"^what\s+isn'?t\s+working\b"), "whats_wrong", ""),
+        (re.compile(r"^diagnose\b"), "whats_wrong", ""),
+        # --- kio-prefixed apostrophe forms (not reached by name-strip) ---
+        (re.compile(r"^kio(?:'s)?\s+health\b"), "health", ""),
+        (re.compile(r"^kio(?:'s)?\s+status\b"), "status", ""),
+        (re.compile(r"^kio(?:'s)?\s+uptime\b"), "uptime", ""),
+        (re.compile(r"^kio(?:'s)?\s+diagnose\b"), "whats_wrong", ""),
+    )
+
+    def _detect_operational(self, lower, text):
+        # Command-style ("/health") and natural-style share one deterministic
+        # path; punctuation/case are already normalized upstream.
+        norm = lower.lstrip("/")
+        for pattern, action, target in self._OPERATIONAL_ROUTES:
+            if pattern.match(norm):
+                return RoutingDecision(
+                    IntentType.OPERATIONAL, action, target, text, lower, confidence=1.0,
+                )
+        return None
 
     def _detect_close(self, lower, text, first_word):
         if first_word == "close":
@@ -745,6 +847,7 @@ class _CapabilityResolver:
             IntentType.BROWSER_TABS: ("browser", {"action": "list_tabs", "target": ""}),
             IntentType.BROWSER_NAVIGATE: ("browser", {"action": decision.action, "target": decision.target, "metadata": decision.metadata}),
             IntentType.SYSTEM: ("system", {"action": decision.action}),
+            IntentType.OPERATIONAL: ("operational", {"action": decision.action, "target": decision.target}),
             IntentType.KNOWLEDGE: ("knowledge", {"query": decision.target}),
             IntentType.MULTI_STEP: ("coordinator", {"action": "multi_step", "raw_text": decision.raw_text}),
             IntentType.ENTITY_QUERY: ("media", {"action": "information_query", "query": decision.target}),
@@ -786,6 +889,7 @@ class _ExecutionCoordinator:
             "conversation": self._exec_conversation,
             "knowledge": self._exec_knowledge,
             "system": self._exec_system,
+            "operational": self._exec_operational,
             "file": self._exec_desktop,
             "coordinator": self._exec_coordinator,
             "memory": self._exec_memory,
@@ -1480,6 +1584,15 @@ class _ExecutionCoordinator:
         }
         canonical = action_map.get(params["action"], params["action"])
         return execute_action(canonical)
+
+    def _exec_operational(self, params: dict, decision: RoutingDecision) -> dict:
+        # Capability G: operational awareness — deterministic real state from
+        # the canonical owner module. Never an LLM guess.
+        from mini_kio.core.operational_health import operational_result
+        return operational_result(
+            params.get("action", "status"),
+            target=params.get("target", ""),
+        )
 
     def _exec_coordinator(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.command_parser import parse_command

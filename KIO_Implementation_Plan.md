@@ -314,7 +314,8 @@ Statuses below are reconciled from source + tests + live evidence (`KIO_MASTER_P
 | 5 — decision logging | IMPLEMENTED | Structured routing/trace logs (`trace_logger.py`, execution metrics) |
 | 6 — dead code + C-09 unification | IMPLEMENTED | `resolve_capability()` in `routing_utils.py`; dead stubs deleted |
 | 7 — execution gate protocol | **VERIFIED (2026-08-09)** | `PrerequisiteGate` + `resolve_prerequisites()` in `execution_boundary.py`, fail-closed before handler; 21 targeted tests; live smoke no-regression (prerequisite satisfied live) |
-| 8-9 — credential vault | NOT STARTED | Only stale `__pycache__/credential_vault*.pyc`; no source file exists |
+| 8 — credential vault: core | **VERIFIED (2026-08-09)** | `mini_kio/core/credential_vault.py` + `credentials` metadata table on the canonical backend engine; 22 targeted tests incl. mandatory secret-leak proof (see Slice 8 section below) |
+| 9 — credential vault: lifecycle | OPEN | Slice 9 (refresh expired tokens / revoke / list-manage UI / expiry at the Execution Gate) not implemented — next Stream B work |
 | 10 — identity resolver | IMPLEMENTED | `mini_kio/resolvers/identity_resolver.py` exists |
 | 11-12 — session continuity | IMPLEMENTED | `memory_store.py`, `get_last_successful_interaction()`, continuity resolver |
 | 13 — proactive event bus | NOT STARTED (browser-scoped only) | `EventBus` only in `runtime/browser_runtime/events.py`; no global bus |
@@ -329,6 +330,8 @@ Statuses below are reconciled from source + tests + live evidence (`KIO_MASTER_P
 | 22 — alternative generation | NOT STARTED | No pros/cons generation module found |
 | 23-27 — proactivity (trigger/suggestion/follow-up/briefing/arbiter) | NOT STARTED | No proactive modules; initiative ROADMAP per CAP.AUTONOMY.001 |
 | 28-30 — autonomy (goals/execution loop/safety governor) | NOT STARTED | No goals module; `executive.py`/`orchestrator.py` absent; only `task_engine.py` exists |
+
+**Cross-cutting capability (pre-Slice-9 refinement, verified 2026-08-09): Operational Awareness.** KIO now answers KIO health / status / uptime, system health (CPU/RAM/GPU/storage/battery), component status, and "what's wrong" deterministically from real runtime + system state. Canonical owner: `mini_kio/core/operational_health.py`; `IntentType.OPERATIONAL` + the `_OPERATIONAL_ROUTES` semantic family in `pipeline/__init__.py` (natural + `/health`-style command routing, no LLM fallback); thin PTB wiring in `kio_bot.py` for `/health /status /uptime /system /systemhealth`. Unavailable metrics are reported honestly (never 0); responses carry no implementation tokens. Evidence: 22 targeted tests (`tests/test_operational_health.py`) + 448-test regression gate (2 pre-existing gate2 failures baseline-identical) + live Telegram verification with values cross-checked against psutil/nvidia-smi. Not a roadmap slice — bounded capability refinement; no Slice status changed.
 
 ---
 

@@ -177,6 +177,7 @@ Confidence is deliberately **not stored in this document**. A numeric confidence
 | CAP.AUTONOMY.001 | INVARIANT | INV.006, MEM.001 | Founder Decision | Never acts without explicit request; AURA may only observe/suggest/draft/warn. Permanent policy — governance track, not overridable by runtime state (see Section 3). |
 | CAP.MULTIUSER.001 | NOT PLANNED | — | Founder Decision | Single-user by decision; architecture leaves room, no work done. |
 | CAP.PROVIDER.001 | CURRENT | — | Repository, Founder Decision | Provider-agnostic; "local-first" = data ownership, not a cloud ban. Local models not yet primary — tracked gap, not hidden. |
+| CAP.OPS.001 | CURRENT | — | Repository, Live Telegram Validation | Operational awareness: KIO health / status / uptime, system health (CPU/RAM/GPU/storage/battery), component status, and "what's wrong" — deterministic real-state answers (`mini_kio/core/operational_health.py`), no LLM fabrication; pre-Slice-9 refinement (verified 2026-08-09). |
 
 #### 5.2.2 LIMITATIONS
 

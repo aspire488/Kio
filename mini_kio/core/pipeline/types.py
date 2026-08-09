@@ -19,6 +19,7 @@ class IntentType(enum.Enum):
     BROWSER_TABS = "browser_tabs"
     BROWSER_NAVIGATE = "browser_navigate"
     SYSTEM = "system"
+    OPERATIONAL = "operational"
     CONVERSATION = "conversation"
     KNOWLEDGE = "knowledge"
     MULTI_STEP = "multi_step"
