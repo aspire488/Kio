@@ -34,6 +34,12 @@ _BringWindowToTop = _user32.BringWindowToTop
 _GetForegroundWindow = _user32.GetForegroundWindow
 _AttachThreadInput = _user32.AttachThreadInput
 _GetWindowTextLengthW = _user32.GetWindowTextLengthW
+_GetWindowTextW = _user32.GetWindowTextW
+_GetWindowLongW = _user32.GetWindowLongW
+
+# Window style constants
+_GWL_EXSTYLE = -20
+_WS_EX_TOOLWINDOW = 0x00000080
 
 
 # ── Internal helpers ──────────────────────────────────────────────
@@ -92,6 +98,76 @@ def _force_foreground(hwnd: int) -> None:
 
 
 # ── Public API ────────────────────────────────────────────────────
+
+
+def list_visible_windows() -> list[dict]:
+    """
+    Enumerate the user's visible top-level application windows (pure read).
+
+    Returns a list of {"pid": int, "title": str, "is_foreground": bool}.
+    Excludes: tool windows (taskbar/popups), empty-title windows, and windows
+    owned by the current process (KIO's own console). No activation, no side
+    effects, no process scanning — a single fast EnumWindows pass.
+    """
+    import os
+
+    self_pid = os.getpid()
+    foreground = _GetForegroundWindow()
+    results: list[dict] = []
+
+    def callback(hwnd: int, _param) -> bool:
+        if not _IsWindowVisible(hwnd):
+            return True
+        if _GetWindowTextLengthW(hwnd) <= 0:
+            return True
+        try:
+            style = _GetWindowLongW(hwnd, _GWL_EXSTYLE)
+        except Exception:
+            style = 0
+        if style & _WS_EX_TOOLWINDOW:
+            return True
+        pid = ctypes.c_ulong()
+        _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == self_pid:
+            return True
+        length = _GetWindowTextLengthW(hwnd)
+        buff = ctypes.create_unicode_buffer(length + 1)
+        _GetWindowTextW(hwnd, buff, length + 1)
+        title = (buff.value or "").strip()
+        if not title:
+            return True
+        results.append({
+            "pid": int(pid.value),
+            "title": title,
+            "is_foreground": hwnd == foreground,
+        })
+        return True
+
+    try:
+        _EnumWindows(_CALLBACK_TYPE(callback), None)
+    except Exception as exc:
+        logger.warning("[WINDOW] list_visible_windows failed: %s", exc)
+    return results
+
+
+def activate_window(pid: int) -> bool:
+    """
+    Bring an arbitrary application window to the foreground by PID.
+
+    Generic activation (any app, not just browsers). Never scans processes;
+    only operates on the exact PID supplied by the caller.
+    """
+    if pid <= 0:
+        return False
+    try:
+        hwnds = _find_windows_for_pid(pid)
+        if not hwnds:
+            return False
+        _force_foreground(hwnds[0])
+        return True
+    except Exception as exc:
+        logger.warning("[WINDOW] Activation error for PID %d: %s", pid, exc)
+        return False
 
 
 def activate_browser_window(pid: int) -> bool:

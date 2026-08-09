@@ -432,7 +432,7 @@ class _IntentClassifier:
         # the knowledge path; "in/on chrome / my computer" live in the pattern
         # below.
         re.compile(r"^what(?:'s|s| is| are)?\s+(?:currently\s+)?(?:open|running|active)(?:\s+right\s+now|\s+kio)?\s*$"),
-        re.compile(r"^what\s+am\s+i\s+(?:currently\s+)?(?:using|running|working\s+(?:on|with))\b"),
+        re.compile(r"^what\s+am\s+i\s+(?:currently\s+)?(?:using|running|controlling|working\s+(?:on|with))\b"),
         re.compile(r"^what\s+(?:are\s+you|is\s+kio)\s+(?:currently\s+)?(?:using|controlling|working\s+on)\b"),
         re.compile(r"^what\s+(?:browser\s+)?tabs\s+are\s+open\b"),
         re.compile(r"^which\s+(?:browser\s+)?tabs\s+are\s+open\b"),
@@ -442,7 +442,7 @@ class _IntentClassifier:
         re.compile(r"^what(?:'s|s| is)\s+(?:open\s+)?(?:in|on)\s+(?:chrome|edge|firefox|brave|the\s+browser|my\s+computer|this\s+computer)\b"),
         re.compile(r"^tell\s+me\s+what(?:'s|s| is)?\s+(?:open|running|using|active)\b"),
         re.compile(r"^tell\s+me\s+what\s+(?:apps|windows|tabs)\s+are\s+(?:open|running)\b"),
-        re.compile(r"^show\s+(?:me\s+)?(?:what(?:'s|s| is)\s+open|(?:my\s+)?(?:open\s+)?(?:apps|windows|tabs))\b"),
+        re.compile(r"^show\s+(?:me\s+)?(?:what(?:'s|s| is)\s+open|(?:my\s+)?(?:open\s+)?(?:apps|windows|tabs|desktop))\b"),
         re.compile(r"^list\s+(?:open\s+)?(?:apps|windows|tabs)\b"),
     )
 
@@ -951,197 +951,9 @@ class _ExecutionCoordinator:
         logger.warning("[MEDIA] unhandled action=%s text=%s", action, decision.normalized_text)
         return {"success": False, "message": f"Unhandled media action: {action}"}
 
-    _BROWSER_PROC_NAMES = frozenset({
-        "chrome", "chrome.exe", "edge", "msedge", "msedge.exe",
-        "firefox", "brave", "comet", "opera",
-    })
-
-    def _tracked_running_state(self) -> tuple[list[str], list[str]]:
-        """Capability A: split KIO-tracked running processes into browser
-        names and native app names (brand-cased, deduped)."""
-        try:
-            from mini_kio.core.runtime import get_runtime
-            from mini_kio.core.target_ref import display_target_name
-
-            rt = get_runtime()
-            if rt is None:
-                return [], []
-            rt.prune_tracked_processes()
-            browsers, apps = [], []
-            for entry in rt.tracked_processes:
-                name = str(entry.get("name", "") or "").strip()
-                if not name or name.lower() in ("explorer", "explorer.exe"):
-                    continue
-                base = name[:-4] if name.lower().endswith(".exe") else name
-                display = display_target_name(base)
-                if not display or display == "it":
-                    display = base.replace("_", " ").strip()
-                    display = display[0].upper() + display[1:] if display else name
-                if name.lower() in self._BROWSER_PROC_NAMES:
-                    browsers.append(display)
-                else:
-                    apps.append(display)
-            return sorted(set(browsers)), sorted(set(apps))
-        except Exception:
-            return [], []
-
-    @staticmethod
-    def _sanitize_display_name(name: str) -> str:
-        """Strip raw URLs from a display name; neutral fallback when empty.
-
-        A tab title may embed its own URL ("Visit https://x now") or, on the
-        fallback path, BE a raw URL when a tab has no title. URLs must never
-        reach the user response.
-        """
-        cleaned = re.sub(r"https?://\S+", "", name or "").strip()
-        cleaned = " ".join(cleaned.split())
-        if not cleaned:
-            return "Untitled tab"
-        return cleaned[:80]
-
-    @staticmethod
-    def _tab_detail(tab) -> dict:
-        """Resolve one browser tab to structured identity + detail (user-safe).
-
-        identity: canonical web-app brand (ChatGPT / Telegram / YouTube) when
-        the tab URL maps to a registered web app; else "".
-        detail: sanitized tab title (URLs stripped); "" when none or when it
-        merely repeats the identity ("ChatGPT — ChatGPT" is redundant).
-        is_owned / active: KIO provenance + connector active flag.
-        """
-        from mini_kio.core.target_ref import webapp_name_from_url, display_target_name
-
-        url = (getattr(tab, "url", "") or "").strip()
-        title = (getattr(tab, "title", "") or "").strip()
-        identity = ""
-        if url:
-            ident = webapp_name_from_url(url)
-            if ident:
-                identity = display_target_name(ident)
-        detail = ""
-        if title and not re.match(r"^https?://", title, re.IGNORECASE):
-            cleaned = _ExecutionCoordinator._sanitize_display_name(title)
-            if cleaned != "Untitled tab":
-                detail = cleaned
-        if identity and detail and detail.lower().strip() == identity.lower().strip():
-            detail = ""
-        return {
-            "identity": identity,
-            "detail": detail,
-            "is_owned": bool(getattr(tab, "is_owned", False)),
-            "active": bool(getattr(tab, "active", False)),
-        }
-
-    def _compose_desktop_state(self, conn) -> dict:
-        """Capability A: 'What's open?' — one canonical live snapshot.
-
-        Combines canonical web-app identity + tab/window detail + browser host
-        + tracked native apps + KIO provenance + active state, composed from
-        the deterministic runtime layer (never an LLM guess). Reading state is
-        side-effect free. Partial/unreadable state is reported truthfully.
-        """
-        from mini_kio.core.command_router import _check_br_available, _br_list_tabs
-
-        tabs: list[dict] = []
-        tabs_readable = False
-        if conn and conn.is_connected():
-            from mini_kio.core.async_utils import safe_run_async
-            try:
-                result = safe_run_async(conn.list_tabs())
-                if result.success and result.tabs:
-                    tabs_readable = True
-                    tabs = [self._tab_detail(t) for t in result.tabs]
-                elif result.success:
-                    tabs_readable = True
-            except Exception as exc:
-                logger.warning("list_tabs failed: %s", exc)
-        elif _check_br_available():
-            br_result = _br_list_tabs()
-            if br_result.get("success"):
-                tabs_readable = True
-                body = br_result.get("message", "").replace("Open tabs:\n", "")
-                for line in body.splitlines():
-                    owned = bool(re.search(r"\[Opened by KIO\]", line))
-                    cleaned = re.sub(r"^\d+\.\s*", "", line.strip())
-                    cleaned = re.sub(r"\s*\[Opened by KIO\]\s*$", "", cleaned)
-                    cleaned = self._sanitize_display_name(cleaned)
-                    if cleaned:
-                        tabs.append({"identity": "", "detail": cleaned, "is_owned": owned, "active": False})
-
-        browsers, apps = self._tracked_running_state()
-        browser_names = browsers or (["Chrome"] if (conn and conn.is_connected()) else [])
-
-        if not tabs_readable and not browser_names and not apps:
-            # No state obtainable at all — truthful, never fabricated.
-            return {"success": True, "message": "I can't read your current desktop state right now."}
-        if browser_names and not tabs_readable:
-            verb = "are" if len(browser_names) > 1 else "is"
-            return {"success": True, "message": ", ".join(browser_names) + f" {verb} open, but I couldn't read its tabs."}
-
-        lines = self._compose_state_lines(tabs, browser_names, apps)
-        if lines:
-            return {"success": True, "message": "\n".join(lines)}
-        if browser_names:
-            verb = "are" if len(browser_names) > 1 else "is"
-            return {"success": True, "message": ", ".join(browser_names) + f" {verb} open."}
-        return {"success": True, "message": "Nothing is open right now."}
-
-    @staticmethod
-    def _compose_state_lines(tabs, browser_names, apps) -> list[str]:
-        """Render identity + detail + provenance + active into response lines.
-
-        Distinct tabs are each listed with their detail ("ChatGPT — KIO Commit
-        Review Prompt"); genuine duplicates (identical identity + detail +
-        provenance) collapse with a count. Note: no blank separator lines —
-        _ResponseComposer._strip_leaks collapses 2+ whitespace runs, so single
-        newlines only.
-        """
-        active_count = sum(1 for t in tabs if t.get("active"))
-        rendered = []
-        for t in tabs:
-            parts = []
-            if t.get("identity"):
-                parts.append(t["identity"])
-            if t.get("detail"):
-                parts.append(t["detail"])
-            line = " — ".join(parts) if parts else "Untitled tab"
-            if t.get("is_owned"):
-                line += " (opened by KIO)"
-            if t.get("active") and active_count == 1:
-                line += " (active)"
-            rendered.append(line)
-
-        counts: dict[str, int] = {}
-        order: list[str] = []
-        for line in rendered:
-            key = line.strip().lower()
-            if not key:
-                continue
-            if key not in counts:
-                counts[key] = 0
-                order.append(key)
-            counts[key] += 1
-        first_line: dict[str, str] = {}
-        for line in rendered:
-            first_line.setdefault(line.strip().lower(), line)
-
-        items = []
-        for key in order:
-            if counts[key] > 1:
-                items.append(f"{first_line[key]} ({counts[key]} tabs)")
-            else:
-                items.append(first_line[key])
-
-        # Browser-only and empty states are handled by the caller's short
-        # forms ("Chrome is open." / "Nothing is open right now.").
-        if not items and not apps:
-            return []
-        lines = ["Open right now:"] + ["• " + n for n in items]
-        if apps:
-            lines.append("Apps: " + ", ".join(apps))
-        if browser_names:
-            lines.append("Browser: " + ", ".join(browser_names))
-        return lines
+    # NOTE: desktop-state composition ('What's open?') moved to the canonical
+    # owner mini_kio/core/desktop_state.py (native window observation + tab
+    # grouping + dedupe + short forms). _exec_browser.list_tabs delegates there.
 
     def _try_native_focus(self, target: str) -> Optional[dict]:
         """Capability A: bring a running native app's window to the foreground.
@@ -1172,6 +984,32 @@ class _ExecutionCoordinator:
                 try_activate_browser(pid)
                 display = target.strip().capitalize()
                 return {"success": True, "message": f"Focused {display}."}
+            # Generic fallback (Capability A, system-wide): match a VISIBLE
+            # native window by app identity — covers arbitrary applications
+            # KIO never launched/registered. Never a process sweep; activates
+            # only the exact matched window's PID. Browser-host windows are
+            # never matched here: focusing a whole browser process because a
+            # tab merely mentions the target would violate the no-scope-
+            # escalation invariant (browser focus is the connector's job).
+            from mini_kio.core.desktop_state import observe_native_windows
+            from mini_kio.platform.window_activation import activate_window
+            windows, ok = observe_native_windows()
+            if not ok:
+                return None
+            # Identity match first (exe base / brand-cased app name).
+            for w in windows:
+                if w.get("is_browser_host") or not w.get("pid"):
+                    continue
+                if (w.get("base") and key in w["base"]) or key in (w.get("app") or "").lower():
+                    if activate_window(int(w["pid"])):
+                        return {"success": True, "message": f"Focused {w.get('app') or target}."}
+            # Title-substring fallback (still never a browser-host window).
+            for w in windows:
+                if w.get("is_browser_host") or not w.get("pid"):
+                    continue
+                if key in (w.get("title") or "").lower():
+                    if activate_window(int(w["pid"])):
+                        return {"success": True, "message": f"Focused {w.get('app') or target}."}
         except Exception as exc:
             logger.warning("native focus failed for %s: %s", target, exc)
         return None
@@ -1219,10 +1057,12 @@ class _ExecutionCoordinator:
         conn = _get_connector()
 
         if action == "list_tabs":
-            # Capability A: "What's open?" reports browser tabs (resolved to
-            # canonical web-app identities) AND KIO-tracked running apps — the
-            # user sees the whole desktop state, not just the host browser.
-            return self._compose_desktop_state(conn)
+            # Capability A: "What's open?" — one canonical SYSTEM-LEVEL
+            # desktop snapshot (native windows + browser tabs), composed by
+            # the canonical desktop-state owner. Deterministic, never an LLM
+            # guess; reading state is side-effect free.
+            from mini_kio.core.desktop_state import compose_desktop_state
+            return compose_desktop_state(conn)
 
         if action == "focus":
             if conn and conn.is_connected():
