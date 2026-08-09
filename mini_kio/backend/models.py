@@ -62,3 +62,22 @@ class TraceModel(Base):
     identity_guard_actions = Column(JSON, default=list, nullable=False)
     metadata_json = Column(JSON, default=dict, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class CredentialRecordModel(Base):
+    """Credential Vault metadata record (Slice 8 / B.2).
+
+    Holds ONLY metadata — never secret material. The actual secret lives in
+    the platform keyring (Windows Credential Manager / macOS Keychain / Linux
+    Secret Service) keyed by credential_id. Never in plaintext, never logged.
+    """
+    __tablename__ = "credentials"
+
+    credential_id = Column(String(64), primary_key=True)
+    provider = Column(String(128), index=True, nullable=False)
+    credential_type = Column(String(128), index=True, nullable=False)
+    metadata_json = Column(JSON, default=dict, nullable=False)
+    expires_at = Column(Integer, nullable=True)  # unix ts (seconds); None = no expiry
+    created_at = Column(Integer, nullable=False)  # unix ts (seconds)
+    consent_recorded = Column(Boolean, default=False, nullable=False)
+    revoked = Column(Boolean, default=False, nullable=False)

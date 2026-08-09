@@ -563,7 +563,7 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 **7. Execution Boundary (mini_kio/core/execution_boundary.py, LOCKED ~620 lines)**
 - Purpose: Safety gateway. Classify → gate → resolve → validate → execute → verify.
 - Maturity: CURRENT (LOCKED).
-- Final vision: Hard safety gate; no bypass; prerequisite resolution per Slice 7 (gate mechanism DONE 2026-08-09; credential resolvers land with Slice 8-9).
+- Final vision: Hard safety gate; no bypass; prerequisite resolution per Slice 7 (gate mechanism DONE 2026-08-09; credential resolvers + Vault core DONE 2026-08-09 with Slice 8; lifecycle lands with Slice 9).
 - Dependencies: intent_validator.
 - Incoming links: core runtime, execution engine.
 - Outgoing links: → execution engine (after gate).
@@ -1129,7 +1129,7 @@ Per-subsystem rows. Each row has: Current State / Target State / Dependencies / 
 | Capability Resolver | CURRENT (Gate C-2, 33 handlers) | Single discoverable registry | capability_registry, provider_registry, command_registry | ARCH.003 resolution | Medium (triple-registry fragmentation) | P0 | 1 | KIO Core | Capability discovery tests | Discovery regression | Single resolution path | All three registries consolidated |
 | Provider Registry | CURRENT (15 providers; D-08 resolved 2026-08-09) | Single canonical provider abstraction | provider_contract | — | Low (canonical contract + separate LLM chain) | P0 | 1 | Execution + LLM | Provider tests; failover tests | Provider regression | Single interface, single registry | One canonical provider registry |
 | Capability Registry | CURRENT (Gate C-2) | Single discoverable capability layer | execution engine | — | Low | P1 | 1 | KIO Core | Capability discovery test | Capability regression | All capabilities discoverable | No orphan capabilities |
-| Execution Boundary | LOCKED | Hard safety gate; prerequisite gate | intent_validator | Slice 8 prerequisite gate | Low | P0 | 1 | Safety | Boundary tests; safety integration | Safety regression | No bypass; every action gated | Verified no bypass routes |
+| Execution Boundary | LOCKED | Hard safety gate; prerequisite gate | intent_validator | Slice 7 gate + Slice 8 credential resolvers | Low | P0 | 1 | Safety | Boundary tests; safety integration | Safety regression | No bypass; every action gated | Verified no bypass routes |
 | Session Context | CURRENT (Gate C-1; 08-09 referent sanitization — safe target names stored, not serialized routing strings) | Unified context; 6 legacy merged | session_state, conversation_context, media_context, continuity_state, artifact_memory | Legacy migration | Low | P0 | 1 | Context | Unified-context integration tests | Context regression | One context authority | Six legacy systems retired |
 | Memory | CURRENT (basic + FQ-05) | Inspectable/correctable/deletable per MEM.001 | backend/repositories | MEM.001 UX gap | Low | P0 | 1→4 | Memory | Memory governance tests; inspection UX | Memory regression | Full governance UX | User can inspect/correct/delete every memory |
 | Fact Repository | CURRENT | Single retrieval surface | backend/db, knowledge providers | — | Low (provider count drift) | P1 | 2 | Knowledge | Retrieval integration tests | Retrieval regression | One retrieval surface | All retrieval routes through one router |
@@ -1455,26 +1455,26 @@ Fixes (all in current working tree, uncommitted at HEAD): canonical target ident
 **USER-VISIBLE CAPABILITIES (live-verified):** (A) context-aware computer control — "What's open?", switch/focus targets; (B) composed multi-action tasks — "Open ChatGPT and Telegram" with independent per-target verification; (C) state-aware media control — "What's playing?", verified Pause/Resume, contextual media references.
 **DEMO SCENARIOS (live Telegram, 2026-08-09):** `Open ChatGPT` → "Opened ChatGPT in Chrome." · `Close it` → "Closed ChatGPT tab." (Chrome process count unchanged — tab scope, not browser kill) · `What is open?` → tabs + tracked apps listed · `Play Never Gonna Give You Up` → playback verified `paused=False` · `Pause it` → "Paused." · `What is playing?` → "Paused on Never Gonna Give You Up." · `Resume it` → "Resumed." · `Open ChatGPT and Telegram` → "Opened ChatGPT and Telegram." · `Hi` during media ≈1.7s while media continued · `Close ChatGPT tab` / `Close Telegram` → tab-scoped closes, Chrome alive.
 **ACCEPTANCE EVIDENCE:** 26 new targeted tests (`tests/test_target_identity_fixes.py`) + 200 targeted regression tests green across 13 suites (media recovery, connector reconnect, state verification, pause/resume, EFG routing, R11 search, pending action, history pollution, gate5 registry/repairs); pre-existing failures baseline-identical. No new architecture was introduced — fixes route through the existing pipeline/coordinator/boundary.
-**NOT CHANGED:** media entity resolution / semantic selection (OPEN), Shorts (OPEN), AURA (unchanged), Goals (still absent), Credential Vault (still absent).
+**NOT CHANGED:** media entity resolution / semantic selection (OPEN), Shorts (OPEN), AURA (unchanged), Goals (still absent). **CHANGED 2026-08-09 (Slice 8):** Credential Vault Core is IMPLEMENTED (`mini_kio/core/credential_vault.py` + `credentials` table; 22 tests incl. secret-leak proof); Credential Vault Lifecycle (Slice 9) remains OPEN.
 
 ### Completion estimate (recalculated 2026-08-09, honest method)
 Prior audit (08-08): subsystems fully implemented 37% (26/71) · weighted ~45–50% · user-visible ~35–40% · architectural ~50% · AURA ~10%. Recalculation method: re-derived from Section 14's 71-subsystem maturity table, counting only subsystems whose current state is genuinely implemented per source evidence (not plan prose), after the 08-09 fixes and live verification.
 
 | Lens | 08-08 audit | 08-09 recalculated | Delta source |
 |---|---|---|---|
-| Subsystems fully implemented | 37% (26/71) | ~38–39% (27–28/71) | Browser reference-resolution class fixed (previously counted broken) |
+| Subsystems fully implemented | 37% (26/71) | ~39% (28/71) | Browser reference-resolution class fixed (previously counted broken) + Credential Vault Core (Slice 8) implemented 2026-08-09 |
 | Weighted | ~45–50% | ~50–55% | Execution fabric + multi-step aggregation + browser/media verification hardened |
 | User-visible | ~35–40% | ~45–50% | Three new user-visible capabilities live-verified (contextual control, multi-action, state-aware media) |
 | Architectural | ~50% | ~52–55% | Target-identity abstraction + response/verification contracts |
 | AURA | ~10% | ~10% (unchanged) | No AURA work in 08-09 |
 
-Numbers are estimates, not claims of completion. ROADMAP items (AURA loop, Goals, Credential Vault, Desktop/Voice/Mobile, Tiers 4-5) remain unchanged.
+Numbers are estimates, not claims of completion. ROADMAP items (AURA loop, Goals, Credential Vault Lifecycle [Slice 9], Desktop/Voice/Mobile, Tiers 4-5) remain unchanged.
 
 ### 21.1 Engineering Work (per Tier)
 
 **Tier 1 (corrected 2026-08-09 — false completion claims removed):**
 - Built: ARCH.003 capability-discovery unification (Slice 6, `resolve_capability`), Identity Resolver wiring (Slice 10, `mini_kio/resolvers/identity_resolver.py`), Session Continuity serialization (Slices 11-12), FQ-05 memory governance (retention metadata, confidence decay, inspection/correction/deletion), FQ-06 override policy (disagree-once-then-defer), execution boundary + pipeline coordinator (LOCKED), canonical target identity + referent sanitization + truthful multi-step aggregation (08-09 cross-cutting).
-- **CORRECTED: Credential Vault (Slices 8-9) is NOT implemented** — no source file exists (only a stale `.pyc`); **Startup Configuration Validation (Slice 14) is NOT implemented** — no framework exists. Both remain OPEN per `KIO_Implementation_Plan.md` slice reconciliation.
+- **CORRECTED: Credential Vault Lifecycle (Slice 9) is NOT implemented** — Core (Slice 8) IS implemented 2026-08-09 (`mini_kio/core/credential_vault.py` + `credentials` metadata table; keyring-backed; consent-gated; `keyring>=25.0`), but the lifecycle layer (refresh expired tokens, revoke-on-request UI, expiry detection at Execution Gate, re-auth flow) remains OPEN per `KIO_Implementation_Plan.md` slice reconciliation. **Startup Configuration Validation (Slice 14) is NOT implemented** — no framework exists.
 - Retired: Phase 0 dead code (aura/ stubs, entity_state_engine, browser/automation). **CORRECTED: duplicate registries are NOT fully consolidated** — `capability_registry`, `provider_registry`, `browser_session_registry`, `media_registry` coexist; CapabilityResolver remains the unified query path (`resolve_capability`), full registry consolidation still on D-08/ARCH.003.
 - Merged: 6 legacy state systems into SessionContext (per Convergence Report; referent sanitization added 08-09).
 - Canonical: CapabilityRegistry as single discoverable capability surface — PARTIAL (see correction above).

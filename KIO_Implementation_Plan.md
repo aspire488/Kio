@@ -410,6 +410,8 @@ class CredentialVault:
 
 Schema: `credential_id UUID, provider str, credential_type str, metadata JSON, expires_at int (unix ts), created_at int, consent_recorded bool`. Token encrypted via `keyring` before SQLite storage. Never in plaintext.
 
+**STATUS — IMPLEMENTED + VERIFIED (2026-08-09).** `mini_kio/core/credential_vault.py` delivers the full Slice 8 core: keyring-backed secret store (`_KeyringBackend` — Windows Credential Manager / macOS Keychain / Linux Secret Service), `credentials` metadata table on the canonical backend engine (`mini_kio/backend/models.py::CredentialRecordModel`), explicit-consent `store(consent=True)`, `OAuthFlowTemplate` (auth URL → callback → token exchange → secure storage), and `credential_missing()` / `register_credential_prerequisite()` wired through the Slice 7 `_PREREQUISITE_RESOLVERS` registry (no parallel credential path). Security invariants enforced: secrets only in keyring (never SQLite/logs/repr/responses), `_sanitize_metadata()` drops secret-shaped metadata keys, `Credential.__repr__` redacts, empty-secret rejected, missing credentials never fabricated. Evidence: 22 targeted tests (`tests/test_slice8_credential_vault.py`) incl. mandatory secret-leak proof (`TEST_SECRET_DO_NOT_LEAK_123` absent from logs/SQLite/repr/responses) + 21 Slice 7 tests + 270 regression tests green; 2 pre-existing gate2 failures baseline-identical. `keyring>=25.0` added to `requirements.txt`. Slice 9 (lifecycle: refresh/revoke UI/expiry at gate) remains OPEN.
+
 ### Slice 9 — Credential Vault: Lifecycle (B.2)
 Refresh expired tokens. Revoke on user request. List/manage UI. Detect expiry at Execution Gate → request re-auth.
 

@@ -33,6 +33,32 @@ _PREREQUISITE_LABELS = {
 }
 _GENERIC_PREREQUISITE_PHRASE = "some setup before I can do that"
 
+_PROVIDER_DISPLAY = {
+    "google": "Google",
+    "gmail": "Gmail",
+    "telegram": "Telegram",
+    "github": "GitHub",
+    "discord": "Discord",
+    "openai": "OpenAI",
+    "microsoft": "Microsoft",
+    "outlook": "Outlook",
+    "spotify": "Spotify",
+    "youtube": "YouTube",
+}
+
+
+def _credential_label(prereq_id: str) -> str:
+    """Map a `credential:<provider>:<type>` prerequisite id to natural language
+    without leaking internal ids."""
+    parts = prereq_id.split(":")
+    if len(parts) >= 3 and parts[0] == "credential":
+        provider = parts[1]
+        cred_type = parts[2]
+        type_word = cred_type.replace("_", " ")
+        display_provider = _PROVIDER_DISPLAY.get(provider.lower(), provider.capitalize())
+        return f"your {display_provider} {type_word} credentials"
+    return ""
+
 
 def reset_diag():
     _DIAG["runtime_response_formatted"] = 0
@@ -217,7 +243,7 @@ def _format_prerequisite(details: Dict[str, Any]) -> str:
     if not missing:
         return "I need some setup before I can do that."
     labels = [
-        _PREREQUISITE_LABELS.get(str(m), "")
+        _PREREQUISITE_LABELS.get(str(m)) or _credential_label(str(m))
         for m in missing
     ]
     labels = [label for label in labels if label]
