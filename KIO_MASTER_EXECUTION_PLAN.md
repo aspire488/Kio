@@ -138,7 +138,7 @@ Goals       Oracle       Learning           ← ALL THREE: UNVERIFIED
             mini_kio/core/runtime.py, mini_kio/execution/capability_router.py
                 │
 Browser • MCP • Desktop • APIs • Automation
-   Browser: CURRENT (mini_kio/runtime/browser_runtime/, CAP.BROWSER.001 PARTIAL/BROKEN per LIM.002)
+   Browser: CURRENT (mini_kio/runtime/browser_runtime/; reference-resolution bug class fixed 2026-08-09 via target_ref.py)
    MCP:     CURRENT infra only (mini_kio/runtime/mcp_runtime/, CAP.MCP.001)
    Desktop: ROADMAP (mini_kio/desktop/ is empty)
    APIs:    CURRENT (provider stack + provider_registry)
@@ -296,9 +296,9 @@ The prompt's illustrative Tier 1 says "Observation linkage, identity synchroniza
 - Conversation quality: deterministic intent classifier returns before LLM (per Slice 3 routing repairs in KIO_Implementation_Plan.md). Misrouting cases ("Interstellar cast" type queries) no longer fall to web-summary templates.
 - Continuity: unified SessionContext (per Gate C-1, already shipped per CAP.STATE.001).
 - Memory: per-item retention metadata + confidence decay wired (FQ-05 per Slice 18).
-- Browser: still PARTIAL/BROKEN; not yet user-claimable.
+- Browser: reference-resolution bug class fixed 2026-08-09 (`target_ref.py`; tab-scoped close; contextual referents; focus/switch) — live-verified; Shorts/visual/workflow remain OPEN.
 - Voice/Desktop/Mobile: still ROADMAP.
-- Goal management: still ROADMAP (planning layer exists but is unwired per Convergence Report).
+- Goal management: still ROADMAP (no goals module exists — corrected 08-09; multi-step command composition lives in `command_router._execute_multi_step`).
 - Knowledge: tier 1 doesn't add new knowledge; it reduces routing fragmentation.
 - Automation: still ROADMAP (n8n layer not present in repo).
 - Initiative: still ROADMAP per CAP.AUTONOMY.001.
@@ -308,7 +308,7 @@ The prompt's illustrative Tier 1 says "Observation linkage, identity synchroniza
 - Conversation quality: response composer no longer monolithic (conversation_responder.py refactor per Convergence Report).
 - Continuity: cross-process event bus works; observations survive process boundaries.
 - Memory: per-tier-2 capability — memory inspection command begins to be exercisable (per MEM.002 requirement).
-- Browser: PARTIAL/BROKEN retained but reference-resolution bug tracked.
+- Browser: reference-resolution bug class fixed 08-09; Shorts + semantic media selection remain OPEN.
 - Voice/Desktop/Mobile: still ROADMAP.
 - Goal management: still ROADMAP.
 - Knowledge: retrieval router (mini_kio/knowledge/retrieval_router.py) becomes single authority (CURRENT today).
@@ -320,7 +320,7 @@ The prompt's illustrative Tier 1 says "Observation linkage, identity synchroniza
 - Conversation quality: response composer draws on AURA-style reflection if AURA is active; otherwise falls through to deterministic composition.
 - Continuity: cross-device continuity seam in place (awaiting Aurora provisioning).
 - Memory: AURA memory subsystem reachable per aura_integration.py request_memory() — returns real memories if AURA active.
-- Browser: still PARTIAL/BROKEN unless Tier 3 includes the bug-fix slice.
+- Browser: reference-resolution bug class fixed 08-09; remaining OPEN items (Shorts, semantic media selection) targeted here.
 - Voice: still ROADMAP.
 - Desktop: still ROADMAP.
 - Goal management: AURA goal subsystem reachable per request_goal() — only if Tier 3 Founder approval.
@@ -449,18 +449,18 @@ Tagged: ROADMAP. No mobile code in repo today.
 
 ## SECTION 11 — BROWSER ROADMAP
 
-Browser is the most mature execution capability (per CAP.BROWSER.001 status PARTIAL/BROKEN, LIM.002 for the reference-resolution bug, and the verified mini_kio/runtime/browser_runtime/ implementation).
+Browser is the most mature execution capability (per CAP.BROWSER.001, the verified mini_kio/runtime/browser_runtime/ implementation, and the connector + media + state-verification stack).
 
 Evolution trajectory:
-1. Tool execution (CURRENT, PARTIAL/BROKEN) — mini_kio/runtime/browser_runtime/ Playwright-based, 13 commands, lifecycle + crash recovery + health monitoring. Per LIM.002: "play it"/"first result" resolve literally. Verified broken.
-2. State awareness — Track page state, navigation history, session state (per mini_kio/browser_session_registry.py, mini_kio/browser_tab_controller.py CURRENT surface). Bug fix for reference resolution included in Tier 3 Slice work.
+1. Tool execution (CURRENT) — mini_kio/runtime/browser_runtime/ Playwright-based, 13 commands, lifecycle + crash recovery + health monitoring. **2026-08-09: the reference-resolution bug class was substantially fixed** — canonical target identity (`mini_kio/core/target_ref.py`) keeps web-app/tab targets from collapsing into the browser process; "Close it" after "Open ChatGPT" closes the ChatGPT tab (Chrome stays alive); contextual referents (it/this/that) resolve against safe stored target names; focus/switch targets browser tabs or native app windows. Live-verified on Telegram. Remaining OPEN items: YouTube Shorts control, semantic media selection, visual-understanding and workflow tiers.
+2. State awareness — Track page state, navigation history, session state (per mini_kio/browser_session_registry.py, mini_kio/browser_tab_controller.py CURRENT surface). Extended 08-09 with "What's open?" (tabs + tracked running apps) and "What's playing?" (live media registry).
 3. Visual understanding — screenshots + visual diff for state confirmation (via Playwright MCP, per KIO_Implementation_Plan.md).
 4. Workflow execution — multi-step browser workflows with rollback.
 5. Persistent browser memory — cookies, sessions, history preserved across KIO restarts (subject to MEM.001 policy: inspectable/correctable/deletable).
 6. Multi-tab reasoning — KIO reasons across tabs.
 7. Goal-driven browsing — KIO opens browser autonomously to fulfill user goals (still gated by INV.006 — only on explicit request).
 
-Tagged: CURRENT for the runtime; PARTIAL/BROKEN for the reference-resolution bug; ROADMAP for the higher tiers of capability.
+Tagged: CURRENT for the runtime (reference-resolution bug class fixed 2026-08-09); ROADMAP for the higher tiers of capability (visual understanding, workflows, persistent browser memory, multi-tab reasoning, goal-driven browsing) and for remaining OPEN items (Shorts, semantic media selection).
 
 ---
 
@@ -511,9 +511,9 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Blocking risks: pipeline-vs-bypass asymmetry.
 - Canonical Owner: KIO Core Team. Consumes: intents. Produces: routed actions. Depends On: runtime. Used By: runtime. Retirement Plan: none.
 
-**3. Execution Coordinator (mini_kio/execution/engine.py, 19665 bytes)**
+**3. Execution Coordinator (_ExecutionCoordinator in mini_kio/core/pipeline/__init__.py — CORRECTED 2026-08-09)**
 - Purpose: Coordinates capability execution; route → execute → verify → report.
-- Maturity: CURRENT.
+- Maturity: CURRENT. (Correction: `mini_kio/execution/engine.py` is the workflow-engine class `WorkflowEngine` used by `workflow_provider.py`/`diagnostics.py`; the live pipeline coordinator is `_ExecutionCoordinator` at `pipeline/__init__.py:737`. 08-09 added truthful multi-step aggregation inside this coordinator.)
 - Final vision: Single execution entry point with prerequisite gating.
 - Dependencies: execution_boundary, capability_registry, provider_registry.
 - Incoming links: core runtime → engine.
@@ -644,15 +644,15 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Canonical Owner: Conversation Team. Consumes: intent ack, memory recall, knowledge result, character. Produces: composed response. Depends On: memory, knowledge, character_knowledge. Used By: conversation. Retirement Plan: none.
 
 **14. Browser Runtime (mini_kio/runtime/browser_runtime/)**
-- Purpose: Playwright-based browser automation.
-- Maturity: CURRENT (production per Convergence Report), but PARTIAL/BROKEN for reference resolution per LIM.002.
+- Purpose: Playwright-based browser automation + connector (browser_connector/) + media playback + state verification.
+- Maturity: CURRENT. **CORRECTED 2026-08-09: reference-resolution bug class fixed** (target identity via `mini_kio/core/target_ref.py`; tab-scoped close; contextual referents; focus/switch; "what's open"/"what's playing") — live-verified on Telegram. Remaining OPEN: YouTube Shorts control, semantic media selection, visual/workflow tiers.
 - Final vision: Goal-driven browsing with persistent memory.
 - Dependencies: Playwright (external, verified in repo), mini_kio/browser_connector/ (CURRENT).
-- Incoming links: execution engine.
+- Incoming links: execution engine (pipeline `_ExecutionCoordinator`).
 - Outgoing links: → user interfaces.
-- Required completion Tier: Tier 3 (bug fix) → Tier 5 (goal-driven).
+- Required completion Tier: Tier 3 (remaining bug-fix items: Shorts, semantic media selection) → Tier 5 (goal-driven).
 - Validation: Playwright MCP live validation; reference-resolution regression test.
-- Blocking risks: known bug per LIM.002.
+- Blocking risks: Shorts control + semantic media selection OPEN per LIM.002 remaining scope.
 - Canonical Owner: Browser Team. Consumes: browser commands. Produces: browser state. Depends On: Playwright. Used By: execution engine. Future Owner: unchanged. Retirement Plan: none.
 
 **15. Browser Operator (mini_kio/core/browser_operator.py, browser_session_registry.py, browser_tab_controller.py)**
@@ -896,10 +896,10 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Required completion Tier: Tier 1.
 - Canonical Owner: Reliability Team. Consumes: runtime events. Produces: logs, metrics. Depends On: runtime. Used By: operators. Future Owner: unchanged. Retirement Plan: none.
 
-**40. Configuration (mini_kio/core/config.py, .env, KIO_Implementation_Plan.md Slice 12 Startup Configuration Validation)**
+**40. Configuration (mini_kio/core/config.py, .env, KIO_Implementation_Plan.md Slice 14 Startup Configuration Validation)**
 - Purpose: Runtime configuration + validation.
-- Maturity: CURRENT (LOCKED, 200 lines).
-- Required completion Tier: Tier 1 (Startup Configuration Validation per Slice 12).
+- Maturity: CURRENT (LOCKED, 200 lines) for config loading; **Startup Configuration Validation (Slice 14) is NOT implemented** — corrected 2026-08-09 (the historical "Slice 12" reference was a stale number; the IP ledger uses Slice 14).
+- Required completion Tier: Tier 1 (Startup Configuration Validation per Slice 14).
 - Canonical Owner: Platform Team. Consumes: env, config files. Produces: validated config. Depends On: —. Used By: every subsystem. Future Owner: unchanged. Retirement Plan: none.
 
 **41. Security (mini_kio/core/intent_validator.py, execution_boundary.py, KIO_IDENTITY_CANON.md §5.2.4 SEC.001-003)**
@@ -932,11 +932,11 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Required completion Tier: Tier 1 (seam integration) → Tier 3 (receiver activation, Founder-gated).
 - Canonical Owner: AURA Integration Team. Consumes: KIO execution events. Produces: observation events. Depends On: runtime. Used By: AURA (when active). Future Owner: unchanged. Retirement Plan: none.
 
-**46. Event Bus (runtime/ObservationBus.py, communication/EventBus.py)**
+**46. Event Bus (CORRECTED 2026-08-09: browser-scoped only — mini_kio/runtime/browser_runtime/events.py)**
 - Purpose: Cross-process event publication.
-- Maturity: CURRENT (utility) → ROADMAP (single authority).
+- Maturity: PARTIAL — the only `EventBus` implementation is browser-scoped (`runtime/browser_runtime/events.py`). The files cited historically (`runtime/ObservationBus.py`, `communication/EventBus.py`) do **not exist**. Global single event authority remains ROADMAP.
 - Required completion Tier: Tier 2 (single authority per Convergence Report).
-- Canonical Owner: Platform Team. Consumes: events. Produces: routed events. Depends On: —. Used By: every subsystem. Future Owner: unchanged. Retirement Plan: retire duplicate event namespaces per Convergence Report.
+- Canonical Owner: Platform Team. Consumes: events. Produces: routed events. Depends On: —. Used By: browser runtime only today. Future Owner: unchanged. Retirement Plan: retire duplicate event namespaces per Convergence Report.
 
 **47. Knowledge Graph (mini_kio/knowledge/)**
 - Purpose: Structured retrieval over knowledge providers.
@@ -956,9 +956,9 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Required completion Tier: Tier 3 (Founder-gated).
 - Canonical Owner: AURA Team. Consumes: observations. Produces: belief updates. Depends On: AURA loop. Used By: reasoning. Future Owner: unchanged. Retirement Plan: none.
 
-**50. Goals (mini_kio/core/executive.py, task_engine.py, orchestrator.py — CURRENT but unwired)**
+**50. Goals (CORRECTED 2026-08-09 — NOT IMPLEMENTED)**
 - Purpose: Multi-step goal tracking.
-- Maturity: CURRENT (built but never called by routing path per Convergence Report).
+- Maturity: **ROADMAP / NOT STARTED.** `mini_kio/core/executive.py` and `mini_kio/core/orchestrator.py` do **not exist**; only `task_engine.py` exists (a task helper, not a goal registry). The historical "CURRENT (built but unwired)" claim was false — no goals module has ever been committed. Multi-step execution is handled by `command_router._execute_multi_step` (08-09, truthful aggregation), which is a command-composition path, not a Goal Manager.
 - Required completion Tier: Tier 3 (wiring per Slice 20+).
 - Canonical Owner: Planning Team. Consumes: user goals. Produces: plans. Depends On: capability registry. Used By: runtime. Future Owner: unchanged. Retirement Plan: none.
 
@@ -1012,9 +1012,9 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Required completion Tier: Tier 3 (Founder-gated).
 - Canonical Owner: AURA Team. Consumes: identity events. Produces: identity state. Depends On: AURA loop, memory. Used By: continuity, relationships. Future Owner: unchanged. Retirement Plan: none.
 
-**59. Observations (mini_kio/execution/observations.py CURRENT)**
+**59. Observations (mini_kio/execution/observations.py CURRENT — VERIFIED WIRED 2026-08-09)**
 - Purpose: Observation emission.
-- Maturity: CURRENT (7863 bytes).
+- Maturity: CURRENT (7863 bytes). (Correction: an earlier audit claimed zero importers — **disproven**; `get_observation_stream()` is imported and invoked at HEAD in `core/providers/desktop_provider.py`, `core/providers/workflow_provider.py`, and `core/mcp/provider.py`.)
 - Required completion Tier: Tier 1 (integration).
 - Canonical Owner: AURA Integration Team. Consumes: execution events. Produces: observation records. Depends On: runtime. Used By: AURA seam. Future Owner: unchanged. Retirement Plan: none.
 
@@ -1124,20 +1124,20 @@ Per-subsystem rows. Each row has: Current State / Target State / Dependencies / 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Core Runtime | LOCKED v1.1 | Single dispatch authority | execution_boundary, capability_registry | — | Low (bypass routes per Convergence Report) | P0 | 1 | KIO Core | Integration tests; live Telegram | Runtime regression suite | Single dispatch entry for every interface | No bypass paths verified by audit |
 | Pipeline | CURRENT | Stable pipeline | runtime | runtime | Low | P1 | 1 | KIO Core | Pipeline tests | Pipeline regression | No monolithic routing | All routes go through pipeline |
-| Execution Coordinator | CURRENT | Single execution entry with prerequisite gating | execution_boundary | Tier 1 prerequisite gate | Medium (SEC.002 async/sync bridging) | P0 | 1→2 | Execution | Execution integration + gate tests | Execution regression | Every action gated | No ungated path from intent to action |
+| Execution Coordinator | CURRENT (`_ExecutionCoordinator` in `pipeline/__init__.py`; truthful multi-step aggregation 08-09) | Single execution entry with prerequisite gating | execution_boundary | Tier 1 prerequisite gate | Medium (SEC.002 async/sync bridging) | P0 | 1→2 | Execution | Execution integration + gate tests | Execution regression | Every action gated | No ungated path from intent to action |
 | Capability Resolver | CURRENT (Gate C-2, 33 handlers) | Single discoverable registry | capability_registry, provider_registry, command_registry | ARCH.003 resolution | Medium (triple-registry fragmentation) | P0 | 1 | KIO Core | Capability discovery tests | Discovery regression | Single resolution path | All three registries consolidated |
 | Provider Registry | CURRENT (15 providers) | Single canonical provider abstraction | provider_base | D-08 reconciliation | Medium (two provider_base interfaces) | P0 | 1 | Execution + LLM | Provider tests; failover tests | Provider regression | Single interface, single registry | One canonical provider registry |
 | Capability Registry | CURRENT (Gate C-2) | Single discoverable capability layer | execution engine | — | Low | P1 | 1 | KIO Core | Capability discovery test | Capability regression | All capabilities discoverable | No orphan capabilities |
 | Execution Boundary | LOCKED | Hard safety gate; prerequisite gate | intent_validator | Slice 8 prerequisite gate | Low | P0 | 1 | Safety | Boundary tests; safety integration | Safety regression | No bypass; every action gated | Verified no bypass routes |
-| Session Context | CURRENT (Gate C-1) | Unified context; 6 legacy merged | session_state, conversation_context, media_context, continuity_state, artifact_memory | Legacy migration | Low | P0 | 1 | Context | Unified-context integration tests | Context regression | One context authority | Six legacy systems retired |
+| Session Context | CURRENT (Gate C-1; 08-09 referent sanitization — safe target names stored, not serialized routing strings) | Unified context; 6 legacy merged | session_state, conversation_context, media_context, continuity_state, artifact_memory | Legacy migration | Low | P0 | 1 | Context | Unified-context integration tests | Context regression | One context authority | Six legacy systems retired |
 | Memory | CURRENT (basic + FQ-05) | Inspectable/correctable/deletable per MEM.001 | backend/repositories | MEM.001 UX gap | Low | P0 | 1→4 | Memory | Memory governance tests; inspection UX | Memory regression | Full governance UX | User can inspect/correct/delete every memory |
 | Fact Repository | CURRENT | Single retrieval surface | backend/db, knowledge providers | — | Low (provider count drift) | P1 | 2 | Knowledge | Retrieval integration tests | Retrieval regression | One retrieval surface | All retrieval routes through one router |
 | Identity | CURRENT | Cross-platform identity | backend/db, identity_resolver | — | Medium (drift per KIO_IDENTITY_CANON §13) | P0 | 1 | Identity | Identity regression suite (canon §15) | Identity regression | KIO identity never drifts | Canon invariants upheld |
 | Conversation | CURRENT (4-state) | Extended state machine | intent_classifier, orchestrator, responder | Slice 16 PLANNING/EXECUTING/VERIFYING | Medium (monolithic responder) | P1 | 1→2 | Conversation | Conversation integration tests | Conversation regression | Composed responses | Composer decomposed |
 | Response Composer | CURRENT (monolithic) | Composed sections | memory, knowledge, character | Tier 2 refactor | Medium | P1 | 2 | Conversation | Composer integration tests | Composer regression | Composable sections | Monolith split |
-| Browser Runtime | CURRENT (PARTIAL/BROKEN) | Goal-driven browsing | Playwright, browser_connector | LIM.002 reference-resolution bug fix | High (known broken) | P0 | 3→5 | Browser | Playwright MCP live validation | Browser regression including reference-resolution test | No reference-resolution bug | Reference resolution works reliably |
+| Browser Runtime | CURRENT (reference-resolution bug class fixed 2026-08-09 via `target_ref.py`; tab-scoped close, focus/switch, contextual referents — live-verified) | Goal-driven browsing | Playwright, browser_connector | LIM.002 remaining (Shorts; semantic media selection; visual/workflow tiers) | Medium (bug class fixed; remaining items OPEN) | P0 | 3→5 | Browser | Playwright MCP live validation | Browser regression including reference-resolution test | No reference-resolution bug | Reference resolution works reliably |
 | Browser Operator | CURRENT | Unified browser command layer | browser_runtime | Top-level browser/ consolidation | Low | P1 | 3 | Browser | Browser operator tests | Browser regression | One browser command layer | Top-level browser/ retired |
-| Media Runtime | CURRENT (8 modules; playback/control recovery COMPLETE 2026-08-08 b5db667) | Intelligent media recommendation | media_providers, recommender | — | Low | P2 | 4 | Media | Media integration tests | Media regression | Recommendation activated | Media intelligence live |
+| Media Runtime | CURRENT (8 modules; playback recovery 08-08 b5db667; state-aware control 08-09: now-playing, verified pause/resume, contextual references) | Intelligent media recommendation | media_providers, recommender | Media entity resolution / semantic selection OPEN | Low | P2 | 4 | Media | Media integration tests | Media regression | Recommendation activated | Media intelligence live |
 | Media Intelligence | CURRENT (multi-provider) | Single retrieval surface | media_providers | — | Low | P1 | 2 | Media | Media intelligence tests | Media regression | Provider failover | Single router, all providers routed |
 | Media Session | CURRENT | Unified media context in SessionContext | session_context | Legacy migration | Low | P1 | 1 | Media | Session continuity tests | Session regression | Media context in SessionContext | MediaEntityMemory/Context/ArtifactMemory retired |
 | Media Recommendation Engine | CURRENT (basic) | Confidence-aware recommendation | memory, knowledge | AURA preference learning | Low | P2 | 4 | Media | A/B tests | Media regression | Confidence surfaced | Preference learning active |
@@ -1155,7 +1155,7 @@ Per-subsystem rows. Each row has: Current State / Target State / Dependencies / 
 | Audio Pipeline | ROADMAP | silero-vad + rnnoise | — | Module build | High | P2 | 4 | Voice | Audio tests | Audio regression | VAD + noise suppression work | Audio pipeline shipped |
 | Desktop Interface | ROADMAP | Full desktop UI | runtime | Desktop runtime | High | P2 | 4→5 | Desktop | Desktop integration | Desktop regression | All UI surfaces work | Desktop shipped |
 | CLI | CURRENT | Stable terminal interface | runtime | — | Low | P1 | 1 | Interface | Terminal tests | Terminal regression | Stable CLI | Maintained |
-| Telegram | CURRENT | Stable Telegram channel | runtime | — | Low | P1 | 1 | Interface | Live Telegram validation | Telegram regression | Stable | Maintained |
+| Telegram | CURRENT (concurrent updates + responsiveness during long media actions verified live 08-09) | Stable Telegram channel | runtime | — | Low | P1 | 1 | Interface | Live Telegram validation | Telegram regression | Stable | Maintained |
 | Discord | PARTIAL/CURRENT | Stable Discord channel | runtime, platform transport | Shipping verification | Medium | P2 | 1 | Interface | Live Discord validation | Discord regression | Stable | Verified shipped |
 | Future Mobile Interface | ROADMAP | Mobile companion | runtime | Module build | High | P3 | 5 | Mobile | Mobile integration | Mobile regression | Companion works | Mobile shipped |
 | Developer Mode | ROADMAP | Full introspection | diagnostics, runtime | Module build | Medium | P2 | 4 | DX | DX tests | DX regression | Introspection live | DX shipped |
@@ -1167,11 +1167,11 @@ Per-subsystem rows. Each row has: Current State / Target State / Dependencies / 
 | CI | CURRENT | Continuous integration | tests, validation harness | — | Low | P1 | 1 | DevOps | CI runs | CI regression | CI green | CI maintained |
 | Telemetry | CURRENT | Runtime metrics | — | — | Low | P1 | 1 | Reliability | Metric inspection | Telemetry regression | Metrics visible | Telemetry retained |
 | AURA Integration | CURRENT (200 lines; receiver UNVERIFIED) | Full AURA seam | runtime | Founder approval for receiver activation | High (UNVERIFIED) | P0 | 1→3 | AURA Integration | AURA seam tests | AURA seam regression | Seam observable end-to-end | Receiver active or seam verified stubbed |
-| Event Bus | CURRENT (utility) | Single event authority | — | Convergence Report: duplicate namespaces | Medium | P1 | 2 | Platform | Event bus tests | Event bus regression | One event bus | Duplicate namespaces retired |
+| Event Bus | PARTIAL (browser-scoped only — `runtime/browser_runtime/events.py`; corrected 08-09) | Single event authority | — | Convergence Report: duplicate namespaces | Medium | P1 | 2 | Platform | Event bus tests | Event bus regression | One event bus | Duplicate namespaces retired |
 | Knowledge Graph | CURRENT (multi-provider) | Single retrieval surface + AURA knowledge graph | knowledge providers, AURA loop | AURA activation | Medium | P1 | 2→3 | Knowledge | Retrieval integration | Retrieval regression | Single retrieval surface | Single retrieval surface shipped |
 | Reasoning | ROADMAP | Reasoning layer | AURA loop | Founder approval (Gate C-7) | High (UNVERIFIED) | P0 | 3 | AURA | Reasoning tests | Reasoning regression | Reasoning activates | Reasoning live |
 | Beliefs | ROADMAP | Belief state | AURA loop | Founder approval | High (UNVERIFIED) | P0 | 3 | AURA | Belief tests | Belief regression | Beliefs tracked | Beliefs live |
-| Goals | CURRENT (built, unwired) | Multi-step goal tracking | capability_registry | Wiring per Slice 20+ | Medium | P1 | 3 | Planning | Goal tests | Goal regression | Goals live | Goals shipped |
+| Goals | ROADMAP / NOT STARTED (no goals module; `executive.py`/`orchestrator.py` absent — corrected 08-09) | Multi-step goal tracking | capability_registry | Build from scratch per Slice 20+ | Medium | P1 | 3 | Planning | Goal tests | Goal regression | Goals live | Goals shipped |
 | World Model | ROADMAP | Persistent world state | AURA loop, beliefs | Founder approval | High (UNVERIFIED) | P0 | 3 | AURA | World model tests | World model regression | World model live | World model shipped |
 | Reflection | ROADMAP | Reflection on prior interactions | AURA loop, memory | Founder approval | High (UNVERIFIED) | P1 | 4 | AURA | Reflection tests | Reflection regression | Reflection live | Reflection shipped |
 | Learning | ROADMAP | Preference + behavior learning | AURA loop, memory | Founder approval | High (UNVERIFIED) | P1 | 4 | AURA | Learning tests | Learning regression | Learning live | Learning shipped |
@@ -1208,9 +1208,9 @@ Cells use: Not Started / Prototype / Partial / Functional / Production Ready / E
 | Reasoning | Not Started | Not Started | Not Started | Prototype (Founder-gated) | Partial | Functional | Enterprise Ready |
 | Beliefs | Not Started | Not Started | Not Started | Prototype (Founder-gated) | Partial | Functional | Enterprise Ready |
 | World Model | Not Started | Not Started | Not Started | Prototype (Founder-gated) | Partial | Functional | Enterprise Ready |
-| Goals | Partial (built, unwired CURRENT) | Partial | Partial | Functional | Functional | Production Ready | Enterprise Ready |
-| Browser | Partial (PARTIAL/BROKEN CURRENT, LIM.002) | Partial | Partial | Functional (after bug fix) | Production Ready | Enterprise Ready | Enterprise Ready |
-| Media | Functional (CURRENT 8 modules) | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
+| Goals | Not Started (no goals module — corrected 08-09) | Partial | Partial | Functional | Functional | Production Ready | Enterprise Ready |
+| Browser | Partial (reference-resolution bug class fixed 2026-08-09; Shorts/visual/workflow OPEN) | Partial | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready |
+| Media | Functional (CURRENT 8 modules; playback verified + state-aware control 08-09) | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
 | Desktop | Not Started (empty dir) | Not Started | Not Started | Not Started | Prototype | Functional | Enterprise Ready |
 | Voice | Not Started (no module) | Not Started | Not Started | Not Started | Prototype | Functional | Enterprise Ready |
 | Mobile | Not Started | Not Started | Not Started | Not Started | Not Started | Prototype | Functional |
@@ -1218,7 +1218,7 @@ Cells use: Not Started / Prototype / Partial / Functional / Production Ready / E
 | Automation | Not Started (no n8n) | Not Started | Not Started | Not Started | Partial | Functional | Enterprise Ready |
 | Plugins | Not Started | Not Started | Not Started | Not Started | Not Started | Prototype | Functional |
 | MCP | Functional (infra only CURRENT) | Functional | Functional (resource limits) | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
-| Execution | Production Ready (CURRENT LOCKED) | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
+| Execution | Production Ready (CURRENT LOCKED; truthful multi-step aggregation + verified per-action outcomes 08-09) | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
 | AURA Integration | Partial (200-line seam, receiver UNVERIFIED) | Functional (seam observable) | Functional | Functional (Founder-gated) | Functional | Production Ready | Enterprise Ready |
 | Testing | Functional (CURRENT) | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
 | CI | Functional (CURRENT) | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
@@ -1335,7 +1335,7 @@ Critical constraint (repeated): Victus must NEVER become the permanent home of c
 | CLI | Functional | Stable | Stable | Direct dispatch | Same seam | Same as Telegram | Yes (when KIO process running) | Same as Telegram |
 | Desktop | Not Started (empty dir) | Prototype (Tier 4) | Full (Tier 5) | Primary interface; full UI | Same seam | Cognition on Aurora | Yes (with local LLM fallback) | Full sync via Aurora |
 | Voice | Not Started (no module) | Prototype (Tier 4) | Full (Tier 5) | Voice I/O → KIO dispatch | Same seam | Same as Desktop | Yes (local STT/TTS) | Full sync |
-| Browser | Production (PARTIAL/BROKEN) | Functional (Tier 3 bug fix) | Full (Tier 5) | Browser is a capability, not an interface; Web UI as interface is ROADMAP | n/a | n/a | n/a | n/a |
+| Browser | Production (reference-resolution bug class fixed 2026-08-09; Shorts/semantic-media OPEN) | Functional (remaining OPEN items) | Full (Tier 5) | Browser is a capability, not an interface; Web UI as interface is ROADMAP | n/a | n/a | n/a | n/a |
 | API | Functional (LLM gateway; not external API) | ROADMAP | Public API gated | Internal API surface | Same seam | Same | Yes (when KIO process running) | Same as Telegram |
 | Future Mobile | Not Started | Companion (Tier 5) | Companion | Thin transport → KIO | Same seam | Same as Desktop | Yes (cached context) | Full sync |
 | Future Web Dashboard | Not Started | ROADMAP | Production | Thin web client → KIO API | Same seam | Same | Yes (cached) | Same |
@@ -1446,15 +1446,39 @@ Live validation subsequently confirmed: Play / Pause / Resume / Play it / Play a
 
 **THEN (OPEN / INVESTIGATION PENDING) — YouTube Shorts pause/resume:** normal YouTube playback control is working; pause/resume for YouTube Shorts is not yet confirmed reliable. No root cause asserted. The Shorts investigation must compare the existing normal YouTube player-control path against `youtube.com/shorts/...` and determine the actual player/control-state difference before modifying anything. Shorts are NOT claimed fixed.
 
+### Execution System + Contextual Control Milestone (cross-cutting, non-gate update — 2026-08-09)
+
+**COMPLETED — Execution-system target-identity fix + three user-visible capabilities** (evidence: `KIO_TARGET_IDENTITY_FORENSIC_AUDIT_20260809.md`, `KIO_EXECUTION_SYSTEM_FIX_AND_CAPABILITIES_20260809.md`):
+The failure chain "Open ChatGPT → Close it killed the whole Chrome session" was traced to six systemic defects and fixed at the owning layers: (1) web-app opens serialized as `chrome::open_url::<url>::<name>` capability strings; (2) `close_app` collapsed targets via `key.split("::")[0]` → killed the browser process for web-app targets; (3) `close_tab` escalated to `close_app` on failure (scope escalation); (4) raw serialized targets stored as conversational referents; (5) web opens asserted success without tab-identity verification; (6) multi-step requests reported blanket "done" from unverified ACKs, and raw internal strings leaked into responses.
+Fixes (all in current working tree, uncommitted at HEAD): canonical target identity (`mini_kio/core/target_ref.py` — parse/safe-name/display-name); web-target close at tab scope (`_close_web_target`) — never a browser kill; web-open tab-identity verification (`_verify_web_tab_opened`); referent sanitization in `context_manager` + `execution_boundary`; brand-cased display names in the response formatter (no raw URLs/PIDs/capability strings); truthful per-step verification + partial-success aggregation in `command_router._execute_multi_step`; focus/switch for browser tabs + native app windows; "what's open"/"what's playing" intents.
+**USER-VISIBLE CAPABILITIES (live-verified):** (A) context-aware computer control — "What's open?", switch/focus targets; (B) composed multi-action tasks — "Open ChatGPT and Telegram" with independent per-target verification; (C) state-aware media control — "What's playing?", verified Pause/Resume, contextual media references.
+**DEMO SCENARIOS (live Telegram, 2026-08-09):** `Open ChatGPT` → "Opened ChatGPT in Chrome." · `Close it` → "Closed ChatGPT tab." (Chrome process count unchanged — tab scope, not browser kill) · `What is open?` → tabs + tracked apps listed · `Play Never Gonna Give You Up` → playback verified `paused=False` · `Pause it` → "Paused." · `What is playing?` → "Paused on Never Gonna Give You Up." · `Resume it` → "Resumed." · `Open ChatGPT and Telegram` → "Opened ChatGPT and Telegram." · `Hi` during media ≈1.7s while media continued · `Close ChatGPT tab` / `Close Telegram` → tab-scoped closes, Chrome alive.
+**ACCEPTANCE EVIDENCE:** 26 new targeted tests (`tests/test_target_identity_fixes.py`) + 200 targeted regression tests green across 13 suites (media recovery, connector reconnect, state verification, pause/resume, EFG routing, R11 search, pending action, history pollution, gate5 registry/repairs); pre-existing failures baseline-identical. No new architecture was introduced — fixes route through the existing pipeline/coordinator/boundary.
+**NOT CHANGED:** media entity resolution / semantic selection (OPEN), Shorts (OPEN), AURA (unchanged), Goals (still absent), Credential Vault (still absent).
+
+### Completion estimate (recalculated 2026-08-09, honest method)
+Prior audit (08-08): subsystems fully implemented 37% (26/71) · weighted ~45–50% · user-visible ~35–40% · architectural ~50% · AURA ~10%. Recalculation method: re-derived from Section 14's 71-subsystem maturity table, counting only subsystems whose current state is genuinely implemented per source evidence (not plan prose), after the 08-09 fixes and live verification.
+
+| Lens | 08-08 audit | 08-09 recalculated | Delta source |
+|---|---|---|---|
+| Subsystems fully implemented | 37% (26/71) | ~38–39% (27–28/71) | Browser reference-resolution class fixed (previously counted broken) |
+| Weighted | ~45–50% | ~50–55% | Execution fabric + multi-step aggregation + browser/media verification hardened |
+| User-visible | ~35–40% | ~45–50% | Three new user-visible capabilities live-verified (contextual control, multi-action, state-aware media) |
+| Architectural | ~50% | ~52–55% | Target-identity abstraction + response/verification contracts |
+| AURA | ~10% | ~10% (unchanged) | No AURA work in 08-09 |
+
+Numbers are estimates, not claims of completion. ROADMAP items (AURA loop, Goals, Credential Vault, Desktop/Voice/Mobile, Tiers 4-5) remain unchanged.
+
 ### 21.1 Engineering Work (per Tier)
 
-**Tier 1:**
-- Built: ARCH.003 capability-discovery unification (Slice 6), Prerequisite Resolution Execution Gate (Slice 8), Identity Resolver wiring (Slice 9), Credential Vault (keyring-backed), Session Continuity serialization, FQ-05 memory governance (retention metadata, confidence decay, inspection/correction/deletion), FQ-06 override policy (disagree-once-then-defer), Startup Configuration Validation framework.
-- Retired: duplicate capability registries consolidated into CapabilityRegistry (per Convergence Report D-08 path).
-- Merged: 6 legacy state systems into SessionContext.
-- Canonical: CapabilityRegistry becomes single discoverable capability surface.
-- Historical: Phase 0 dead code removal (already committed per KIO_Implementation_Plan.md Line 5).
-- Documentation changes: KIO_Implementation_Plan.md Slice statuses updated; this plan's Tier 1 marked complete; canon amendments per Section 16 of canon for any ID changes.
+**Tier 1 (corrected 2026-08-09 — false completion claims removed):**
+- Built: ARCH.003 capability-discovery unification (Slice 6, `resolve_capability`), Identity Resolver wiring (Slice 10, `mini_kio/resolvers/identity_resolver.py`), Session Continuity serialization (Slices 11-12), FQ-05 memory governance (retention metadata, confidence decay, inspection/correction/deletion), FQ-06 override policy (disagree-once-then-defer), execution boundary + pipeline coordinator (LOCKED), canonical target identity + referent sanitization + truthful multi-step aggregation (08-09 cross-cutting).
+- **CORRECTED: Credential Vault (Slices 8-9) is NOT implemented** — no source file exists (only a stale `.pyc`); **Startup Configuration Validation (Slice 14) is NOT implemented** — no framework exists. Both remain OPEN per `KIO_Implementation_Plan.md` slice reconciliation.
+- Retired: Phase 0 dead code (aura/ stubs, entity_state_engine, browser/automation). **CORRECTED: duplicate registries are NOT fully consolidated** — `capability_registry`, `provider_registry`, `browser_session_registry`, `media_registry` coexist; CapabilityResolver remains the unified query path (`resolve_capability`), full registry consolidation still on D-08/ARCH.003.
+- Merged: 6 legacy state systems into SessionContext (per Convergence Report; referent sanitization added 08-09).
+- Canonical: CapabilityRegistry as single discoverable capability surface — PARTIAL (see correction above).
+- Historical: Phase 0 dead code removal (committed).
+- Documentation changes: KIO_Implementation_Plan.md slice statuses reconciled; this plan's Tier 1 markers corrected to match reality; canon amendments per Section 16 of canon for any ID changes.
 
 **Tier 2:**
 - Built: Single retrieval surface (Knowledge), single event bus authority, MCP resource limits (SEC.001 closure), response composer refactor (decomposed from monolith).
@@ -1487,11 +1511,12 @@ Live validation subsequently confirmed: Play / Pause / Resume / Play it / Play a
 
 **Tier 1 — "KIO Can Now":**
 - Remembers user identity across sessions (Identity Resolver).
-- Survives restart (Session Continuity).
-- Stops execution when prerequisites are missing (Execution Gate) and asks the user rather than fabricating.
+- Survives restart (Session Continuity, in-process).
+- Gates execution through the execution boundary and pipeline coordinator (Execution Fabric). **CORRECTED: prerequisite-gate prompting is not implemented as designed (Slices 8-9/14 absent).**
 - Inspects, corrects, and deletes individual memories (FQ-05).
 - Disagrees once with the user, then defers on repeat (FQ-06).
-- Validates all configuration on startup and tells the user exactly what is missing.
+- **CORRECTED: startup configuration validation (Slice 14) is NOT implemented.**
+- **ADDED 08-09: resolves and controls exact targets (app · browser · tab · webapp · media) without scope escalation; answers "What's open?" and "What's playing?"; executes composed multi-action requests with truthful per-target verification.**
 
 **Tier 2 — "KIO Can Now":**
 - Composes responses from explicit sections (intent ack, memory recall, knowledge result, character voice) instead of one monolithic LLM prompt.
@@ -1500,9 +1525,9 @@ Live validation subsequently confirmed: Play / Pause / Resume / Play it / Play a
 - Uses one retrieval surface across all knowledge providers with failover.
 
 **Tier 3 — "KIO Can Now" (assuming AURA not activated):**
-- Actually invokes the planning layer (executive, task_engine, orchestrator) — not just sits in the file tree unwired.
-- Resolves browser references ("play it", "first result") reliably (LIM.002 fix).
-- AURA seam is observably end-to-end (every execution emits one observation through one chokepoint).
+- Actually invokes the planning layer — **CORRECTED 08-09: no planning layer exists** (`executive.py`/`orchestrator.py` absent; multi-step command composition lives in `command_router._execute_multi_step`, which is live and truthful).
+- Resolves browser references ("play it", "Close it", "Pause it", "first result") — **substantially delivered 08-09** (target identity + contextual referents + live verification). Remaining OPEN: YouTube Shorts control and semantic media selection.
+- AURA seam is observably end-to-end (every execution emits one observation through one chokepoint) — PARTIAL (emission wired via `get_observation_stream`; receiver UNVERIFIED).
 
 **Tier 3 — "KIO Can Now" (assuming AURA activated by Founder):**
 - All of the above, plus AURA Beliefs, World Model, Reasoning, Confidence subsystems are live (subject to Founder-approved scope).
@@ -1528,9 +1553,9 @@ Live validation subsequently confirmed: Play / Pause / Resume / Play it / Play a
 - Before: User asks "Interstellar cast." KIO's heuristic misroutes to an unrelated web-summary template.
 - After: User asks "Interstellar cast." KIO routes through the single knowledge retrieval surface, returns the cast list, optionally cites sources.
 
-**Tier 3 — Browser reference (before/after).**
-- Before: User says "play it." KIO's browser reference resolver fails ("play it" resolves literally).
-- After: User says "play it." KIO resolves against SessionContext, plays the actual media item.
+**Tier 3 — Browser reference (before/after; substantially delivered 2026-08-09).**
+- Before: User says "Close it" after "Open ChatGPT" — KIO collapsed the target and killed the whole Chrome session.
+- After (live-verified): "Close it" closes the ChatGPT tab (Chrome alive); "Pause it"/"Resume it" resolve the actual current media; "What's playing?" reads live registry state; "What's open?" lists tabs + tracked apps. Remaining OPEN: Shorts control, semantic media selection.
 
 **Tier 4 — Desktop continuity (before/after).**
 - Before: User starts a research task on Telegram, switches to Desktop — no continuity.
@@ -1565,11 +1590,11 @@ For every Tier, the following test categories must pass:
 | Memory | Production Ready | Production Ready | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
 | Identity | Functional | Functional | Functional | Functional | Production Ready | Production Ready |
 | Reasoning | Not Started | Not Started | Prototype (Founder-gated) | Partial | Functional | Enterprise Ready |
-| Browser | Partial | Partial | Functional | Production Ready | Enterprise Ready | Enterprise Ready |
+| Browser | Partial (ref-resolution class fixed 08-09) | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready |
 | Desktop | Not Started | Not Started | Not Started | Prototype | Functional | Enterprise Ready |
 | Voice | Not Started | Not Started | Not Started | Prototype | Functional | Enterprise Ready |
-| Media | Functional | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
-| Goals | Partial | Partial | Functional | Functional | Production Ready | Enterprise Ready |
+| Media | Functional (playback + state-aware control verified 08-09) | Functional | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
+| Goals | Not Started | Partial | Functional | Functional | Production Ready | Enterprise Ready |
 | Planning | Partial | Partial | Functional | Functional | Production Ready | Enterprise Ready |
 | Knowledge | Functional | Production Ready | Production Ready | Enterprise Ready | Enterprise Ready | Enterprise Ready |
 | Reflection | Not Started | Not Started | Not Started | Partial | Functional | Enterprise Ready |
@@ -2008,8 +2033,8 @@ Reactive only. Responds when asked. No proactive suggestion. Tag every item CURR
 | Identity self-knowledge per canon (KIO never lies about itself; INV.001–009) | CURRENT | Canon §2, Section 22.1 |
 | Memory inspection / correction / deletion (FQ-05 governance) | CURRENT (policy), Tier 1 (UX surface) | Sections 13.9, 21.2, FQ-05 |
 | Disagrees once, then defers (FQ-06) | CURRENT (policy), Tier 1 (behavior) | FQ-06, Section 22.1 |
-| Start-up configuration validation | CURRENT (policy), Tier 1 (full UX) | Slice 12 Startup Configuration Validation |
-| Browser capability exists with known reference-resolution bug (LIM.002) | CURRENT (with disclosed limitation) | LIM.002, Section 11 |
+| Start-up configuration validation | NOT STARTED (no framework — corrected 2026-08-09) | Slice 14 Startup Configuration Validation |
+| Browser capability: reference-resolution bug class fixed (tab-scoped close, contextual referents, focus/switch) | CURRENT (fixed 2026-08-09) | Section 11, target_ref.py |
 
 Missing to reach Assistant Mode: contextual memory that visibly informs responses; cross-channel continuity beyond Telegram/CLI; proactive (suggestion-mode) behaviors.
 
