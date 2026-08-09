@@ -494,6 +494,21 @@ class _IntentClassifier:
         # --- system uptime ---
         (re.compile(r"^(?:system|pc|computer)\s+uptime\b"), "system_uptime", ""),
         (re.compile(r"^how\s+long\s+has\s+(?:my\s+|the\s+)?(?:computer|pc|system|laptop)\s+been\s+(?:running|on|up)\b"), "system_uptime", ""),
+        # --- resources / attribution / diagnostic ---
+        (re.compile(r"^resources\s*$"), "resources", ""),
+        (re.compile(r"^resource\s+usage\b"), "resources", ""),
+        (re.compile(r"^why\s+is\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|system|everything)\s+(?:so\s+)?(?:slow|laggy|lagging|sluggish)\b"), "diagnostic", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:using|eating|taking|consuming)\s+(?:up\s+|all\s+of\s+)?(?:my\s+)?(?:ram|memory)\b"), "resources_ram", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:using|eating|taking|consuming)\s+(?:up\s+|all\s+of\s+)?(?:my\s+)?(?:cpu|processor)\b"), "resources_cpu", ""),
+        # 'space' alone is only a storage query when end-anchored or with
+        # 'my' — "what is taking up space in the universe" stays knowledge.
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:using|eating|consuming)\s+(?:up\s+|all\s+of\s+)?(?:my\s+)?(?:storage|disk\s+space|disk)\b"), "resources_storage", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+taking\s+up\s+(?:all\s+of\s+)?(?:my\s+)?space\s*$"), "resources_storage", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+taking\s+up\s+(?:all\s+of\s+)?my\s+(?:space|storage|disk)\b"), "resources_storage", ""),
+        (re.compile(r"^which\s+drive(?:s)?\s+(?:is|are)\s+(?:getting\s+)?(?:full|nearly\s+full|almost\s+full)\b"), "resources_storage", ""),
+        (re.compile(r"^why\s+is\s+my\s+(?:disk|drive|storage)\s+full\b"), "resources_storage", ""),
+        (re.compile(r"^is\s+my\s+(?:disk|drive|storage)\s+(?:full|getting\s+full)\b"), "storage", ""),
+        (re.compile(r"^how\s+much\s+(?:free\s+)?(?:space|storage|disk\s+space)\s+(?:do\s+i\s+have|is\s+left|is\s+there\s+left)\b"), "storage", ""),
         # --- metrics ---
         (re.compile(r"^cpu\b"), "cpu", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+my\s+cpu\s+(?:usage|load)\b"), "cpu", ""),

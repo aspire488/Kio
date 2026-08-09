@@ -65,8 +65,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Thin interface wiring for operational slash commands.
 
-    /health /status /uptime /system /systemhealth — the capability itself is
-    system-level (deterministic classifier + mini_kio.core.operational_health);
+    /health /status /uptime /system /systemhealth /resources — the capability
+    itself is system-level (deterministic classifier +
+    mini_kio.core.operational_health);
     this handler only routes the command text through the same canonical path
     every message uses, so all interfaces behave identically.
     """
@@ -200,7 +201,7 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(
         CommandHandler(
-            ["health", "status", "uptime", "system", "systemhealth"],
+            ["health", "status", "uptime", "system", "systemhealth", "resources"],
             cmd_operational,
         )
     )

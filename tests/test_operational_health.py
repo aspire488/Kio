@@ -184,6 +184,14 @@ def _patch_metrics(monkeypatch, **kw):
     monkeypatch.setattr(ops, "_system_metrics", lambda: base)
 
 
+def _patch_volumes(monkeypatch, *vols):
+    if not vols:
+        vols = ({"mountpoint": "C:\\", "label": "C:", "fstype": "NTFS",
+                 "total_gb": 256.0, "used_gb": 117.8, "free_gb": 138.2,
+                 "percent": 46, "pressure": "ok"},)
+    monkeypatch.setattr(ops, "_storage_volumes", lambda: list(vols))
+
+
 def test_kio_health_healthy(monkeypatch):
     _patch_snap(monkeypatch)
     _patch_comps(monkeypatch)
@@ -225,12 +233,13 @@ def test_uptime_words(monkeypatch):
 
 def test_system_health_full(monkeypatch):
     _patch_metrics(monkeypatch)
+    _patch_volumes(monkeypatch)
     msg = ops.format_system_health()
     assert msg.startswith("Your system looks healthy.")
     assert "CPU: 21%" in msg
     assert "RAM: 34% (5.2 GB of 15.9 GB)" in msg
     assert "GPU: 8%" in msg
-    assert "Storage: 46% used (612.0 GB free)" in msg
+    assert "C: 46% used (138.2 GB free)" in msg
 
 
 def test_system_health_heavy(monkeypatch):
@@ -239,6 +248,7 @@ def test_system_health_heavy(monkeypatch):
 
 
 def test_unavailable_never_zero(monkeypatch):
+    monkeypatch.setattr(ops, "_storage_volumes", lambda: [])
     _patch_metrics(
         monkeypatch, cpu=None, ram_percent=None, ram_used_gb=None, ram_total_gb=None,
         disk_percent=None, disk_free_gb=None, battery_percent=None,
@@ -255,9 +265,10 @@ def test_unavailable_never_zero(monkeypatch):
 
 def test_single_metrics(monkeypatch):
     _patch_metrics(monkeypatch)
+    _patch_volumes(monkeypatch)
     assert ops.format_metric("cpu") == "CPU usage is 21%."
     assert ops.format_metric("gpu") == "GPU usage is 8%."
-    assert ops.format_metric("storage") == "Storage is 46% used (612.0 GB free)."
+    assert ops.format_metric("storage") == "Storage looks healthy:\n• C: 46% used (138.2 GB free)"
     assert ops.format_metric("battery") == "Battery is at 67% and charging."
 
 
@@ -275,9 +286,9 @@ def test_components_focused(monkeypatch):
 def test_whats_wrong_none_and_degraded(monkeypatch):
     _patch_snap(monkeypatch)
     _patch_comps(monkeypatch)
-    assert ops.format_whats_wrong() == (
-        "Nothing seems wrong right now. Everything is running normally."
-    )
+    _patch_metrics(monkeypatch)
+    _patch_volumes(monkeypatch)  # healthy volume -> no storage condition
+    assert ops.format_whats_wrong() == "I don't see anything seriously wrong right now."
     _patch_snap(monkeypatch, state="degraded", warning_count=3)
     _patch_comps(monkeypatch, browser="disconnected", tools="unavailable")
     msg = ops.format_whats_wrong()
@@ -304,9 +315,13 @@ def test_all_operational_results_clean(monkeypatch):
     _patch_snap(monkeypatch)
     _patch_comps(monkeypatch)
     _patch_metrics(monkeypatch)
+    _patch_volumes(monkeypatch)
+    monkeypatch.setattr(ops, "_top_consumers", lambda kind, limit=5: [])
+    monkeypatch.setattr(ops, "_storage_contributors", lambda v: [])
     for action in ("health", "status", "uptime", "system", "system_uptime",
                    "cpu", "ram", "gpu", "storage", "battery",
-                   "components", "whats_wrong"):
+                   "components", "whats_wrong", "resources", "resources_ram",
+                   "resources_cpu", "resources_storage", "diagnostic"):
         result = ops.operational_result(action, target="browser")
         assert result.get("success") is True
         _assert_clean(result.get("message", ""))

@@ -24,6 +24,7 @@ capability).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Optional
 
@@ -246,6 +247,339 @@ def _system_metrics() -> dict[str, Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Per-volume storage (the canonical storage view — never one global number)
+# ---------------------------------------------------------------------------
+
+# Conservative, generic pressure thresholds (documented, not arbitrary): a
+# drive with <20% free or <20 GB free is "getting full"; <10% free or <5 GB
+# free is "critically low". These are stated in explanations.
+_VOLUME_LOW_FREE_PCT = 20
+_VOLUME_CRITICAL_FREE_PCT = 10
+_VOLUME_LOW_FREE_GB = 20.0
+_VOLUME_CRITICAL_FREE_GB = 5.0
+
+# Bounded storage attribution: depth-limited scan with a hard time budget,
+# so a full-disk diagnosis never scans the whole drive or blocks the bot.
+_STORAGE_SCAN_BUDGET_S = 1.5
+_STORAGE_SCAN_DEPTH = 2
+_STORAGE_CONTRIBUTOR_MIN_GB = 5.0
+_STORAGE_CONTRIBUTOR_LIMIT = 3
+
+
+def _volume_label(mountpoint: str) -> str:
+    """Friendly volume label: 'C:\\' -> 'C:', '/' -> 'system'."""
+    mp = (mountpoint or "").strip()
+    if not mp:
+        return "disk"
+    if len(mp) >= 2 and mp[1] == ":":
+        return mp[:2].upper()
+    if mp == "/":
+        return "system"
+    return mp.rstrip("/\\") or "disk"
+
+
+def _storage_volumes() -> list[dict[str, Any]]:
+    """Per-volume usage snapshot (read-only). Returns
+    [{mountpoint, label, fstype, total_gb, used_gb, free_gb, percent,
+    pressure}] with pressure in ('critical', 'low', 'ok'). Unreadable
+    volumes are skipped — storage is never collapsed into one global
+    number."""
+    import psutil
+    volumes: list[dict[str, Any]] = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except Exception:
+        return volumes
+    for part in partitions:
+        try:
+            usage = psutil.disk_usage(part.mountpoint)
+        except Exception:
+            continue
+        percent = int(usage.percent)
+        free_gb = round(usage.free / (1024 ** 3), 1)
+        free_pct = 100 - percent
+        if free_pct < _VOLUME_CRITICAL_FREE_PCT or free_gb <= _VOLUME_CRITICAL_FREE_GB:
+            pressure = "critical"
+        elif free_pct < _VOLUME_LOW_FREE_PCT or free_gb <= _VOLUME_LOW_FREE_GB:
+            pressure = "low"
+        else:
+            pressure = "ok"
+        volumes.append({
+            "mountpoint": part.mountpoint,
+            "label": _volume_label(part.mountpoint),
+            "fstype": part.fstype or "",
+            "total_gb": round(usage.total / (1024 ** 3), 1),
+            "used_gb": round(usage.used / (1024 ** 3), 1),
+            "free_gb": free_gb,
+            "percent": percent,
+            "pressure": pressure,
+        })
+    return volumes
+
+
+def _storage_contributors(volume: dict[str, Any]) -> list[dict[str, Any]]:
+    """Bounded top-level contributors on one volume.
+
+    Scans only the volume root to a limited depth with a hard time budget
+    — never the whole disk. Returns [{name, size_gb}] for the largest
+    entries; [] when the scan fails, times out, or finds nothing large —
+    the caller then reports the volume pressure honestly instead of
+    guessing.
+    """
+    root = (volume.get("mountpoint") or "").strip()
+    if not root:
+        return []
+    deadline = time.monotonic() + _STORAGE_SCAN_BUDGET_S
+    top: dict[str, float] = {}
+
+    def _sum_under(path: str, depth: int, key: str) -> None:
+        if time.monotonic() > deadline:
+            return
+        try:
+            entries = list(os.scandir(path))
+        except Exception:
+            return
+        for entry in entries:
+            if time.monotonic() > deadline:
+                return
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if depth < _STORAGE_SCAN_DEPTH:
+                        _sum_under(entry.path, depth + 1, key)
+                else:
+                    top[key] = top.get(key, 0.0) + entry.stat(follow_symlinks=False).st_size
+            except Exception:
+                continue
+
+    try:
+        entries = list(os.scandir(root))
+    except Exception:
+        return []
+    for entry in entries:
+        if time.monotonic() > deadline:
+            break
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                top[entry.name] = 0.0
+                _sum_under(entry.path, 1, entry.name)
+            else:
+                top[entry.name] = top.get(entry.name, 0.0) + entry.stat(follow_symlinks=False).st_size
+        except Exception:
+            continue
+    out = [
+        {"name": name, "size_gb": round(bytes_ / (1024 ** 3), 1)}
+        for name, bytes_ in top.items()
+        if bytes_ / (1024 ** 3) >= _STORAGE_CONTRIBUTOR_MIN_GB
+    ]
+    out.sort(key=lambda c: c["size_gb"], reverse=True)
+    return out[:_STORAGE_CONTRIBUTOR_LIMIT]
+
+
+# ---------------------------------------------------------------------------
+# Resource attribution (application-aware, never merged across binaries)
+# ---------------------------------------------------------------------------
+
+def _top_consumers(kind: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Top application-grouped RAM/CPU consumers.
+
+    kind='ram' reads instantaneous RSS; kind='cpu' takes a two-sample
+    reading (~0.6s) so a single transient spike is not over-interpreted.
+    Processes are grouped by identical executable image only (never merged
+    across different binaries); the friendly application name comes from
+    the canonical desktop identity helper. Raw process identity is kept
+    internally for correctness and never exposed in responses.
+    Returns [{name, base, value, unit, processes}] sorted descending.
+    """
+    import psutil
+    from mini_kio.core.desktop_state import native_app_display_name
+
+    procs: list[Any] = []
+    for proc in psutil.process_iter():
+        try:
+            procs.append(proc)
+        except Exception:
+            continue
+    if kind == "cpu":
+        for p in procs:
+            try:
+                p.cpu_percent(None)  # prime the sample window
+            except Exception:
+                pass
+        time.sleep(0.6)
+    groups: dict[str, dict[str, Any]] = {}
+    for p in procs:
+        try:
+            name = str(p.name() or "").lower()
+            base = name[:-4] if name.endswith(".exe") else name
+            if kind == "ram":
+                value = p.memory_info().rss / (1024 ** 3)
+            else:
+                value = p.cpu_percent(None)
+            if value <= 0:
+                continue
+            g = groups.setdefault(base, {
+                "name": native_app_display_name(base), "base": base,
+                "value": 0.0, "processes": 0,
+            })
+            g["value"] += value
+            g["processes"] += 1
+        except Exception:
+            continue  # process disappeared mid-sample — never fabricate
+    unit = "GB" if kind == "ram" else "%"
+    items = [
+        {"name": g["name"], "base": g["base"], "value": round(g["value"], 1),
+         "unit": unit, "processes": g["processes"]}
+        for g in groups.values()
+    ]
+    items.sort(key=lambda c: c["value"], reverse=True)
+    return items[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Structured diagnostic conditions (the proactive foundation)
+# ---------------------------------------------------------------------------
+
+def _fmt_gb(value: float) -> str:
+    """'6.1' -> '6.1', '6.0' -> '6' — friendly size formatting."""
+    s = f"{value:.1f}".rstrip("0").rstrip(".")
+    return s
+
+
+def _join_names(names: list[str]) -> str:
+    """['A', 'B'] -> 'A and B'; ['A', 'B', 'C'] -> 'A, B and C'."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
+def _ram_explanation(pct: int, severity: str) -> str:
+    # Truthfulness in the structured model: "running high" is only claimed
+    # for genuinely elevated bands (medium+). A healthy/info condition must
+    # never record a false "running high" statement — future proactive
+    # consumers iterate these records.
+    if severity in ("high", "medium"):
+        base = f"RAM is running high at {pct}%"
+        top = [c for c in _top_consumers("ram", limit=3) if c["value"] >= 0.5]
+        if top:
+            names = [f"{c['name']} (about {_fmt_gb(c['value'])} GB)" for c in top]
+            if len(names) == 1:
+                return f"{base}, with {names[0]} the biggest consumer."
+            return f"{base}. The biggest consumers right now are {_join_names(names)}."
+        return f"{base}."
+    return f"RAM usage is at {pct}%."
+
+
+def _cpu_explanation(cpu: int, severity: str) -> str:
+    if severity in ("high", "medium"):
+        top = [c for c in _top_consumers("cpu", limit=3) if c["value"] >= 1.0]
+        if top:
+            names = [f"{c['name']} (about {_fmt_gb(c['value'])}%)" for c in top]
+            verb = "is" if len(names) == 1 else "are"
+            noun = "thing" if len(names) == 1 else "things"
+            return f"CPU usage is {cpu}%. The busiest {noun} right now {verb} {_join_names(names)}."
+    return f"CPU usage is {cpu}%."
+
+
+def _storage_explanation(vol: dict[str, Any], contributors: list[dict[str, Any]]) -> str:
+    label, pct, free = vol["label"], vol["percent"], vol["free_gb"]
+    if vol["pressure"] == "critical":
+        msg = f"Your {label} drive is critically low on space — {pct}% used, with about {free} GB free."
+    elif vol["pressure"] == "low":
+        msg = f"Your {label} drive is getting fairly full — {pct}% used, with about {free} GB free."
+    else:
+        return f"Your {label} drive has plenty of space ({pct}% used)."
+    if contributors:
+        names = [f"{c['name']} (about {_fmt_gb(c['size_gb'])} GB)" for c in contributors]
+        msg += f" Most of the used space is coming from {_join_names(names)}."
+    return msg
+
+
+def _system_conditions() -> list[dict[str, Any]]:
+    """Structured diagnostic conditions from real sources.
+
+    Every condition carries: id, severity (critical/high/medium/low/info),
+    metric, current_value, threshold, contributor(s), evidence,
+    explanation and observed_at. This is the proactive-condition
+    foundation: future KIO behavior ("warn me when C: is low") can consume
+    these records directly. Reading is side-effect free.
+    """
+    m = _system_metrics()
+    conditions: list[dict[str, Any]] = []
+    observed_at = time.time()
+
+    ram_pct = m.get("ram_percent")
+    if ram_pct is not None:
+        # threshold records the band's own trigger so a future consumer can
+        # tell exactly what tripped the severity level.
+        if ram_pct >= 95:
+            sev, thr = "high", 95
+        elif ram_pct >= 90:
+            sev, thr = "medium", 90
+        elif ram_pct >= 80:
+            sev, thr = "low", 80
+        else:
+            sev, thr = "info", 80
+        cond = {
+            "id": "ram", "severity": sev, "metric": "ram",
+            "current_value": ram_pct, "threshold": thr,
+            "evidence": "virtual_memory", "observed_at": observed_at,
+        }
+        cond["explanation"] = _ram_explanation(ram_pct, sev)
+        conditions.append(cond)
+
+    cpu = m.get("cpu")
+    if cpu is not None:
+        if cpu >= 90:
+            sev, thr = "high", 90
+        elif cpu >= 75:
+            sev, thr = "medium", 75
+        elif cpu >= 60:
+            sev, thr = "low", 60
+        else:
+            sev, thr = "info", 60
+        cond = {
+            "id": "cpu", "severity": sev, "metric": "cpu",
+            "current_value": cpu, "threshold": thr,
+            "evidence": "cpu_percent", "observed_at": observed_at,
+        }
+        cond["explanation"] = _cpu_explanation(cpu, sev)
+        conditions.append(cond)
+
+    for v in _storage_volumes():
+        sev = {"critical": "high", "low": "medium", "ok": "info"}[v["pressure"]]
+        contributors = _storage_contributors(v) if v["pressure"] != "ok" else []
+        cond = {
+            "id": f"storage_{v['label'].lower().rstrip(':')}", "severity": sev,
+            "metric": "storage", "current_value": v["percent"], "threshold": 80,
+            "volume": v["label"], "free_gb": v["free_gb"],
+            "contributors": contributors,
+            "evidence": "disk_usage per volume", "observed_at": observed_at,
+        }
+        cond["explanation"] = _storage_explanation(v, contributors)
+        conditions.append(cond)
+
+    batt = m.get("battery_percent")
+    if batt is not None and batt <= 20 and not m.get("battery_charging"):
+        conditions.append({
+            "id": "battery", "severity": "low", "metric": "battery",
+            "current_value": batt, "threshold": 20,
+            "explanation": f"Battery is down to {batt}% and not charging.",
+            "evidence": "sensors_battery", "observed_at": observed_at,
+        })
+    return conditions
+
+
+def _notable_conditions() -> list[dict[str, Any]]:
+    """Conditions worth reporting (severity medium+; excludes info)."""
+    return [
+        c for c in _system_conditions()
+        if c["severity"] in ("critical", "high", "medium")
+    ]
+
+
 def _kio_health_label(snap: dict[str, Any], comps: dict[str, str]) -> str:
     """Overall KIO health verdict from real integrity/state signals."""
     if not snap.get("running"):
@@ -332,7 +666,11 @@ def format_system_health() -> str:
             lines.append(f"RAM: {m['ram_percent']}%")
     if m.get("gpu") is not None:
         lines.append(f"GPU: {m['gpu']}%")
-    if m.get("disk_percent") is not None:
+    volumes = _storage_volumes()
+    if volumes:
+        for v in volumes:
+            lines.append(f"{v['label']} {v['percent']}% used ({v['free_gb']} GB free)")
+    elif m.get("disk_percent") is not None:
         if m.get("disk_free_gb") is not None:
             lines.append(f"Storage: {m['disk_percent']}% used ({m['disk_free_gb']} GB free)")
         else:
@@ -353,18 +691,25 @@ def format_metric(name: str) -> str:
         if m.get("ram_percent") is None:
             return "I can't read RAM usage right now."
         if m.get("ram_used_gb") is not None and m.get("ram_total_gb") is not None:
-            return f"RAM usage is {m['ram_percent']}% ({m['ram_used_gb']} GB of {m['ram_total_gb']} GB)."
-        return f"RAM usage is {m['ram_percent']}%."
+            base = f"RAM usage is {m['ram_percent']}% ({m['ram_used_gb']} GB of {m['ram_total_gb']} GB)."
+        else:
+            base = f"RAM usage is {m['ram_percent']}%."
+        # Attribution only when RAM is genuinely elevated (never a blind
+        # threshold diagnosis) — a cheap "ram" query stays cheap otherwise.
+        if m["ram_percent"] >= 90:
+            top = [c for c in _top_consumers("ram", limit=3) if c["value"] >= 0.5]
+            if top:
+                base += f" {top[0]['name']} is currently using about {_fmt_gb(top[0]['value'])} GB, the biggest contributor."
+        return base
     if name == "gpu":
         if m.get("gpu") is None:
             return "I can't read GPU usage on this system right now."
         return f"GPU usage is {m['gpu']}%."
     if name == "storage":
-        if m.get("disk_percent") is None:
+        volumes = _storage_volumes()
+        if not volumes:
             return "I can't read disk usage right now."
-        if m.get("disk_free_gb") is not None:
-            return f"Storage is {m['disk_percent']}% used ({m['disk_free_gb']} GB free)."
-        return f"Storage is {m['disk_percent']}% used."
+        return format_storage_usage(volumes)
     if name == "battery":
         if m.get("battery_percent") is None:
             return "Battery status isn't available on this system."
@@ -419,23 +764,147 @@ def format_whats_wrong() -> str:
     if not snap.get("running"):
         return "KIO is not running right now."
     comps = _component_states()
-    issues: list[str] = []
+    kio_issues: list[str] = []
     if snap["state"] == "degraded":
-        issues.append("KIO is running in a degraded state.")
+        kio_issues.append("KIO is running in a degraded state.")
     if snap.get("warning_count"):
         n = snap["warning_count"]
-        issues.append(f"{n} internal issue{'s' if n != 1 else ''} were recorded recently.")
+        kio_issues.append(f"{n} internal issue{'s' if n != 1 else ''} were recorded recently.")
     if comps.get("browser") == "disconnected":
-        issues.append("The browser connection is down.")
-    if comps.get("browser") == "unavailable":
-        issues.append("The browser service isn't available.")
+        kio_issues.append("The browser connection is down.")
     if comps.get("telegram") == "unavailable":
-        issues.append("Telegram isn't connected.")
-    if comps.get("tools") == "unavailable":
-        issues.append("External tools aren't connected.")
-    if not issues:
-        return "Nothing seems wrong right now. Everything is running normally."
-    return "Here's what I can see:\n" + "\n".join("• " + issue for issue in issues)
+        kio_issues.append("Telegram isn't connected.")
+
+    # Correlate KIO health AND system conditions (RAM/CPU/storage/battery)
+    # from the structured diagnostic model — never "nothing is wrong" while
+    # verified serious system conditions exist.
+    conditions = _notable_conditions()
+    if not kio_issues and not conditions:
+        return "I don't see anything seriously wrong right now."
+    parts = ["Here's what I can see:"]
+    for c in conditions:
+        parts.append("• " + c["explanation"])
+    for issue in kio_issues:
+        parts.append("• " + issue)
+    return "\n".join(parts)
+
+
+def format_storage_usage(volumes: Optional[list[dict[str, Any]]] = None) -> str:
+    """Per-volume storage view — pressure is per drive, never global."""
+    if volumes is None:
+        volumes = _storage_volumes()
+    if not volumes:
+        return "I can't read disk usage right now."
+    pressured = [v for v in volumes if v["pressure"] != "ok"]
+    roomy = [v for v in volumes if v["pressure"] == "ok"]
+    if len(pressured) == 1 and roomy:
+        p = pressured[0]
+        others = _join_names([v["label"] for v in roomy[:2]])
+        verb = "have" if len(roomy[:2]) > 1 else "has"
+        level = "critically low on space" if p["pressure"] == "critical" else "getting fairly full"
+        return (
+            f"Your {p['label']} drive is {level} — {p['percent']}% used, "
+            f"with about {p['free_gb']} GB free. {others} still {verb} plenty of space."
+        )
+    if pressured:
+        lines = []
+        for v in pressured:
+            level = "critically low on space" if v["pressure"] == "critical" else "getting fairly full"
+            lines.append(f"• {v['label']} {v['percent']}% used, about {v['free_gb']} GB free ({level})")
+        for v in roomy:
+            lines.append(f"• {v['label']} {v['percent']}% used, plenty of space")
+        return "Here's how your storage looks:\n" + "\n".join(lines)
+    return "Storage looks healthy:\n" + "\n".join(
+        f"• {v['label']} {v['percent']}% used ({v['free_gb']} GB free)" for v in volumes
+    )
+
+
+def format_storage_attribution() -> str:
+    """'what's using my storage' / 'why is my disk full' — per-volume view
+    with bounded contributor attribution where safely observable."""
+    volumes = _storage_volumes()
+    if not volumes:
+        return "I can't read disk usage right now."
+    pressured = [v for v in volumes if v["pressure"] != "ok"]
+    lines = []
+    for v in pressured:
+        base = f"{v['label']} {v['percent']}% used ({v['free_gb']} GB free)"
+        contributors = _storage_contributors(v)
+        if contributors:
+            names = [f"{c['name']} (about {_fmt_gb(c['size_gb'])} GB)" for c in contributors]
+            base += f" — mostly {_join_names(names)}"
+        else:
+            base += " — I couldn't pin down a single large folder within a quick scan"
+        lines.append("• " + base)
+    for v in volumes:
+        if v["pressure"] == "ok":
+            lines.append(f"• {v['label']} {v['percent']}% used, plenty of space")
+    if pressured:
+        return "Here's what's using your storage:\n" + "\n".join(lines)
+    return "Storage looks healthy:\n" + "\n".join(
+        f"• {v['label']} {v['percent']}% used ({v['free_gb']} GB free)" for v in volumes
+    )
+
+
+def format_resources(kind: str) -> str:
+    """'what's using my RAM/CPU' — attribution from real sources."""
+    kind = (kind or "").strip().lower()
+    if kind == "ram":
+        m = _system_metrics()
+        if m.get("ram_percent") is None:
+            return "I can't read RAM usage right now."
+        top = [c for c in _top_consumers("ram", limit=5) if c["value"] >= 0.5]
+        if not top:
+            return f"RAM is at {m['ram_percent']}%. I couldn't clearly identify a single big consumer right now."
+        names = []
+        for c in top:
+            extra = f" (across {c['processes']} instances)" if c["processes"] > 1 else ""
+            names.append(f"{c['name']} (about {_fmt_gb(c['value'])} GB){extra}")
+        return f"RAM is at {m['ram_percent']}%. The biggest consumers right now are {_join_names(names)}."
+    if kind == "cpu":
+        m = _system_metrics()
+        if m.get("cpu") is None:
+            return "I can't read CPU usage right now."
+        top = [c for c in _top_consumers("cpu", limit=5) if c["value"] >= 1.0]
+        if not top:
+            return f"CPU usage is around {m['cpu']}% right now, but nothing stands out as a single heavy consumer."
+        names = [f"{c['name']} (about {_fmt_gb(c['value'])}%)" for c in top]
+        return f"CPU is at about {m['cpu']}%. The busiest things right now are {_join_names(names)}."
+    return "I can't read that right now."
+
+
+def format_resources_all() -> str:
+    """Compact aggregate view for '/resources'."""
+    m = _system_metrics()
+    lines: list[str] = []
+    if m.get("cpu") is not None:
+        lines.append(f"CPU: {m['cpu']}%")
+    if m.get("ram_percent") is not None:
+        lines.append(f"RAM: {m['ram_percent']}%")
+    if m.get("gpu") is not None:
+        lines.append(f"GPU: {m['gpu']}%")
+    for v in _storage_volumes():
+        lines.append(f"{v['label']} {v['percent']}% used")
+    if m.get("battery_percent") is not None:
+        lines.append(f"Battery: {m['battery_percent']}%")
+    if not lines:
+        return "I can't read resource usage right now."
+    return "Current resource usage:\n" + "\n".join("• " + l for l in lines)
+
+
+def format_diagnostic() -> str:
+    """'why is my computer slow' — ranked conditions, strongest
+    contributors first, never an invented diagnosis."""
+    conditions = _notable_conditions()
+    if not conditions:
+        return "I don't see a clear resource bottleneck right now."
+    order = {"critical": 4, "high": 3, "medium": 2}
+    conditions.sort(key=lambda c: order.get(c["severity"], 0), reverse=True)
+    lead = conditions[0]["explanation"]
+    if len(conditions) == 1:
+        return lead + " That's the main bottleneck I can point to right now."
+    rest = " ".join(c["explanation"] for c in conditions[1:])
+    return lead + " There's more worth noting: " + rest
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +927,11 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
         "battery": lambda: format_metric("battery"),
         "components": lambda: format_components(target),
         "whats_wrong": format_whats_wrong,
+        "resources": format_resources_all,
+        "resources_ram": lambda: format_resources("ram"),
+        "resources_cpu": lambda: format_resources("cpu"),
+        "resources_storage": format_storage_attribution,
+        "diagnostic": format_diagnostic,
     }
     message = formatters.get(action, format_status)()
     return {"success": True, "message": message, "action": action, "target": target}
