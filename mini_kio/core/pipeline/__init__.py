@@ -822,23 +822,142 @@ class _ExecutionCoordinator:
         logger.warning("[MEDIA] unhandled action=%s text=%s", action, decision.normalized_text)
         return {"success": False, "message": f"Unhandled media action: {action}"}
 
-    def _tracked_running_apps(self) -> list[str]:
-        """Capability A: names of KIO-tracked apps that are still running."""
+    _BROWSER_PROC_NAMES = frozenset({
+        "chrome", "chrome.exe", "edge", "msedge", "msedge.exe",
+        "firefox", "brave", "comet", "opera",
+    })
+
+    def _tracked_running_state(self) -> tuple[list[str], list[str]]:
+        """Capability A: split KIO-tracked running processes into browser
+        names and native app names (display-cased, deduped)."""
         try:
             from mini_kio.core.runtime import get_runtime
             rt = get_runtime()
             if rt is None:
-                return []
+                return [], []
             rt.prune_tracked_processes()
-            names = set()
+            browsers, apps = [], []
             for entry in rt.tracked_processes:
                 name = str(entry.get("name", "") or "").strip()
-                if name and name not in ("explorer",):
-                    display = name.replace("_", " ").strip()
-                    names.add(display[0].upper() + display[1:] if display else name)
-            return sorted(names)
+                if not name or name.lower() in ("explorer", "explorer.exe"):
+                    continue
+                display = name.replace("_", " ").strip()
+                display = display[0].upper() + display[1:] if display else name
+                if name.lower() in self._BROWSER_PROC_NAMES:
+                    browsers.append(display)
+                else:
+                    apps.append(display)
+            return sorted(set(browsers)), sorted(set(apps))
         except Exception:
-            return []
+            return [], []
+
+    @staticmethod
+    def _sanitize_display_name(name: str) -> str:
+        """Strip raw URLs from a display name; neutral fallback when empty.
+
+        A tab title may embed its own URL ("Visit https://x now") or, on the
+        fallback path, BE a raw URL when a tab has no title. URLs must never
+        reach the user response.
+        """
+        cleaned = re.sub(r"https?://\S+", "", name or "").strip()
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            return "Untitled tab"
+        return cleaned[:80]
+
+    @staticmethod
+    def _tab_display_name(tab) -> str:
+        """Resolve one browser tab to a user-safe display identity.
+
+        Registered web apps (ChatGPT, Telegram, YouTube, ...) surface as
+        their brand identity from the canonical URL maps; otherwise the
+        cleaned title is used; a raw URL is never exposed.
+        """
+        from mini_kio.core.target_ref import webapp_name_from_url, display_target_name
+
+        url = (getattr(tab, "url", "") or "").strip()
+        title = (getattr(tab, "title", "") or "").strip()
+        if url:
+            identity = webapp_name_from_url(url)
+            if identity:
+                return display_target_name(identity)
+        if title:
+            return _ExecutionCoordinator._sanitize_display_name(title)
+        return "Untitled tab"
+
+    def _compose_desktop_state(self, conn) -> dict:
+        """'What's open?' — resolve browser tabs to canonical web-app
+        identities + tracked native apps, then compose a concise natural
+        response.
+
+        Presentation fix: tabs for registered web apps surface as their app
+        identity (ChatGPT / Telegram / YouTube) instead of a raw title, the
+        browser is reported as a host line rather than the only meaningful
+        content, duplicates collapse to a count, and no raw URLs / '::' chains
+        / ownership markers leak into the response.
+        """
+        from mini_kio.core.command_router import _check_br_available, _br_list_tabs
+
+        identities: list[str] = []
+        if conn and conn.is_connected():
+            from mini_kio.core.async_utils import safe_run_async
+            try:
+                result = safe_run_async(conn.list_tabs())
+                if result.success and result.tabs:
+                    for t in result.tabs:
+                        identities.append(self._tab_display_name(t))
+            except Exception as exc:
+                logger.warning("list_tabs failed: %s", exc)
+        elif _check_br_available():
+            br_result = _br_list_tabs()
+            if br_result.get("success"):
+                body = br_result.get("message", "").replace("Open tabs:\n", "")
+                for line in body.splitlines():
+                    cleaned = re.sub(r"^\d+\.\s*", "", line.strip())
+                    cleaned = re.sub(r"\s*\[Opened by KIO\]\s*$", "", cleaned)
+                    cleaned = self._sanitize_display_name(cleaned)
+                    if cleaned:
+                        identities.append(cleaned)
+
+        browsers, apps = self._tracked_running_state()
+        browser_names = browsers or (["Chrome"] if (conn and conn.is_connected()) else [])
+
+        # Dedupe identities, keeping first-seen casing and collapsing counts.
+        counts: dict[str, int] = {}
+        order: list[str] = []
+        for name in identities:
+            key = name.strip().lower()
+            if not key:
+                continue
+            if key not in counts:
+                counts[key] = 0
+                order.append(key)
+            counts[key] += 1
+        items: list[str] = []
+        seen: set[str] = set()
+        for key in order:
+            seen.add(key)
+            first = next(n for n in identities if n.strip().lower() == key)
+            items.append(f"{first} ({counts[key]} tabs)" if counts[key] > 1 else first)
+        for app in apps:
+            if app.lower() in seen:
+                continue
+            seen.add(app.lower())
+            items.append(app)
+
+        if not items:
+            if browser_names:
+                verb = "are" if len(browser_names) > 1 else "is"
+                return {"success": True, "message": ", ".join(browser_names) + f" {verb} open."}
+            return {"success": True, "message": "Nothing is open right now."}
+
+        # Note: no blank separator line — _ResponseComposer._strip_leaks
+        # collapses runs of 2+ whitespace, so a blank line would flatten the
+        # browser line onto the last bullet. Single newlines survive.
+        lines = ["Open right now:"] + ["• " + n for n in items]
+        if browser_names:
+            lines.append("Browser: " + ", ".join(browser_names))
+        return {"success": True, "message": "\n".join(lines)}
 
     def _try_native_focus(self, target: str) -> Optional[dict]:
         """Capability A: bring a running native app's window to the foreground.
@@ -916,34 +1035,10 @@ class _ExecutionCoordinator:
         conn = _get_connector()
 
         if action == "list_tabs":
-            # Capability A: "What's open?" reports browser tabs AND KIO-tracked
-            # running apps — the user sees the whole desktop state, not just the
-            # browser.
-            lines = []
-            if conn and conn.is_connected():
-                from mini_kio.core.async_utils import safe_run_async
-                try:
-                    result = safe_run_async(conn.list_tabs())
-                    if result.success and result.tabs:
-                        for idx, t in enumerate(result.tabs, start=1):
-                            title = t.title or t.url
-                            suffix = " [Opened by KIO]" if getattr(t, "is_owned", False) else ""
-                            lines.append(f"{idx}. {title}{suffix}")
-                    elif result.success:
-                        lines.append("No browser tabs open.")
-                except Exception as exc:
-                    logger.warning("list_tabs failed: %s", exc)
-            elif _check_br_available():
-                br_result = _br_list_tabs()
-                if br_result.get("success"):
-                    body = br_result.get("message", "").replace("Open tabs:\n", "")
-                    lines.extend(l for l in body.splitlines() if l.strip())
-            apps = self._tracked_running_apps()
-            if apps:
-                lines.append("Apps: " + ", ".join(apps))
-            if not lines:
-                return {"success": True, "message": "Nothing is open right now."}
-            return {"success": True, "message": "Open right now:\n" + "\n".join(lines)}
+            # Capability A: "What's open?" reports browser tabs (resolved to
+            # canonical web-app identities) AND KIO-tracked running apps — the
+            # user sees the whole desktop state, not just the host browser.
+            return self._compose_desktop_state(conn)
 
         if action == "focus":
             if conn and conn.is_connected():

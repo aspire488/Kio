@@ -193,6 +193,41 @@ def display_target_name(raw: str) -> str:
     return low[0].upper() + low[1:]
 
 
+def webapp_name_from_url(url: str) -> Optional[str]:
+    """Canonical web-app identity (lowercase key) for a tab/page URL.
+
+    Reuses the existing registered web-app maps (app_operator WEB_URLS /
+    WEB_DOMAIN_ALIASES, inverted by host) plus the formatter's known-domain
+    mapping restricted to known brands. Returns None for URLs that do not
+    identify a registered web app, so callers fall back to the tab title —
+    arbitrary sites are never invented as app identities.
+    """
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        from mini_kio.core.app_operator import WEB_URLS, WEB_DOMAIN_ALIASES
+
+        host = (urlparse(url).hostname or "").lower()
+        host = host[4:] if host.startswith("www.") else host
+        if not host:
+            return None
+        for name, base in tuple(WEB_URLS.items()) + tuple(WEB_DOMAIN_ALIASES.items()):
+            base_host = (urlparse(base).hostname or "").lower()
+            base_host = base_host[4:] if base_host.startswith("www.") else base_host
+            if base_host and (host == base_host or host.endswith("." + base_host)):
+                return name.split()[0]
+        # Known-domain display map (covers chatgpt.com, spotify.com, ...)
+        # restricted to registered brands — never arbitrary host inference.
+        from mini_kio.core.runtime_response_formatter import _extract_url_name
+        display = _extract_url_name(url)
+        if display and display.lower() in _BRAND_NAMES:
+            return display.lower()
+        return None
+    except Exception:
+        return None
+
+
 def _name_from_url(url: str) -> str:
     """Derive a friendly name from a URL (best-effort, never the raw URL)."""
     try:
