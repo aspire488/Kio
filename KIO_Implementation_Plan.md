@@ -310,7 +310,7 @@ Statuses below are reconciled from source + tests + live evidence (`KIO_MASTER_P
 |---|---|---|
 | 1-2 (Phase 0 / Stream A foundation) | IMPLEMENTED | Committed in earlier sessions; gate C-1..C-4b delivered |
 | 3 — routing pattern repairs | IMPLEMENTED | `exec_patterns`, `is_knowledge_query`, media transport commands in classifier/`routing_utils.py` |
-| 4 — canonical provider abstraction | PARTIAL | Two provider bases remain (`core/providers/provider_base.py` Protocol vs `llm/provider_base.py` ABC); D-08 unresolved |
+| 4 — canonical provider abstraction | IMPLEMENTED (D-08 resolved 2026-08-09) | Canonical contract = `core/provider_contract.py` `ExecutionProvider` (ABC), wired via `core/provider_registry.py` + `register_all_providers()`; dead top-level `providers/` Protocol package deleted (zero importers; restores earlier cleanup) |
 | 5 — decision logging | IMPLEMENTED | Structured routing/trace logs (`trace_logger.py`, execution metrics) |
 | 6 — dead code + C-09 unification | IMPLEMENTED | `resolve_capability()` in `routing_utils.py`; dead stubs deleted |
 | 7 — execution gate protocol | IMPLEMENTED | `execution_boundary.py` LOCKED; boundary gates execution (prerequisite gate not a separate module — see 8/9) |
@@ -344,6 +344,14 @@ Extract remaining monolithic routing into domain-specific handler modules. Each 
 
 ### Slice 4 — Canonical Provider Abstraction (A.4)
 Single `Provider` protocol used by all execution providers. Unify existing ABC + Protocol patterns under one interface. Adapter layer for backward compat.
+
+**Slice 4 Completion (D-08 resolved, 2026-08-09)**:
+
+| Objective | Status | Evidence |
+|-----------|--------|----------|
+| Single canonical provider interface | **COMPLETE** | `mini_kio/core/provider_contract.py` defines `ExecutionProvider` (ABC) — single contract with `id()`, `capabilities()`, `health()`, `execute()`, `verify()`. `core/provider_registry.py` is the single registry; `register_all_providers()` (called by `runtime.py`) registers all 6 execution providers + MCP servers. |
+| Unify ABC + Protocol patterns | **COMPLETE** | The only remaining Protocol-based generic-provider base was the dead top-level `providers/` package (5 files) — zero importers in mini_kio, tests, root files, or config; already deleted once by `7eeb7c8` (July) and re-added as a dead snapshot by `c641220`. Deleted 2026-08-09, restoring the earlier cleanup. `llm/provider_base.py` (`LLMProvider` ABC) is a separate live subsystem (LLM failover chain) and is correctly excluded from the execution-provider contract. |
+| Adapter layer for backward compat | **NOT REQUIRED** | Dead package had zero importers — no compat surface to preserve. |
 
 ### Slice 5 — Decision Logging (A.5)
 Structured log entry for every routing decision: action, intent, confidence, safety state, provider, outcome. Queryable via structured logging.

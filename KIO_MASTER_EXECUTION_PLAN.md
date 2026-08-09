@@ -539,7 +539,8 @@ Each entry: Purpose / Maturity / Final vision / Dependencies / Incoming links / 
 - Purpose: Provider discovery + health + failover.
 - Maturity: CURRENT (15 providers per KIO_Implementation_Plan.md).
 - Final vision: Single canonical provider abstraction.
-- Dependencies: provider_base (LLM), providers/provider_base (generic).
+- Dependencies: provider_contract (core, `ExecutionProvider` ABC), provider_base (LLM failover chain — separate live subsystem).
+- D-08 (2026-08-09): Dead top-level `providers/` Protocol package (zero importers; re-added as dead snapshot by `c641220`) deleted, restoring the `7eeb7c8` cleanup. Canonical contract = `core/provider_contract.py`; LLM base remains a distinct, legitimate subsystem.
 - Incoming links: capability resolver, llm gateway.
 - Outgoing links: → providers.
 - Required completion Tier: Tier 1 (reconciliation per D-08).
@@ -1126,7 +1127,7 @@ Per-subsystem rows. Each row has: Current State / Target State / Dependencies / 
 | Pipeline | CURRENT | Stable pipeline | runtime | runtime | Low | P1 | 1 | KIO Core | Pipeline tests | Pipeline regression | No monolithic routing | All routes go through pipeline |
 | Execution Coordinator | CURRENT (`_ExecutionCoordinator` in `pipeline/__init__.py`; truthful multi-step aggregation 08-09) | Single execution entry with prerequisite gating | execution_boundary | Tier 1 prerequisite gate | Medium (SEC.002 async/sync bridging) | P0 | 1→2 | Execution | Execution integration + gate tests | Execution regression | Every action gated | No ungated path from intent to action |
 | Capability Resolver | CURRENT (Gate C-2, 33 handlers) | Single discoverable registry | capability_registry, provider_registry, command_registry | ARCH.003 resolution | Medium (triple-registry fragmentation) | P0 | 1 | KIO Core | Capability discovery tests | Discovery regression | Single resolution path | All three registries consolidated |
-| Provider Registry | CURRENT (15 providers) | Single canonical provider abstraction | provider_base | D-08 reconciliation | Medium (two provider_base interfaces) | P0 | 1 | Execution + LLM | Provider tests; failover tests | Provider regression | Single interface, single registry | One canonical provider registry |
+| Provider Registry | CURRENT (15 providers; D-08 resolved 2026-08-09) | Single canonical provider abstraction | provider_contract | — | Low (canonical contract + separate LLM chain) | P0 | 1 | Execution + LLM | Provider tests; failover tests | Provider regression | Single interface, single registry | One canonical provider registry |
 | Capability Registry | CURRENT (Gate C-2) | Single discoverable capability layer | execution engine | — | Low | P1 | 1 | KIO Core | Capability discovery test | Capability regression | All capabilities discoverable | No orphan capabilities |
 | Execution Boundary | LOCKED | Hard safety gate; prerequisite gate | intent_validator | Slice 8 prerequisite gate | Low | P0 | 1 | Safety | Boundary tests; safety integration | Safety regression | No bypass; every action gated | Verified no bypass routes |
 | Session Context | CURRENT (Gate C-1; 08-09 referent sanitization — safe target names stored, not serialized routing strings) | Unified context; 6 legacy merged | session_state, conversation_context, media_context, continuity_state, artifact_memory | Legacy migration | Low | P0 | 1 | Context | Unified-context integration tests | Context regression | One context authority | Six legacy systems retired |
