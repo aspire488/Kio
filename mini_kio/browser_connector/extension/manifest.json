@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KIO Browser Connector",
-  "version": "0.2.0",
+  "version": "0.3.4",
   "description": "Allows KIO to manage browser tabs from the desktop assistant.",
   "permissions": [
     "tabs",

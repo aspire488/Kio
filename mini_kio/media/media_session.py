@@ -82,6 +82,31 @@ class MediaCandidate:
         }
 
 
+def user_facing_media_label(query: str) -> str:
+    """A natural label for user-facing media text.
+
+    The media contract: users express INTENT ("Play Never Gonna Give You Up")
+    and KIO handles RESOLUTION internally. A YouTube URL/video ID is an
+    internal execution artifact and must never be echoed back as though the
+    user asked for it. This helper returns the natural query when it looks
+    like intent, and "" for a URL/domain-shaped input so the caller can fall
+    back to a resolved page title or "the requested media".
+
+    The pipeline lowercases the query before it reaches the provider, so the
+    label is title-cased for display ("never gonna give you up" ->
+    "Never Gonna Give You Up"). The capitalization is word-first-letter only
+    (not str.title(), which mangles apostrophes: "don't" -> "Don'T").
+    """
+    q = (query or "").strip()
+    if not q:
+        return ""
+    if q.startswith(("http://", "https://", "www.")):
+        return ""
+    if "youtube.com" in q or "youtu.be" in q:
+        return ""
+    return " ".join(w[:1].upper() + w[1:] for w in q.split())
+
+
 @dataclass
 class MediaResult:
     success: bool
@@ -90,6 +115,11 @@ class MediaResult:
     candidates: list[MediaCandidate] = field(default_factory=list)
     error: str = ""
     player: str = ""
+    # Truthful-fallback contract: when True, the provider ALREADY resolved the
+    # exact media (exact video id / tab), so a playback failure must NOT fall
+    # back to another provider (e.g. opening a generic search page). MediaManager
+    # stops its provider chain and reports the failure as-is.
+    no_fallback: bool = False
 
     def to_dict(self) -> dict:
         d = {"success": self.success, "message": self.message, "player": self.player}

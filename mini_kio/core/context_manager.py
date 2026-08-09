@@ -586,9 +586,13 @@ class SessionContext:
 
         target = result.get("target") or result.get("subject") or ""
         if target:
-            clean = target.strip().rstrip(".,!?;:")
-            _blocked = {"http://", "https://", "www."}
-            if not any(clean.lower().startswith(p) for p in _blocked):
+            # BC-3: the stored conversational referent must be a user-safe name.
+            # Raw serialized capability targets ("chrome::open_url::https://...")
+            # and raw URLs must NEVER become the referent that a later
+            # "close it"/"open that" splices back into a command.
+            from mini_kio.core.target_ref import safe_target_name
+            clean = safe_target_name(str(target)).strip().rstrip(".,!?;:")
+            if clean:
                 self.active_entity = clean
                 self.last_target = clean
         elif command.lower().startswith("play ") and not target:

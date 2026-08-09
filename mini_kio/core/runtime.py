@@ -1084,14 +1084,18 @@ def manual_runtime_recovery() -> dict[str, object]:
 
 
 def format_channel_reply(result: dict[str, object]) -> str:
-    """Normalize a runtime dispatch result into channel-safe plain text."""
+    """Normalize a runtime dispatch result into channel-safe plain text.
+
+    KIO interaction contract: user-facing responses are natural language
+    ("I couldn't start X."), never "Error: ..."-prefixed diagnostics. The
+    message content already carries the natural failure text; internal
+    exceptions, HTTP codes, provider names and retry mechanics stay in the
+    logs, never in the reply.
+    """
     if result.get("success"):
         message = str(result.get("message") or "Done.")
     else:
-        message = str(result.get("message") or "Command failed.")
-        lower = message.lower()
-        if message and not lower.startswith("error:") and not lower.startswith("error "):
-            message = f"Error: {message}"
+        message = str(result.get("message") or "I couldn't do that.")
 
     if len(message) > 4000:
         message = message[:4000] + "..."
@@ -1155,6 +1159,49 @@ def get_runtime_snapshot() -> dict[str, object]:
 
 
 
+_RUNTIME_READY_FLAG = Path("runtime_ready.flag")
+
+
+def write_runtime_ready_flag(flag_path: Path | None = None) -> Path | None:
+    """Refresh the runtime readiness marker with LIVE state (BUG 12).
+
+    The flag file can only ever claim THIS process's state; after a crash or
+    restart the previous writer's PID would be stale and misleading. Every
+    successful bootstrap therefore overwrites it with the current PID,
+    timestamp, and live runtime-component readiness, so the marker is never
+    presented as authoritative from a dead process.
+
+    Returns the written path, or None when suppressed (test mode / no
+    runtime). The flag is a convenience marker only — authoritative readiness
+    always comes from get_runtime_snapshot() (process/port/component liveness).
+    """
+    import os as _os
+    if _os.environ.get("KIO_TEST_MODE") == "1":
+        return None
+    try:
+        import time as _time
+        runtime = get_runtime()
+        snapshot = get_runtime_snapshot() if runtime is not None else {}
+        payload = (
+            f"READY {_time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"pid={_os.getpid()} "
+            f"state={snapshot.get('state', RuntimeState.INIT)} "
+            f"browser_runtime_ready={snapshot.get('browser_runtime_ready', False)} "
+            f"mcp_runtime_ready={snapshot.get('mcp_runtime_ready', False)}\n"
+        )
+        target = flag_path or _RUNTIME_READY_FLAG
+        target.write_text(payload, encoding="utf-8")
+        emit_runtime_trace(
+            "runtime_ready_flag_written",
+            pid=_os.getpid(),
+            path=str(target),
+        )
+        return target
+    except Exception as exc:
+        logger.warning("[RUNTIME] readiness flag write failed: %s", exc)
+        return None
+
+
 def bootstrap_runtime() -> KioRuntime:
     """
     Initialize the minimal runtime foundation.
@@ -1191,6 +1238,10 @@ def bootstrap_runtime() -> KioRuntime:
         emit_runtime_trace("runtime_channel_config", discord_configured=False)
 
     runtime.mark_ready()
+    # BUG 12: write the readiness marker with THIS process's live PID so a
+    # stale flag from a previous boot can never masquerade as the current
+    # runtime (the old flag sat at PID 25152 while the live bot ran at 4728).
+    write_runtime_ready_flag()
 
     from mini_kio.core.activation import prepare_activation_groundwork
 

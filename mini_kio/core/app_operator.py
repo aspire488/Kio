@@ -592,14 +592,140 @@ def launch_app(name: str) -> dict:
     return _normalize_public_result("launch", result.get("canonical_name", key), result, start_time)
 
 
+def _close_web_target(name: str, key: str, start_time: float) -> dict:
+    """Close a web-app browser session at TAB scope (BC-1/BC-2 fix).
+
+    Never terminates the host browser process. Resolution order:
+      1. Active capability session (KIO-opened web app) -> close its tab/session.
+      2. Browser connector tab close by friendly name.
+      3. Truthful failure (no blind process kill, no ownership refusal).
+    """
+    from mini_kio.core.target_ref import parse_target, display_target_name
+    display = display_target_name(key)
+    ref = parse_target(key)
+    resolve_name = ref.name or key
+
+    # 1) Active capability session (the capability registry is the authoritative
+    #    store for web-app sessions; routing_utils owns the isolated-profile
+    #    safety gate).
+    try:
+        from mini_kio.core.routing_utils import (
+            resolve_capability_for_close,
+            close_browser_capability,
+            deactivate_capability,
+        )
+        cap = resolve_capability_for_close(resolve_name)
+        if cap:
+            url = cap.get("url", "") or ""
+            conn_ok = False
+            try:
+                from mini_kio.core.command_router import _get_connector
+                from mini_kio.core.async_utils import safe_run_async
+                conn = _get_connector()
+                if conn is not None and conn.is_connected():
+                    result = safe_run_async(conn.close_tab(resolve_name or url))
+                    conn_ok = bool(getattr(result, "success", False))
+            except Exception as exc:
+                logger.warning("[APP] web tab close via connector failed: %s", exc)
+            if conn_ok or close_browser_capability(cap):
+                try:
+                    deactivate_capability(resolve_name)
+                except Exception:
+                    pass
+                return _normalize_public_result(
+                    "close", key,
+                    {"success": True, "message": f"Closed {display}.",
+                     "capability_closed": True, "capability_name": display},
+                    start_time,
+                )
+            return _normalize_public_result(
+                "close", key,
+                {"success": False, "message": f"Couldn't close {display}.",
+                 "failure_class": "capability_close_failed"},
+                start_time,
+            )
+    except Exception as exc:
+        logger.warning("[APP] capability close lookup failed for %s: %s", key, exc)
+
+    # 2) Browser connector tab close by friendly name (covers manually-opened
+    #    tabs that never created a capability session).
+    try:
+        from mini_kio.core.command_router import _get_connector
+        from mini_kio.core.async_utils import safe_run_async
+        conn = _get_connector()
+        if conn is not None and conn.is_connected():
+            result = safe_run_async(conn.close_tab(resolve_name or key))
+            if getattr(result, "success", False):
+                return _normalize_public_result(
+                    "close", key,
+                    {"success": True, "message": f"Closed {display}.",
+                     "capability_closed": True, "capability_name": display},
+                    start_time,
+                )
+    except Exception as exc:
+        logger.warning("[APP] web tab close via connector failed (2): %s", exc)
+
+    # 3) Truthful failure — the target is a web app with no open tab. Do NOT
+    #    claim success, do NOT refuse with ownership language, and NEVER
+    #    escalate to the host browser process.
+    return _normalize_public_result(
+        "close", key,
+        {"success": False, "message": f"Couldn't find {display} open in the browser.",
+         "failure_class": "not_running"},
+        start_time,
+    )
+
+
+def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
+    """Bounded tab-identity verification after opening a web URL (BC-4).
+
+    The connector ACK proves the extension received the open; this strengthens
+    success by confirming a tab whose URL/title matches actually exists. Single
+    bounded list_tabs call — never a polling loop.
+    """
+    try:
+        from mini_kio.core.async_utils import safe_run_async
+        tabs_result = safe_run_async(conn.list_tabs())
+        if not getattr(tabs_result, "success", False):
+            return False
+        tabs = getattr(tabs_result, "tabs", None) or []
+        url_norm = (url or "").rstrip("/").lower()
+        fname = (friendly_name or "").lower()
+        for t in tabs:
+            t_url = ((getattr(t, "url", "") or "") or "").rstrip("/").lower()
+            t_title = (getattr(t, "title", "") or "").lower()
+            if url_norm and (url_norm in t_url or t_url in url_norm):
+                return True
+            if fname and (fname in t_title or fname in t_url):
+                return True
+        return False
+    except Exception as exc:
+        logger.debug("[APP] tab-identity verification unavailable: %s", exc)
+        return False
+
+
 def close_app(name: str, pid: Optional[int] = None) -> dict:
     """Kill an application.  Returns {"success": bool, "message": str}."""
     key = name.lower().strip()
-    # Gate 5: Strip capability compound suffix for browser canonical matching
-    if "::" in key:
-        key = key.split("::")[0]
     start_time = time.time()
     logger.info(f"[APP] close_app: {key!r} (pid override: {pid})")
+
+    # ── BC-1/BC-2: TAB-SCOPE close for capability-serialized / web-app targets ──
+    # A serialized capability target ("chrome::open_url::https://...::chatgpt")
+    # or a plain web-app name ("chatgpt", "telegram" when no native app is
+    # registered) is a BROWSER TAB/SESSION, not a host browser process. It must
+    # NEVER be collapsed into the browser process and killed (that was the
+    # "Close it closed all of Chrome" bug). Route it to the web-target close
+    # path which closes at TAB scope with a bounded fallback and truthful
+    # failure when no tab exists.
+    from mini_kio.core.target_ref import parse_target, safe_target_name
+    _ref = parse_target(key)
+    _info = _find_in_registry(key)
+    _is_web_scope = ("::" in key) or (_ref.kind in ("webapp", "tab") and not _info)
+    if _is_web_scope:
+        return _close_web_target(name, key, start_time)
+
+    info = _find_in_registry(key)
 
     info = _find_in_registry(key)
     canonical = key
@@ -672,6 +798,36 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
                 return close_app(name, pid=tracked_pid)
     except Exception:
         pass
+
+    # Generic process-discovery fallback (BUG 6): ANY registered app — browser
+    # or not — may be running without a KIO-tracked PID (opened manually, by
+    # another tool, or a singleton that outlived its tracker entry). The user
+    # explicitly asked to close it, so discover the matching process by the
+    # registry's own process names (helper-safe: browser helpers carry a
+    # --type= marker and are skipped; UWP wrappers are excluded) and terminate
+    # it with tree-aware verification. Restricted targets are already gated
+    # above; UNREGISTERED apps keep the strict ownership refusal so KIO never
+    # blind-kills an arbitrary process it does not model.
+    if info:
+        discovered_pid = _find_matching_process_pid(key, info)
+        if discovered_pid is not None:
+            logger.info("[APP] close_app process-discovery fallback: discovered %s pid=%d", key, discovered_pid)
+            return close_app(name, pid=discovered_pid)
+        # Registered app, no matching process anywhere -> it is simply not
+        # running. Report that truthfully instead of claiming ownership
+        # refusal (which would be misleading) or a false close.
+        logger.info("[APP] close_not_running target=%s", key)
+        return _normalize_public_result(
+            "close",
+            key,
+            {
+                "success": False,
+                "message": f"{name} wasn't running.",
+                "pid": None,
+                "failure_class": "not_running",
+            },
+            start_time,
+        )
 
     # No ownership found -> Refuse to close arbitrary processes
     logger.info("[APP] close_refused target=%s reason=not_tracked", key)
@@ -917,7 +1073,7 @@ def _find_matching_process_pid(key: str, info: Optional[Dict], *, exclude: set[i
         import psutil
 
         matches: list[tuple[float, int]] = []
-        for proc in psutil.process_iter(['pid', 'name', 'create_time']):
+        for proc in psutil.process_iter(['pid', 'name', 'create_time', 'cmdline']):
             try:
                 proc_name = (proc.info.get("name") or "").lower()
                 if proc.info['pid'] in exclude or proc_name not in names:
@@ -928,9 +1084,67 @@ def _find_matching_process_pid(key: str, info: Optional[Dict], *, exclude: set[i
         if not matches:
             return None
         matches.sort()
+        # Browser lifecycle: helpers (renderers, gpu, utility) share the image
+        # name and vastly outnumber the root process. Picking the newest match
+        # would terminate a child and leave the browser running. Prefer the
+        # interactive root: the process whose command line has no --type= child
+        # marker and which owns a visible main window (headless instances and
+        # helper roots have none).
+        if info and info.get("lifecycle") == "browser":
+            windowed_root: Optional[int] = None
+            bare_root: Optional[int] = None
+            for create_time, proc_pid in reversed(matches):
+                if _proc_is_browser_helper(proc_pid):
+                    continue
+                if bare_root is None:
+                    bare_root = proc_pid
+                if _proc_has_main_window(proc_pid):
+                    windowed_root = proc_pid
+                    break
+            if windowed_root is not None:
+                return windowed_root
+            if bare_root is not None:
+                return bare_root
         return matches[-1][1]
     except Exception:
         return None
+
+
+def _proc_is_browser_helper(pid: int) -> bool:
+    """True if the given pid is a browser helper (has a --type= marker)."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        cmdline = proc.cmdline() or []
+        return any(str(a).startswith("--type=") for a in cmdline)
+    except Exception:
+        return False
+
+
+def _proc_has_main_window(pid: int) -> bool:
+    """True if the given pid owns at least one visible top-level window."""
+    if not _IS_WINDOWS:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _enum_cb(hwnd, _lparam):
+            window_pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+            if window_pid.value == pid and user32.IsWindowVisible(hwnd):
+                found.append(True)
+                return False
+            return True
+
+        user32.EnumWindows(_enum_cb, 0)
+        return bool(found)
+    except Exception:
+        return False
 
 
 def _pid_is_alive(pid: Optional[int]) -> bool:
@@ -986,35 +1200,44 @@ def _terminate_with_verification(name: str, key: str, pid: int, info: Optional[D
             time.sleep(0.8)
             residual_pid = _verification_residual_pid(residual_pid, key, info)
 
+    # BUG 7: outcome classes. The message must never contradict the structured
+    # outcome ("Closed X. ... but helper processes may persist" claimed success
+    # while stating the close was incomplete). Implementation detail lives in
+    # structured fields (outcome_class / verification_status / residual_pid);
+    # the user-facing message is concise and truthful.
     if residual_pid is None:
-        payload = {
+        return {
             "success": True,
-            "message": f"Closed {name} (pid {pid})",
+            "message": f"Closed {name}.",
             "pid": pid,
             "primary_termination_attempted": True,
             "force_kill_attempted": force_attempted,
             "verified_terminated": True,
             "verification_status": "passed",
+            "outcome_class": "SUCCESS",
+            "failure_class": "",
         }
-        if info and info.get("lifecycle") == "uwp":
-            payload["message"] = f"Closed {name}. Core process terminated, but UWP shell may persist."
-        return payload
 
     stderr_lower = (graceful_result.stderr or "").lower()
-    if lifecycle == "uwp":
-        message = f"Closed {name}. Core process terminated, but UWP shell may persist."
-    elif key == "explorer" or lifecycle == "launcher":
-        message = f"Closed {name}. Explorer shell may persist after the window closes."
-    elif lifecycle == "browser":
-        message = f"Closed {name}. Primary browser process terminated, but helper processes may persist."
-    elif "not found" in stderr_lower or "not running" in stderr_lower:
-        message = f"{name} was already closed."
-    else:
-        message = f"Close requested for {name}, but {name} is still running."
+    if "not found" in stderr_lower or "not running" in stderr_lower:
+        return {
+            "success": False,
+            "message": f"{name} wasn't running.",
+            "pid": pid,
+            "primary_termination_attempted": True,
+            "force_kill_attempted": force_attempted,
+            "verified_terminated": False,
+            "verification_status": "not_running",
+            "outcome_class": "NOT_RUNNING",
+            "failure_class": "not_running",
+        }
 
+    # Primary process (and its verified tree) is gone but same-family processes
+    # remain (browser helpers, UWP shell). This is a PARTIAL outcome: the app
+    # the user asked to close is closed, but background components persist.
     return {
         "success": True,
-        "message": message,
+        "message": f"Closed {name}.",
         "pid": pid,
         "residual_pid": residual_pid,
         "terminated_pid": terminated_pid,
@@ -1780,10 +2003,17 @@ def execute_capability(target: str) -> dict:
                     if result.success:
                         from mini_kio.core.routing_utils import register_browser_capability
                         register_browser_capability(friendly_name, app_name, url)
+                        # BC-4: the extension ACK confirms the tab was created;
+                        # strengthen with a bounded tab-identity check so success
+                        # is verified (never pure assertion).
+                        verified = _verify_web_tab_opened(conn, url, friendly_name)
+                        from mini_kio.core.target_ref import display_target_name
                         return _normalize_public_result(
                             "execute_capability", f"{app_name}::{friendly_name}",
-                            {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()} via connector.",
-                             "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name},
+                            {"success": True, "message": f"Opened {display_target_name(friendly_name)} in {display_target_name(app_name)}.",
+                             "verification_mode": "tab_identity" if verified else "noop",
+                             "verification_status": "passed" if verified else "unverified",
+                             "capability_name": display_target_name(friendly_name), "browser": app_name},
                             start_time)
                 except Exception as exc:
                     logger.debug("[CONNECTOR] execute_capability open_tab failed, falling back: %s", exc)
@@ -1826,19 +2056,21 @@ def execute_capability(target: str) -> dict:
                     rt.register_tracked_process(final_pid, app_name, url)
                     from mini_kio.core.routing_utils import register_browser_capability
                     register_browser_capability(friendly_name, app_name, url, browser_pid=final_pid)
-                    return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
-
+                    from mini_kio.core.target_ref import display_target_name
+                    return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {display_target_name(friendly_name)} in {display_target_name(app_name)}.", "pid": final_pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": display_target_name(friendly_name), "browser": app_name}, start_time)
                 try:
                     import psutil
                     if rt and psutil.pid_exists(proc.pid):
                         rt.register_tracked_process(proc.pid, app_name, url)
                         from mini_kio.core.routing_utils import register_browser_capability
                         register_browser_capability(friendly_name, app_name, url, browser_pid=proc.pid)
-                        return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": proc.pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
+                        from mini_kio.core.target_ref import display_target_name
+                        return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {display_target_name(friendly_name)} in {display_target_name(app_name)}.", "pid": proc.pid, "canonical_name": app_name, "verification_mode": "noop", "capability_name": display_target_name(friendly_name), "browser": app_name}, start_time)
                 except Exception:
                     pass
 
-            return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {friendly_name.capitalize()} in {app_name.capitalize()}.", "pid": proc.pid, "verification_mode": "noop", "capability_name": friendly_name.capitalize(), "browser": app_name}, start_time)
+            from mini_kio.core.target_ref import display_target_name
+            return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": True, "message": f"Opened {display_target_name(friendly_name)} in {display_target_name(app_name)}.", "pid": proc.pid, "verification_mode": "noop", "capability_name": display_target_name(friendly_name), "browser": app_name}, start_time)
         except Exception as e:
             return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
     # For now, just mock media capabilities since KIO is lightweight and doesn't hook into Windows Media APIs

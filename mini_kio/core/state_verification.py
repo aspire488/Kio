@@ -61,7 +61,11 @@ _FAILED_STATUSES = {
 _PLAY_PROBE_INIT_MS = 300
 
 def _play_deadline_s() -> float:
-    return 25.0  # ponytail: fixed bound OK for real-world page load
+    # A playing element verifies on the first sample probe (sub-second), so this
+    # deadline only bites the failure path. 25s × 5 provider attempts × 2 (outer
+    # + stabilization) produced the multi-minute spiral that froze Telegram.
+    # 10s still tolerates slow page/autoplay startup while capping the worst case.
+    return 10.0
 
 _MUTATE_POLL_STEP_S = 0.5
 _MUTATE_DEADLINE_S = 15.0
@@ -73,7 +77,8 @@ _PAUSE_DEADLINE_S = 10.0
 # tree. When a play-family script returns an empty/non-dict payload, probe
 # get_build_info and surface a clear "reload the extension" diagnostic instead
 # of the generic (and misleading) "non-state payload" error.
-_EXPECTED_BUILD = "0.2.0"
+# Single source of truth: mini_kio/browser_connector/build.py (BUG 13).
+from mini_kio.browser_connector.build import EXTENSION_BUILD as _EXPECTED_BUILD
 
 
 class VerifiedConnector:

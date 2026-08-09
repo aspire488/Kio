@@ -6,8 +6,10 @@ const WS_URL = "ws://127.0.0.1:9877";
 // Build fingerprint: the runtime compares this against its expected build so
 // a stale service worker (Chrome serving a cached copy of background.js) is
 // detected and reported clearly instead of producing cryptic "non-state
-// payload" failures. Bump together with manifest.json version.
-const BUILD_VERSION = "0.2.0";
+// payload" failures. Bump together with manifest.json version AND the Python
+// constant in mini_kio/browser_connector/build.py (single source of truth;
+// keep all three in sync).
+const BUILD_VERSION = "0.3.4";
 
 let AUTH_TOKEN = "";  // Set by runtime message or storage
 
@@ -267,76 +269,161 @@ const SCRIPTS = {
     }
 
     // ── Play Attempt ────────────────────────────────────────────────
+    // Root-cause fix (BUG 3): a raw `video.play()` on YouTube is reconciled
+    // back by the player controller — the promise resolves (or the call is
+    // silently ignored) but the video stays paused, so currentTime never
+    // advances. The canonical programmatic path is the player API
+    // `#movie_player.playVideo()`, which the controller recognizes as a
+    // first-party play. Prefer it, then fall back to the raw element play
+    // (which still works for non-YouTube players / pages without the API).
+    //
+    // AUTOPLAY POLICY (verified against the live profile): Chrome's strict
+    // autoplay policy suspends unmuted programmatic play in this profile.
+    // Strategy: try with the current audio state first (the site may be
+    // autoplay-whitelisted via user media engagement, giving real sound);
+    // if playback is not observed, fall back to MUTED play (always
+    // allowed), verify, then best-effort restore audio — re-muting and
+    // re-verifying if the restore suspends playback. The final verdict
+    // always reflects the state observed AFTER any audio change.
     diag.player_status = 'play_attempted';
     const _before_muted = v.muted;
     const _before_volume = v.volume;
-    v.muted = true;
-    console.log('[PLAY_SCRIPT] PLAY_START',
-      { readyState: v.readyState, duration: v.duration, src: v.currentSrc ? 'set' : 'empty', before_muted: _before_muted, before_volume: _before_volume });
+    const _playerApi = document.getElementById('movie_player');
+    const _hasApi = !!(_playerApi && typeof _playerApi.playVideo === 'function');
 
-    try {
-      const p = v.play();
+    const _playWithTimeout = async () => {
+      // Invoke play (API first, raw fallback) without ever awaiting a
+      // permanently-pending promise: when autoplay is blocked/reconciled,
+      // Chrome can leave play() pending forever, which would hang the whole
+      // connector command (the old 30s freeze). Always race it.
+      if (_hasApi) {
+        try {
+          _playerApi.playVideo();
+        } catch (e) {
+          console.log('[PLAY_SCRIPT] playVideo threw', e.name, e.message);
+        }
+        await new Promise(r => setTimeout(r, 600));
+      }
+      let cur = _playerVideoLocal();
+      if (!cur) return null;
+      if (cur.paused) {
+        try {
+          const p = cur.play();
+          if (p && typeof p.then === 'function') {
+            await Promise.race([
+              p.then(() => {
+                console.log('[PLAY_SCRIPT] PLAY_RESOLVED');
+              }).catch(err => {
+                console.log('[PLAY_SCRIPT] PLAY_REJECTED', err.name, err.message);
+              }),
+              new Promise(r => setTimeout(r, 3000)),
+            ]);
+          }
+        } catch (e) {
+          console.log('[PLAY_SCRIPT] raw play threw', e.name, e.message);
+        }
+      }
+      return _playerVideoLocal();
+    };
 
-      p.then(() => {
-        console.log('[PLAY_SCRIPT] PLAY_RESOLVED');
-      }).catch(err => {
-        console.log('[PLAY_SCRIPT] PLAY_REJECTED');
-        console.log('[PLAY_SCRIPT] exception_name', err.name);
-        console.log('[PLAY_SCRIPT] exception_message', err.message);
-        if (err.stack) console.log('[PLAY_SCRIPT] exception_stack', err.stack.substring(0, 500));
-      });
+    const _observePlaying = async (budgetMs) => {
+      const t0 = (_playerVideoLocal() || v).currentTime || 0;
+      const deadline = Date.now() + budgetMs;
+      while (Date.now() < deadline) {
+        const cur = _playerVideoLocal();
+        if (cur && !cur.paused && cur.currentTime > t0) return cur;
+        if (cur && !cur.paused && cur.currentTime > 0 && cur.readyState >= 2) return cur;
+        await new Promise(r => setTimeout(r, 250));
+      }
+      return null;
+    };
 
-      await p;
+    // Try 1: unmuted play (site may be whitelisted -> real sound).
+    let playingEl = await _observePlaying(0); // no-op init
+    v = await _playWithTimeout();
+    playingEl = v ? await _observePlaying(2500) : null;
 
-      // Restore audio state that was changed for autoplay bypass
-      v.muted = _before_muted;
-      v.volume = _before_volume;
-      console.log('[PLAY_SCRIPT] audio_restored', { before_muted: _before_muted, before_volume: _before_volume, now_muted: v.muted, now_volume: v.volume });
+    let _muted_play_used = false;
+    if (!playingEl) {
+      // Try 2: muted play (always allowed by the autoplay policy).
+      _muted_play_used = true;
+      if (v) v.muted = true;
+      v = await _playWithTimeout();
+      playingEl = v ? await _observePlaying(4000) : null;
+    }
 
-      // Success
-      console.log('[PLAY_SCRIPT] play_succeeded');
-      diag.player_status = 'playing';
-      // Truthfulness contract: live state captured AFTER play() resolved must
-      // win over the pre-play snapshot in `diag`. The old order spread `diag`
-      // last, so diag.paused (captured before play -> true) clobbered the real
-      // post-play state -> a self-contradictory payload {status:'playing',
-      // paused:true} that made KIO report "Couldn't play" while playing.
+    let _audio_restored = true;
+    if (playingEl && _muted_play_used) {
+      // Best-effort audio restore: unmute, then RE-VERIFY playback. If the
+      // policy suspends it (this profile's behavior), re-mute and re-play
+      // so the final state is genuinely playing (muted) — and report that
+      // truthfully in the payload.
+      playingEl.muted = _before_muted;
+      playingEl.volume = _before_volume;
+      const after = await _observePlaying(2500);
+      if (!after) {
+        console.log('[PLAY_SCRIPT] unmute suspended playback - re-muting');
+        playingEl.muted = true;
+        v = await _playWithTimeout();
+        playingEl = v ? await _observePlaying(2500) : null;
+        _audio_restored = false;
+      } else {
+        playingEl = after;
+        _audio_restored = true;
+      }
+    }
+
+    // Final observed snapshot (always post-audio-change).
+    v = playingEl || v;
+    const _final_playing = !!playingEl;
+    console.log('[PLAY_SCRIPT] play_verdict final_playing=' + _final_playing + ' muted_play=' + _muted_play_used + ' audio_restored=' + _audio_restored,
+      { currentTime: v ? v.currentTime : 0, paused: v ? v.paused : true, muted: v ? v.muted : false, volume: v ? v.volume : 0 });
+
+    if (!_final_playing) {
+      // Truthful: playback is NOT observed (paused / currentTime stuck).
+      // Report the observed state so KIO never claims "Playing" without
+      // playback.
+      diag.player_status = 'paused';
       return JSON.stringify({
         ...diag,
-        status: 'playing',
-        player_status: 'playing',
-        currentTime: v.currentTime,
-        duration: v.duration,
-        volume: v.volume,
-        muted: v.muted,
-        paused: v.paused,
-        ended: v.ended,
-        readyState: v.readyState,
+        status: 'paused',
+        player_status: 'paused',
+        currentTime: v ? v.currentTime : 0,
+        duration: v ? v.duration : 0,
+        volume: v ? v.volume : 0,
+        muted: v ? v.muted : false,
+        paused: v ? v.paused : true,
+        ended: v ? v.ended : false,
+        readyState: v ? v.readyState : 0,
+        _play_api_used: _hasApi,
+        _muted_play_used,
         _audio_before_muted: _before_muted,
         _audio_before_volume: _before_volume,
-        _audio_restored: true,
+        _audio_restored,
       });
-
-    } catch (e) {
-      console.log('[PLAY_SCRIPT] exception_name', e.name);
-      console.log('[PLAY_SCRIPT] exception_message', e.message);
-      if (e.stack) console.log('[PLAY_SCRIPT] exception_stack', e.stack.substring(0, 500));
-
-      diag.exceptionName = e.name;
-      diag.exceptionMessage = e.message;
-      diag.exceptionStack = e.stack ? e.stack.substring(0, 500) : '';
-
-      if (e.name === 'NotAllowedError') {
-        diag.player_status = 'blocked';
-        return JSON.stringify({ status: 'blocked', ...diag });
-      }
-      if (e.name === 'AbortError') {
-        diag.player_status = 'aborted';
-        return JSON.stringify({ status: 'error', name: 'AbortError', ...diag });
-      }
-      diag.player_status = 'error';
-      return JSON.stringify({ status: 'error', name: e.name, message: e.message, ...diag });
     }
+
+    // Success — playback observed in the final state: element is unpaused
+    // and currentTime advanced.
+    console.log('[PLAY_SCRIPT] play_succeeded (observed)');
+    diag.player_status = 'playing';
+    return JSON.stringify({
+      ...diag,
+      status: 'playing',
+      player_status: 'playing',
+      currentTime: v.currentTime,
+      duration: v.duration,
+      volume: v.volume,
+      muted: v.muted,
+      paused: v.paused,
+      ended: v.ended,
+      readyState: v.readyState,
+      _play_api_used: _hasApi,
+      _muted_play_used,
+      _audio_before_muted: _before_muted,
+      _audio_before_volume: _before_volume,
+      _audio_restored,
+    });
   },
   pause: () => {
     const v = (() => {
@@ -692,8 +779,9 @@ const SCRIPTS = {
   get_build_info: () => {
     // MV3-safe build fingerprint. The build literal is INLINED because the
     // injected function cannot see the outer BUILD_VERSION const (see SCRIPTS
-    // header note). Keep in sync with BUILD_VERSION above and manifest.json.
-    return JSON.stringify({ build: '0.2.0' });
+    // header note). Keep in sync with BUILD_VERSION above and manifest.json
+    // and mini_kio/browser_connector/build.py.
+    return JSON.stringify({ build: '0.3.4' });
   },
   search_results: () => {
     // MV3-safe candidate scrape for controlled YouTube search (R11).
@@ -772,6 +860,11 @@ async function handleExecuteScript(msg) {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: msg.tab_id },
       func: fn,
+      // NOTE: chrome.scripting.ScriptInjection has NO userGesture property
+      // (verified against the live Chrome 151 schema — it rejects the key).
+      // Strict-autoplay handling therefore lives INSIDE the play script:
+      // unmuted attempt first, then muted play (always allowed), then
+      // best-effort audio restore with re-verification (see SCRIPTS.play).
     });
     const value = result.result;
     log("SUCCESS", "Script executed", { tabId: msg.tab_id, scriptName: msg.script, result: value });

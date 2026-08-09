@@ -57,12 +57,14 @@ def test_rc1_stale_build_reports_clear_error():
 
 def test_rc1_matching_build_keeps_generic_error():
     from mini_kio.core.state_verification import VerifiedConnector
+    from mini_kio.browser_connector.build import EXTENSION_BUILD
 
     async def run():
-        # A build matching the current expected fingerprint (0.2.0) must fall
-        # through to the generic "non-state payload" error, not the stale-
-        # build diagnostic.
-        vc = VerifiedConnector(_StaleRawConn(build="0.2.0"))
+        # A build matching the current expected fingerprint must fall through
+        # to the generic "non-state payload" error, not the stale-build
+        # diagnostic. Uses the single source of truth (BUG 13) so the test
+        # never drifts from the production expectation.
+        vc = VerifiedConnector(_StaleRawConn(build=EXTENSION_BUILD))
         res = await vc.execute_script(7, "play")
         assert res.success is False
         assert "non-state payload" in (res.error or ""), res.error
@@ -285,7 +287,13 @@ def test_rc8_identity_gate_fails_on_wrong_loaded_video(monkeypatch):
     result = prov.play("doomsday trailer")
 
     assert result.success is False, "wrong video must never report success"
-    assert "Wrong video loaded" in (result.error or ""), result.error
+    # Media contract: the failure is reported naturally — internal video IDs
+    # and URLs must not leak into the user-facing text.
+    err = (result.error or "").lower()
+    assert "couldn't start" in err, result.error
+    assert "watch?v=" not in err and "id=" not in err, (
+        f"internal video id leaked into failure text: {result.error!r}"
+    )
 
 
 def test_rc7_no_relevant_candidate_falls_back_to_bootstrap(monkeypatch):
@@ -346,7 +354,7 @@ def test_rc9_unresolved_pronoun_resolves_last_entity(monkeypatch):
     # word "it".
     result = mm.play("it")
     msg = result.get("message", "") or ""
-    assert "interstellar" in msg, msg
+    assert "interstellar" in msg.lower(), msg
     assert " play it" not in msg.lower() and not msg.lower().endswith("it"), msg
 
 

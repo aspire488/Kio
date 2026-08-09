@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import functools
 import logging
 import re
+import threading
 import time
 from typing import Optional
 
 from mini_kio.core import config
 from mini_kio.media.media_state import MediaState, MediaType, PlayerType
-from mini_kio.media.media_session import MediaResult, MediaSession, MediaCandidate
+from mini_kio.media.media_session import (
+    MediaResult, MediaSession, MediaCandidate, user_facing_media_label,
+)
 from mini_kio.media.media_context import MediaContext
 from mini_kio.media.media_registry import MediaRegistry
 from mini_kio.media.media_discovery import MediaDiscovery
@@ -304,6 +308,27 @@ def _correct_fuzzy(text: str) -> str:
     return result
 
 
+# BUG 1 (Telegram concurrency): PTB now processes updates concurrently
+# (concurrent_updates(4)), so a "hi" is answered while a slow media op runs.
+# Media operations themselves MUST still be serialized: the YouTube provider
+# holds a single _session/_tab_id and the registry/context are shared, so two
+# concurrent media commands would corrupt each other's state. Non-media
+# messages (greetings, chat) never touch MediaManager and stay fully
+# concurrent. An RLock is used because media methods re-enter each other
+# (process_followup -> play, seek_forward -> seek).
+_MEDIA_OP_LOCK = threading.RLock()
+_MEDIA_SINGLETON_LOCK = threading.Lock()
+
+
+def _serialize_media_op(method):
+    """Serialize a media mutation across Telegram's concurrent update threads."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with _MEDIA_OP_LOCK:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class MediaManager:
     _instance: Optional[MediaManager] = None
 
@@ -402,13 +427,19 @@ class MediaManager:
 
     @classmethod
     def get_instance(cls) -> MediaManager:
+        # Guarded lazy singleton: with concurrent Telegram updates two threads
+        # could both see _instance is None and build different instances,
+        # splitting session/provider state between them.
         if cls._instance is None:
-            cls._instance = MediaManager()
+            with _MEDIA_SINGLETON_LOCK:
+                if cls._instance is None:
+                    cls._instance = MediaManager()
         return cls._instance
 
     @classmethod
     def reset_instance(cls):
-        cls._instance = None
+        with _MEDIA_SINGLETON_LOCK:
+            cls._instance = None
 
     def _select_provider(self, query: str = "", platform: str = "", media_type: str = "") -> Optional[str]:
         if platform:
@@ -566,7 +597,11 @@ class MediaManager:
                     logger.warning("[MEDIA_ENTITY_REGISTER_FAILED] %s", exc)
 
     def _to_dict(self, result: MediaResult) -> dict:
-        d = {"success": result.success, "message": result.message, "player": result.player}
+        # A truthful failure may carry only `error` (no message). Surface it as
+        # the user-facing message so the reply is the natural failure text, not
+        # the generic "Command failed." fallback.
+        _message = result.message or result.error
+        d = {"success": result.success, "message": _message, "player": result.player}
         if result.error:
             d["error"] = result.error
         if result.session:
@@ -696,6 +731,7 @@ class MediaManager:
             return False
         return True
 
+    @_serialize_media_op
     def play(self, query: str = "", platform: str = "") -> dict:
         logger.info("[MM] action=play query=%s platform=%s", query, platform)
         logger.info("[MM_TRACE] enter query=%s platform=%s", query, platform)
@@ -922,6 +958,13 @@ class MediaManager:
                     logger.info("[MM_TRACE] saving as best result (score=%d)", _result_score(result))
                     last_result = result
                     last_provider = provider_name
+                # Media contract: a provider that ALREADY resolved the exact
+                # media (exact video id / tab) must not have its failure
+                # masked by falling back to another provider (e.g. a generic
+                # browser search page). Stop the chain and report truthfully.
+                if getattr(result, "no_fallback", False) and not self._playing(result):
+                    logger.info("[MM_TRACE] provider resolved exact media — stopping fallback chain")
+                    break
             except Exception as exc:
                 logger.warning("[MM] %s.play failed: %s", provider_name, exc)
                 continue
@@ -944,12 +987,38 @@ class MediaManager:
                         return self._to_dict(_result)
                 except Exception:
                     pass
-            return {"success": False, "message": f"Couldn't play {query_clean} on YouTube."}
+            # Media contract: never echo an internal URL back at the user.
+            # A user-supplied URL is parsed as input; the response uses a
+            # natural label instead.
+            _label = user_facing_media_label(query_clean) or "the requested media"
+            return {"success": False, "message": f"I couldn't start {_label}."}
         return {"success": False, "message": "Nothing to play."}
+
+    def now_playing(self) -> dict:
+        """Capability C: report the CURRENT media entity truthfully.
+
+        Reads the live media registry (not a cached claim) and answers with the
+        actual session label + state. Never invents a "playing" state.
+        """
+        logger.info("[MM] action=now_playing")
+        active = self._registry.get_active_by_player()
+        if not active:
+            return {"success": False, "message": "Nothing is playing right now."}
+        _pname, session = active
+        label = session.title or session.query or session.domain_hint or "media"
+        from mini_kio.media.media_session import user_facing_media_label
+        display = user_facing_media_label(label) if label else "media"
+        state = session.state.value
+        if state == MediaState.PLAYING.value:
+            return {"success": True, "message": f"Playing {display}."}
+        if state == MediaState.PAUSED.value:
+            return {"success": True, "message": f"Paused on {display}."}
+        return {"success": True, "message": f"Loaded {display} (ready to play)."}
 
     # BUG 2: pause/resume user-facing replies are clean, but the full state
     # object (session) and verification remain internally intact. A failed
     # operation is never converted into "Paused." / "Resumed.".
+    @_serialize_media_op
     def pause(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=pause")
         active = self._registry.get_active_by_player()
@@ -982,6 +1051,7 @@ class MediaManager:
 
         return {"success": False, "message": "No media to pause."}
 
+    @_serialize_media_op
     def resume(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=resume")
         active = self._registry.get_active_by_player()
@@ -1014,6 +1084,7 @@ class MediaManager:
 
         return {"success": False, "message": "No media to resume."}
 
+    @_serialize_media_op
     def stop(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=stop")
         active = self._registry.get_active_by_player()
@@ -1032,6 +1103,7 @@ class MediaManager:
                 return {"success": False, "message": result.error or "Stop failed."}
         return {"success": False, "message": "No media to stop."}
 
+    @_serialize_media_op
     def next_track(self) -> dict:
         logger.info("[MM] action=next")
         active = self._registry.get_active_by_player()
@@ -1046,6 +1118,7 @@ class MediaManager:
                 return {"success": False, "message": result.error}
         return {"success": False, "message": "No active media session for next track."}
 
+    @_serialize_media_op
     def previous_track(self) -> dict:
         logger.info("[MM] action=previous")
         active = self._registry.get_active_by_player()
@@ -1063,6 +1136,7 @@ class MediaManager:
     # BUG 3: mute/unmute route through the ACTIVE provider (which owns the
     # extension `mute`/`unmute` scripts) and the state is verified — the
     # reply is only sent when the player actually reports muted/unmuted.
+    @_serialize_media_op
     def mute(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=mute")
         active = self._registry.get_active_by_player()
@@ -1087,6 +1161,7 @@ class MediaManager:
             return {"success": False, "message": result.error or "Mute failed."}
         return {"success": False, "message": "No media to mute."}
 
+    @_serialize_media_op
     def unmute(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=unmute")
         active = self._registry.get_active_by_player()
@@ -1111,6 +1186,7 @@ class MediaManager:
             return {"success": False, "message": result.error or "Unmute failed."}
         return {"success": False, "message": "No media to unmute."}
 
+    @_serialize_media_op
     def volume_up(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=volume_up")
         prov = self._get_provider("browser")
@@ -1121,6 +1197,7 @@ class MediaManager:
                 return self._to_dict(result)
         return {"success": True, "message": "No media to adjust."}
 
+    @_serialize_media_op
     def volume_down(self, domain_hint: str = "") -> dict:
         logger.info("[MM] action=volume_down")
         prov = self._get_provider("browser")
@@ -1131,6 +1208,7 @@ class MediaManager:
                 return self._to_dict(result)
         return {"success": True, "message": "No media to adjust."}
 
+    @_serialize_media_op
     def set_volume(self, level: int) -> dict:
         logger.info("[MM] action=set_volume level=%d", level)
         # Convert 0-100 to 0.0-1.0
@@ -1154,6 +1232,7 @@ class MediaManager:
                 return self._to_dict(result)
         return {"success": True, "message": "No media to adjust."}
 
+    @_serialize_media_op
     def seek(self, seconds: int) -> dict:
         logger.info("[MM] action=seek seconds=%d", seconds)
         self._log_media_state("before_seek")
@@ -1169,12 +1248,15 @@ class MediaManager:
                 return {"success": True, "message": "Seek not supported for this player."}
         return {"success": True, "message": "No active media to seek."}
 
+    @_serialize_media_op
     def seek_forward(self, domain_hint: str = "", seconds: int = 10) -> dict:
         return self.seek(seconds)
 
+    @_serialize_media_op
     def seek_backward(self, domain_hint: str = "", seconds: int = 10) -> dict:
         return self.seek(-seconds)
 
+    @_serialize_media_op
     def search(self, query: str, platform: str = "") -> dict:
         if platform:
             prov = self._get_provider(platform)
@@ -1299,6 +1381,7 @@ class MediaManager:
             return self.seek(seconds)
         return None
 
+    @_serialize_media_op
     def process_followup(self, text: str) -> Optional[dict]:
         from mini_kio.media.intelligence.artifact_memory import parse_artifact_type
         tl = text.lower().strip()
@@ -2067,6 +2150,7 @@ class MediaManager:
                     break
         return updates
 
+    @_serialize_media_op
     def process_information_query(self, query: str) -> dict:
         self._analyze_query_for_intelligence(query)
 
@@ -2156,6 +2240,7 @@ class MediaManager:
         offer = self._offer_manager.get_active_offer()
         return offer.to_display() if offer else None
 
+    @_serialize_media_op
     def accept_intelligence_offer(self) -> Optional[dict]:
         offer = self._offer_manager.accept_active_offer()
         if not offer:
@@ -2189,6 +2274,7 @@ class MediaManager:
     def get_last_offer(self) -> Optional[dict]:
         return self._discovery.get_last_offer()
 
+    @_serialize_media_op
     def accept_offer(self, query: str = "") -> Optional[dict]:
         offer = self._discovery.get_last_offer()
         if not offer:

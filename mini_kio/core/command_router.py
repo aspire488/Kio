@@ -219,131 +219,175 @@ def _format_list(items: list[str]) -> str:
     return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
+def _display_step_target(target: str) -> str:
+    """User-safe display name for a step target (BC-5)."""
+    from mini_kio.core.target_ref import display_target_name
+    return display_target_name(str(target or ""))
+
+
 def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]]) -> str:
-    succeeded: dict[str, list[str]] = {}
-    blocked: list[tuple[str, str]] = []
+    """Truthful aggregate of per-step outcomes (BC-6).
+
+    Reports each step's verified outcome and composes natural partial-success
+    language — never a blanket "done - opened A and B" from unverified ACKs.
+    """
+    succeeded: dict[str, list[str]] = {}  # past-tense verb -> display targets
+    failed: list[tuple[str, str]] = []  # (verb_base, display_target)
+    blocked: list[str] = []
+
     for step, result in zip(steps, results):
         action = step.get("action", "")
-        target = step.get("target", "")
+        target = _display_step_target(step.get("target", ""))
         verb = _ACTION_VERBS.get(action, action)
         if result.get("blocked"):
-            blocked.append((verb, target))
+            blocked.append(f"{verb} {target}")
         elif result.get("success"):
             succeeded.setdefault(verb, [])
             succeeded[verb].append(target)
-    parts = []
-    if succeeded:
-        items = []
-        for verb, targets in succeeded.items():
-            if len(targets) == 1:
-                items.append(f"{verb} {targets[0]}")
-            else:
-                items.append(f"{verb} {_format_list(targets)}")
-        parts.append("done - " + _format_list(items))
-    if blocked:
-        items = [f"{verb} {target}" for verb, target in blocked]
-        if not succeeded:
-            parts.append("all blocked - " + _format_list(items))
         else:
-            parts.append("blocked - " + _format_list(items))
+            base_verb = action.replace("_tab", "").replace("_app", "").replace("_web", "")
+            failed.append((base_verb or action, target))
+
+    parts: list[str] = []
+    if succeeded:
+        # Group by past-tense verb: "Opened ChatGPT and Telegram." or
+        # "Opened ChatGPT and closed Notepad." — never a generic "Done X, Y".
+        bits = [f"{verb} {_format_list(targets)}" for verb, targets in succeeded.items()]
+        parts.append(_format_list(bits))
+    if failed:
+        failed_parts = [f"{v} {t}" for v, t in failed]
+        if parts:
+            parts.append(f"but I couldn't {_format_list(failed_parts)}")
+        else:
+            parts.append(f"I couldn't {_format_list(failed_parts)}")
+    if blocked:
+        if parts:
+            parts.append(f"and {_format_list(blocked)} were blocked")
+        else:
+            parts.append(f"I couldn't {_format_list(blocked)}")
+
     if not parts:
-        return "done"
-    return " | ".join(parts)
+        return "Done."
+    text = " ".join(parts).strip()
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    if not text.endswith((".", "!", "?")):
+        text += "."
+    return text
 
 
-def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
-    """Execute parsed multi-step commands."""
-    from mini_kio.core.app_operator import _normalize_web_target_to_url
+def _run_single_step(action: str, target: str) -> dict:
+    """Run ONE step of a multi-action request with per-step verification.
+
+    Every step is executed independently through the same authoritative path a
+    single command uses (open -> capability/native routing + verification,
+    close -> tab-aware close, play -> MediaManager, else execute_action).
+    """
     from mini_kio.core.execution_boundary import execute_action
     from mini_kio.core.async_utils import safe_run_async
     from mini_kio.media.media_manager import MediaManager
 
-    results: list[dict[str, Any]] = []
-    blocked_count = 0
-    success_count = 0
-
-    for idx, step in enumerate(steps, start=1):
-        action = step.get("action", "")
-        target = step.get("target", "")
-
-        if action == "close":
-            if _check_br_available():
-                results.append(_br_close_tab(target))
-                success_count += 1 if results[-1].get("success") else 0
-                continue
-            if config.BROWSER_CONNECTOR_ENABLED:
-                conn = _get_connector()
-                if conn and conn.is_connected():
-                    try:
-                        close_result = safe_run_async(conn.close_tab(target))
-                        ok = close_result.success
-                        results.append({
-                            "success": ok,
-                            "message": f"Closed {target.capitalize()} tab." if ok else f"Couldn't close {target}.",
-                            "action": action, "target": target,
-                        })
-                        if ok:
-                            success_count += 1
-                        continue
-                    except BaseException as exc:
-                        logger.warning("[CONNECTOR] multi-step close_tab failed: %s", exc)
-
-        if action == "focus":
-            if _check_br_available():
-                results.append(_br_focus_tab(target))
-                success_count += 1 if results[-1].get("success") else 0
-                continue
+    if action == "close":
+        # Same browser-vs-app decision as the single-step classifier: browser
+        # names close the browser app; everything else is tab-scoped.
+        from mini_kio.core.target_ref import parse_target
+        if parse_target(target).kind == "browser":
+            return execute_action("close_app", target)
+        if _check_br_available():
+            return _br_close_tab(target)
+        if config.BROWSER_CONNECTOR_ENABLED:
             conn = _get_connector()
             if conn and conn.is_connected():
                 try:
-                    focus_result = safe_run_async(conn.focus_tab(target))
-                    if focus_result.success:
-                        results.append({"success": True, "message": f"Focused {target.capitalize()} tab.", "action": action, "target": target})
-                        success_count += 1
-                    else:
-                        results.append({"success": False, "message": f"Couldn't focus {target}.", "action": action, "target": target})
-                    continue
+                    close_result = safe_run_async(conn.close_tab(target))
+                    ok = bool(getattr(close_result, "success", False))
+                    return {
+                        "success": ok,
+                        "message": f"Closed {target.capitalize()} tab." if ok else f"Couldn't close {target}.",
+                        "action": action, "target": target,
+                    }
                 except BaseException as exc:
-                    logger.warning("[CONNECTOR] multi-step focus_tab failed: %s", exc)
-                    results.append({"success": False, "message": f"Couldn't focus {target}.", "action": action, "target": target})
-                    continue
+                    logger.warning("[CONNECTOR] multi-step close_tab failed: %s", exc)
+                    return {"success": False, "message": f"Couldn't close {target}.", "action": action, "target": target}
+        # Web-aware close: never escalates to the host browser process.
+        return execute_action("close_app", target)
 
-        if action == "open":
-            url = _normalize_web_target_to_url(target)
-            if url:
-                from mini_kio.core.browser_operator import open_url
-                result = open_url(url)
-                results.append(result)
-                if result.get("success"):
-                    success_count += 1
-                continue
-
-        if action == "play":
-            mm = MediaManager.get_instance()
-            try:
-                play_result = mm.play(target)
-                if isinstance(play_result, dict):
-                    result = {"success": play_result.get("success", False), "message": play_result.get("message", ""), "action": action, "target": target}
-                else:
-                    result = {"success": True, "message": str(play_result), "action": action, "target": target}
-            except Exception as exc:
-                result = {"success": False, "message": f"Playback failed: {exc}", "action": action, "target": target}
-            results.append(result)
+    if action == "focus":
+        # Same routing as single-step focus (browser tab focus first, then
+        # native app window focus).
+        if _check_br_available():
+            result = _br_focus_tab(target)
             if result.get("success"):
-                success_count += 1
-            continue
+                return result
+        conn = _get_connector()
+        if conn and conn.is_connected():
+            try:
+                focus_result = safe_run_async(conn.focus_tab(target))
+                if getattr(focus_result, "success", False):
+                    return {"success": True, "message": f"Focused {target.capitalize()} tab.", "action": action, "target": target}
+            except BaseException as exc:
+                logger.warning("[CONNECTOR] multi-step focus_tab failed: %s", exc)
+        try:
+            from mini_kio.core.pipeline import _ExecutionCoordinator
+            native = _ExecutionCoordinator()._try_native_focus(target)
+            if native:
+                return native
+        except BaseException as exc:
+            logger.warning("multi-step native focus failed: %s", exc)
+        return {"success": False, "message": f"Couldn't focus {target}.", "action": action, "target": target}
 
-        result = execute_action(action, target)
+    if action == "open":
+        # Same routing as a single "open X": native app -> open_app, web app ->
+        # capability open (registers session + tab-identity verification).
+        from mini_kio.core.routing_utils import get_browser_routing
+        route_info = get_browser_routing(target)
+        if route_info["route_type"] == "native":
+            return execute_action("open_app", route_info["target"])
+        if route_info["route_type"] == "browser_fallback":
+            return execute_action("execute_capability", route_info["target"])
+        return execute_action("search_web", target)
+
+    if action == "play":
+        mm = MediaManager.get_instance()
+        try:
+            play_result = mm.play(target)
+            if isinstance(play_result, dict):
+                return {"success": play_result.get("success", False), "message": play_result.get("message", ""), "action": action, "target": target}
+            return {"success": True, "message": str(play_result), "action": action, "target": target}
+        except Exception as exc:
+            return {"success": False, "message": f"Playback failed: {exc}", "action": action, "target": target}
+
+    return execute_action(action, target)
+
+
+def _execute_multi_step(steps: list[dict[str, Any]]) -> dict:
+    """Execute parsed multi-step commands (BC-6).
+
+    Each step is resolved, executed, and verified INDEPENDENTLY. No early abort
+    on a failing step (independent actions still run); the final result is an
+    honest aggregate of per-step outcomes (all/partial/none).
+    """
+    results: list[dict[str, Any]] = []
+    for step in steps:
+        action = step.get("action", "")
+        target = step.get("target", "")
+        try:
+            result = _run_single_step(action, target)
+        except BaseException as exc:
+            logger.exception("[MULTI] step %s/%s crashed: %s", action, target, exc)
+            result = {"success": False, "message": "Step failed.", "action": action, "target": target}
+        if not isinstance(result, dict):
+            result = {"success": bool(result), "message": str(result), "action": action, "target": target}
         results.append(result)
-        if result.get("blocked"):
-            blocked_count += 1
-            continue
-        if result.get("success"):
-            success_count += 1
-        else:
-            return {"success": False, "message": f"Step {idx} failed: {result.get('message', 'unknown error')}", "results": results}
 
-    return {"success": blocked_count == 0 and success_count > 0, "message": _summarize_steps(steps, results), "results": results}
+    succeeded = sum(1 for r in results if r.get("success") and not r.get("blocked"))
+    total = len(steps)
+    all_ok = total > 0 and succeeded == total
+    return {
+        "success": all_ok,
+        "message": _summarize_steps(steps, results),
+        "results": results,
+    }
 
 
 # ---------------------------------------------------------------------------

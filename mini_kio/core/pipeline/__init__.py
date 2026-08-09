@@ -182,6 +182,10 @@ class _IntentClassifier:
         if cls:
             return cls
 
+        cls = self._detect_now_playing(lower, text)
+        if cls:
+            return cls
+
         cls = self._classify_media_transport(lower, text)
         if cls:
             return cls
@@ -410,7 +414,13 @@ class _IntentClassifier:
         return None
 
     def _detect_list_tabs(self, lower):
-        return lower in ("list tabs", "list open tabs", "what tabs are open", "show tabs")
+        # Capability A: desktop-state queries — tabs + KIO-tracked apps.
+        return lower in (
+            "list tabs", "list open tabs", "what tabs are open", "show tabs",
+            "what's open", "what is open", "whats open", "what am i using",
+            "what's running", "what is running", "what apps are open",
+            "what windows are open",
+        )
 
     def _detect_close(self, lower, text, first_word):
         if first_word == "close":
@@ -418,7 +428,13 @@ class _IntentClassifier:
             browser_names = {"chrome", "edge", "firefox", "brave", "comet", "browser"}
             if target.lower() in browser_names or target.lower().endswith(" browser"):
                 return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", target.lower().replace(" browser", ""), text, lower, confidence=1.0)
-            return RoutingDecision(IntentType.BROWSER_FOCUS, "close_tab", target, text, lower, confidence=1.0)
+            # BC-2: tab-scoped close — strip "the X tab" phrasing so the
+            # target resolves to the web-app name ("close the chatgpt tab" ->
+            # close_tab chatgpt), never to the host browser process.
+            tab_target = re.sub(r"^(?:the\s+)?(.+?)(?:\s+tab)?$", r"\1", target.lower()).strip()
+            if tab_target in browser_names:
+                return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", tab_target, text, lower, confidence=1.0)
+            return RoutingDecision(IntentType.BROWSER_FOCUS, "close_tab", tab_target or target, text, lower, confidence=1.0)
         return None
 
     def _detect_system(self, lower, first_word):
@@ -430,6 +446,23 @@ class _IntentClassifier:
     def _detect_file(self, lower, text, first_word):
         if lower.startswith("open folder ") or first_word == "folder":
             return RoutingDecision(IntentType.FILE, "open_folder", text, text, lower, confidence=1.0)
+        return None
+
+    def _detect_now_playing(self, lower, text):
+        # Capability C: state-aware media — "what's playing?" queries the
+        # current media session instead of being misrouted as a generic
+        # information question.
+        now_playing_phrases = frozenset({
+            "what's playing", "what is playing", "whats playing",
+            "what's on", "what is on", "what's currently playing",
+            "what's playing now", "what am i playing", "what am i listening to",
+            "what's the current song", "what's the current video",
+        })
+        if lower in now_playing_phrases:
+            return RoutingDecision(
+                IntentType.MEDIA_TRANSPORT, "now_playing", "", text, lower,
+                confidence=1.0,
+            )
         return None
 
     def _classify_media_transport(self, lower, text):
@@ -774,6 +807,7 @@ class _ExecutionCoordinator:
             "next": mm.next_track, "previous": mm.previous_track,
             "volume_up": lambda: mm.volume_up(), "volume_down": lambda: mm.volume_down(),
             "continue": mm.resume,
+            "now_playing": lambda: mm.now_playing(),
         }
         # R-EFG: dispatch on the classifier action, not the first word of the
         # utterance, so "play next video" (action=next) reaches next_track
@@ -787,6 +821,57 @@ class _ExecutionCoordinator:
 
         logger.warning("[MEDIA] unhandled action=%s text=%s", action, decision.normalized_text)
         return {"success": False, "message": f"Unhandled media action: {action}"}
+
+    def _tracked_running_apps(self) -> list[str]:
+        """Capability A: names of KIO-tracked apps that are still running."""
+        try:
+            from mini_kio.core.runtime import get_runtime
+            rt = get_runtime()
+            if rt is None:
+                return []
+            rt.prune_tracked_processes()
+            names = set()
+            for entry in rt.tracked_processes:
+                name = str(entry.get("name", "") or "").strip()
+                if name and name not in ("explorer",):
+                    display = name.replace("_", " ").strip()
+                    names.add(display[0].upper() + display[1:] if display else name)
+            return sorted(names)
+        except Exception:
+            return []
+
+    def _try_native_focus(self, target: str) -> Optional[dict]:
+        """Capability A: bring a running native app's window to the foreground.
+
+        Uses the tracked process PID (or registry-based process discovery for
+        registered apps) — never a blind system-wide process sweep.
+        """
+        try:
+            from mini_kio.core.runtime import get_runtime
+            from mini_kio.core.app_operator import _find_in_registry, _find_matching_process_pid
+            from mini_kio.platform.window_activation import try_activate_browser
+
+            rt = get_runtime()
+            key = str(target or "").lower().strip()
+            if rt is None or not key:
+                return None
+            rt.prune_tracked_processes()
+            pid = None
+            for entry in rt.tracked_processes:
+                if str(entry.get("name", "") or "").lower() == key:
+                    pid = int(entry.get("pid", 0) or 0)
+                    break
+            if pid is None:
+                info = _find_in_registry(key)
+                if info:
+                    pid = _find_matching_process_pid(key, info)
+            if pid and pid > 0:
+                try_activate_browser(pid)
+                display = target.strip().capitalize()
+                return {"success": True, "message": f"Focused {display}."}
+        except Exception as exc:
+            logger.warning("native focus failed for %s: %s", target, exc)
+        return None
 
     def _try_browser_activate(self) -> None:
         try:
@@ -831,24 +916,34 @@ class _ExecutionCoordinator:
         conn = _get_connector()
 
         if action == "list_tabs":
+            # Capability A: "What's open?" reports browser tabs AND KIO-tracked
+            # running apps — the user sees the whole desktop state, not just the
+            # browser.
+            lines = []
             if conn and conn.is_connected():
                 from mini_kio.core.async_utils import safe_run_async
                 try:
                     result = safe_run_async(conn.list_tabs())
                     if result.success and result.tabs:
-                        lines = []
                         for idx, t in enumerate(result.tabs, start=1):
                             title = t.title or t.url
                             suffix = " [Opened by KIO]" if getattr(t, "is_owned", False) else ""
                             lines.append(f"{idx}. {title}{suffix}")
-                        return {"success": True, "message": "Open tabs:\n" + "\n".join(lines)}
                     elif result.success:
-                        return {"success": True, "message": "No tabs open."}
+                        lines.append("No browser tabs open.")
                 except Exception as exc:
                     logger.warning("list_tabs failed: %s", exc)
-            if _check_br_available():
-                return _br_list_tabs()
-            return {"success": False, "message": "Browser not available."}
+            elif _check_br_available():
+                br_result = _br_list_tabs()
+                if br_result.get("success"):
+                    body = br_result.get("message", "").replace("Open tabs:\n", "")
+                    lines.extend(l for l in body.splitlines() if l.strip())
+            apps = self._tracked_running_apps()
+            if apps:
+                lines.append("Apps: " + ", ".join(apps))
+            if not lines:
+                return {"success": True, "message": "Nothing is open right now."}
+            return {"success": True, "message": "Open right now:\n" + "\n".join(lines)}
 
         if action == "focus":
             if conn and conn.is_connected():
@@ -857,27 +952,41 @@ class _ExecutionCoordinator:
                     result = safe_run_async(conn.focus_tab(params["target"]))
                     if result.success:
                         self._try_browser_activate()
-                        return {"success": True, "message": f"Focused {params['target'].capitalize()} tab."}
+                        from mini_kio.core.target_ref import display_target_name
+                        return {"success": True, "message": f"Focused {display_target_name(params['target'])} tab."}
                 except Exception as exc:
                     logger.warning("focus_tab failed: %s", exc)
             if _check_br_available():
                 result = _br_focus_tab(params["target"])
                 if result.get("success"):
                     self._try_browser_activate()
-                return result
+                    return result
+            # Capability A: "Focus/Switch to X" may target a running native app
+            # window (e.g. Calculator, Notepad) — not only browser tabs.
+            native = self._try_native_focus(params["target"])
+            if native:
+                return native
             return {"success": False, "message": f"Couldn't focus {params['target']}."}
 
         if action == "close_tab":
+            # BC-2: a tab-scope close must NEVER escalate into a process-scope
+            # close of the host browser. Close the tab; if it cannot be found,
+            # route through the web-aware close path (capability registry /
+            # connector) which closes the session at tab scope and reports a
+            # truthful failure — it never kills the host browser process.
             if conn and conn.is_connected():
                 from mini_kio.core.async_utils import safe_run_async
                 try:
                     result = safe_run_async(conn.close_tab(params["target"]))
                     if result.success:
-                        return {"success": True, "message": f"Closed {params['target'].capitalize()} tab."}
+                        from mini_kio.core.target_ref import display_target_name
+                        return {"success": True, "message": f"Closed {display_target_name(params['target'])} tab."}
                 except Exception as exc:
                     logger.warning("close_tab failed: %s", exc)
-            elif _check_br_available():
-                return _br_close_tab(params["target"])
+            if _check_br_available():
+                result = _br_close_tab(params["target"])
+                if result.get("success"):
+                    return result
             from mini_kio.core.execution_boundary import execute_action
             return execute_action("close_app", params["target"])
 
@@ -1256,9 +1365,15 @@ class _ResponseComposer:
             pass
         if decision.session_id and decision.action:
             from mini_kio.core.runtime import remember_runtime_context
+            # BC-3: never persist a raw serialized capability target
+            # ("chrome::open_url::https://...::chatgpt") as the conversational
+            # referent — a later "close it" would splice that string back into
+            # the command. Store the user-safe name instead.
+            from mini_kio.core.target_ref import safe_target_name
+            _raw_target = str(result.get("target", decision.target) or "")
             remember_runtime_context("execution", {
                 "action": result.get("action", decision.action),
-                "target": result.get("target", decision.target),
+                "target": safe_target_name(_raw_target),
                 "success": result.get("success", False),
             })
         return result

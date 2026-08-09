@@ -324,8 +324,20 @@ def state_delta_probe(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def noop_probe(result: dict[str, Any]) -> dict[str, Any]:
-    """Pass-through probe that respects operator success."""
+    """Pass-through probe that respects operator success.
+
+    BC-4: an operator-provided honest verification status (e.g. "unverified"
+    when a tab-identity check could not confirm) is PRESERVED rather than
+    clobbered — "ACK received" is not silently upgraded to "verified".
+    """
     result["probe_used"] = "noop"
+    existing = result.get("verification_status")
+    if existing in ("passed", "failed", "unverified", "probe_error"):
+        if not result.get("outcome_class"):
+            result["outcome_class"] = (
+                OUTCOME_SUCCESS if result.get("success") else OUTCOME_FAILURE
+            )
+        return result
     if result.get("success"):
         result["verification_status"] = "passed"
         result["outcome_class"] = OUTCOME_SUCCESS
@@ -946,12 +958,13 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
         if verified_result.get("outcome_class") == OUTCOME_INVALID_RESULT:
             record_runtime_integrity_warning("invalid_result", {"action": verified_result["action"]})
 
+        from mini_kio.core.target_ref import safe_target_name
         remember_runtime_context(
             "execution",
             {
                 "execution_id": execution_id,
                 "action": verified_result["action"],
-                "target": verified_result["target"],
+                "target": safe_target_name(str(verified_result.get("target", "") or "")),
                 "verification_status": verified_result["verification_status"],
                 "outcome_class": verified_result["outcome_class"],
                 "success": verified_result["success"],
@@ -991,12 +1004,13 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             "execution_id": execution_id,
             "tool_version": descriptor.get("tool_version", "unknown") if 'descriptor' in locals() else "unknown",
         })
+        from mini_kio.core.target_ref import safe_target_name
         remember_runtime_context(
             "execution",
             {
                 "execution_id": execution_id,
                 "action": failure_result["action"],
-                "target": failure_result["target"],
+                "target": safe_target_name(str(failure_result.get("target", "") or "")),
                 "verification_status": failure_result["verification_status"],
                 "outcome_class": failure_result["outcome_class"],
                 "success": failure_result["success"],

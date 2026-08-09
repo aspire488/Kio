@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional
@@ -12,7 +13,7 @@ from typing import Optional
 from mini_kio.browser_connector.connector import Connector
 from mini_kio.core import config
 from mini_kio.core.async_utils import safe_run_async
-from mini_kio.media.media_session import MediaResult, MediaSession, MediaCandidate
+from mini_kio.media.media_session import MediaResult, MediaSession, MediaCandidate, user_facing_media_label
 from mini_kio.media.media_state import MediaState, PlayerType, MediaType
 from mini_kio.media.providers import MediaProvider
 
@@ -315,6 +316,24 @@ class YouTubeProvider(MediaProvider):
             self._conn = _get_connector()
         return self._conn
 
+    def _get_raw_conn(self) -> Optional[Connector]:
+        """The raw (unverified) connector for the play/verification loop.
+
+        The state-verification wrapper (VerifiedConnector) re-probes Chrome
+        for up to its full deadline on EVERY play-family execute_script call.
+        The provider's own acceptance loop (get_player_state, status,
+        currentTime progression, stabilization) IS the state verification for
+        playback, so routing retry/stabilization play calls through the raw
+        connector eliminates the duplicated 10s-per-attempt verification that
+        produced the multi-minute retry spiral (BUG 4) — without losing any
+        truthfulness (the final acceptance still requires observed player
+        state, and open_tab remains verified by the wrapper).
+        """
+        conn = self._get_conn()
+        if conn is None:
+            return None
+        return getattr(conn, "_raw", conn)
+
     def _api_search_candidates(self, query: str) -> list[dict]:
         """Discover candidates via the YouTube Data API when a key exists.
 
@@ -355,6 +374,16 @@ class YouTubeProvider(MediaProvider):
                 })
             logger.info("[YT_API_SEARCH] query=%s results=%d", query, len(out))
             return out
+        except urllib.error.HTTPError as exc:
+            # RC-quota: Google rejected the request on quota/rate limits. Log it
+            # EXPLICITLY (this is why API discovery silently went missing) but
+            # never leak the key, never retry (a 429 retry storm worsens quota),
+            # and keep the graceful degrade to the browser-scrape path.
+            if exc.code == 429:
+                logger.error("[YT_API_SEARCH] QUOTA_EXHAUSTED query=%s (key present, quota exceeded; falling back to browser scrape)", query)
+            else:
+                logger.warning("[YT_API_SEARCH] failed query=%s http_err=%s", query, exc.code)
+            return []
         except Exception as exc:
             logger.warning("[YT_API_SEARCH] failed query=%s err=%s", query, exc)
             return []
@@ -452,7 +481,11 @@ class YouTubeProvider(MediaProvider):
                 media_type=self._detect_type(query),
             )
             self._session.touch()
-            return MediaResult(success=True, message=f"Playing on YouTube: {display}", session=self._session, player="youtube")
+            # Media contract: the user-facing reply is natural language
+            # ("Playing X."), never a platform/provider-qualified string.
+            # Reuse the shared label helper (title-cased, URL-safe).
+            _display_label = user_facing_media_label(display) or "the requested media"
+            return MediaResult(success=True, message=f"Playing {_display_label}.", session=self._session, player="youtube")
 
         clean_query = query.strip()
         if not clean_query:
@@ -485,6 +518,15 @@ class YouTubeProvider(MediaProvider):
             playback_state = MediaState.IDLE
             _identity_fail: Optional[str] = None
             _actual_watch_url = ""
+            _tab_lost: Optional[str] = None
+            # BUG 4: the play/verification loop must run on the RAW connector.
+            # VerifiedConnector re-probes Chrome for up to its full deadline on
+            # every play-family execute_script call; retrying through it turned
+            # a genuine autoplay failure into a 5x10s+ spiral. The provider's
+            # own acceptance (playerState==1, status, currentTime progression,
+            # stabilization) is the state verification for playback, so the
+            # raw loop keeps truthfulness while bounding the worst case.
+            play_conn = self._get_raw_conn() or conn
             if not tab_id:
                 logger.info("[ROOT_YT] tab_id is None — no tab returned by connector")
             else:
@@ -525,6 +567,11 @@ class YouTubeProvider(MediaProvider):
                     _selected = self._select_best_candidate(tab_id, clean_query, media_type=_mt_hint)
                 _selected_video_id = (_selected or {}).get("video_id", "") or ""
                 _selected_title = (_selected or {}).get("title", "") or ""
+                # Media contract: an exact video was resolved (user URL parsed
+                # to a video id, or an intelligent candidate was selected). A
+                # playback failure on the resolved tab must NOT fall back to a
+                # generic browser search page (MediaManager respects no_fallback).
+                _resolved_exact = _is_direct_url or bool(_selected)
                 _navigated = False
                 if _selected:
                     _candidate_url = _selected["url"]
@@ -611,7 +658,7 @@ class YouTubeProvider(MediaProvider):
                             # ────────────────────────────────────────────────────
 
                             logger.info("[ROOT_YT] invoking play attempt=%d", attempt + 1)
-                            play_result = safe_run_async(conn.execute_script(tab_id, "play"))
+                            play_result = safe_run_async(play_conn.execute_script(tab_id, "play"))
                             logger.info("[ROOT_YT] play_result success=%s msg_type=%s msg=%s", 
                                         play_result.success, 
                                         type(play_result.message).__name__ if hasattr(play_result, 'message') else 'N/A',
@@ -624,87 +671,44 @@ class YouTubeProvider(MediaProvider):
                                 _player_status_from_script = msg.get("player_status")
                                 logger.info("[PLAY_VERIFY] status=%s paused=%s readyState=%s player_status_from_script=%s", _status, _paused, _rs, _player_status_from_script)
 
-                                _player_state_result = safe_run_async(conn.execute_script(tab_id, "get_player_state"))
+                                _player_state_result = safe_run_async(play_conn.execute_script(tab_id, "get_player_state"))
                                 _player_state = -1
                                 if _player_state_result.success and isinstance(_player_state_result.message, dict):
                                     _player_state = _player_state_result.message.get("playerState", -1)
                                 logger.info("[PLAY_VERIFY] actual_player_state=%s [PLAYER_STATE_DEBUG]", _player_state)
 
-                                # Determine if playing based on multiple sources
+                                # Determine if playing based on multiple sources.
+                                # Truthful-playback contract: the extension play
+                                # script (build 0.3.3+) reports player_status
+                                # 'playing' ONLY when it OBSERVED the element
+                                # unpaused with currentTime advancing (it performs
+                                # its own in-page stabilization + audio-restore
+                                # re-verification). A payload claiming 'playing'
+                                # while paused=True is therefore SELF-
+                                # CONTRADICTORY (a legacy/stale snapshot) —
+                                # accepting it is the exact false-success that
+                                # reported "Playing" while the element sat at
+                                # 0:00/paused. Only YouTube's own player state
+                                # (getPlayerState()==1) overrides paused, and it
+                                # is authoritative.
                                 _accepted_reason = "none"
                                 _is_playing = False
 
-                                if _player_state == 1: # YouTube Iframe API state for playing
+                                if _player_state == 1 and not _paused: # YouTube Iframe API state for playing — authoritative, but the element must still be observed unpaused
                                     _is_playing = True
                                     _accepted_reason = "player_state_1"
-                                elif _player_status_from_script == "playing":
-                                    # The 'paused' field of the play-script payload is a
-                                    # pre-play snapshot on some extension builds and must
-                                    # not veto a verified 'playing' status.
+                                elif _player_status_from_script == "playing" and not _paused:
                                     _is_playing = True
                                     _accepted_reason = "script_player_status_playing"
-                                elif _status == "playing":
+                                elif _status == "playing" and not _paused:
                                     _is_playing = True
                                     _accepted_reason = "legacy_status_playing"
 
-                                # Stabilization: if playing but paused=true, poll for transition to paused=false
-                                if (_status == "playing" or _player_status_from_script == "playing") and _paused and not _is_playing:
-                                    logger.info("[PLAY_VERIFY] playing+paused=true — stabilizing attempt=%d", attempt + 1)
-                                    _stabilized = False
-                                    _current_time_before_stabilization = msg.get("currentTime")
-                                    for _st in range(5):
-                                        time.sleep(0.25)
-                                        _st_result = safe_run_async(conn.execute_script(tab_id, "play"))
-                                        if _st_result.success and isinstance(_st_result.message, dict):
-                                            _st_msg = _st_result.message
-                                            _st_player_state_result = safe_run_async(conn.execute_script(tab_id, "get_player_state"))
-                                            _st_player_state = -1
-                                            if _st_player_state_result.success and isinstance(_st_player_state_result.message, dict):
-                                                _st_player_state = _st_player_state_result.message.get("playerState", -1)
-
-                                            _st_status = _st_msg.get("status")
-                                            _st_paused = _st_msg.get("paused", True)
-                                            _st_player_status_from_script = _st_msg.get("player_status")
-                                            _st_current_time = _st_msg.get("currentTime")
-
-                                            logger.info("[PLAY_VERIFY] stabilize_poll=%d status=%s paused=%s player_status_from_script=%s actual_player_state=%s currentTime=%s", 
-                                                        _st + 1, _st_status, _st_paused, _st_player_status_from_script, _st_player_state, _st_current_time)
-
-                                            if _st_player_state == 1:
-                                                msg = _st_msg # Update message with latest state
-                                                _is_playing = True
-                                                _accepted_reason = "stabilize_player_state_1"
-                                                _stabilized = True
-                                                logger.info("[PLAY_VERIFY] stabilized=true via player_state")
-                                                break
-                                            elif (_st_status == "playing" or _st_player_status_from_script == "playing"):
-                                                msg = _st_msg # Update message with latest state
-                                                _is_playing = True
-                                                _accepted_reason = "stabilize_script_status_playing_and_not_paused"
-                                                _stabilized = True
-                                                logger.info("[PLAY_VERIFY] stabilized=true via script status")
-                                                break
-                                            elif _st_current_time is not None and _current_time_before_stabilization is not None and _st_current_time > _current_time_before_stabilization:
-                                                msg = _st_msg # Update message with latest state
-                                                _is_playing = True
-                                                _accepted_reason = "stabilize_current_time_progression"
-                                                _stabilized = True
-                                                logger.info("[PLAY_VERIFY] stabilized=true via currentTime progression")
-                                                break
-
-                                    if not _stabilized:
-                                        logger.info("[PLAY_VERIFY] stabilize_timeout — accepting current state (not fully stable, checking final status)")
-                                    # After stabilization loop, re-evaluate _is_playing based on the latest 'msg'
-                                    if not _is_playing:
-                                        if _player_state == 1:
-                                            _is_playing = True
-                                            _accepted_reason = "final_player_state_1_after_stabilize"
-                                        elif msg.get("player_status") == "playing":
-                                            _is_playing = True
-                                            _accepted_reason = "final_script_player_status_playing_after_stabilize"
-                                        elif msg.get("status") == "playing":
-                                            _is_playing = True
-                                            _accepted_reason = "final_legacy_status_playing_after_stabilize"
+                                # (stabilization removed: the 0.3.3+ script already
+                                # stabilizes in-page and re-verifies playback after
+                                # restoring audio; provider-side re-play retries of
+                                # a self-contradictory payload only produced the
+                                # multi-minute false-success spiral.)
 
                                 logger.info("[PLAY_VERIFY_FINAL] status=%s player_status_from_script=%s paused=%s actual_player_state=%s accepted_reason=%s", 
                                             msg.get("status"), msg.get("player_status"), msg.get("paused", True), _player_state, _accepted_reason)
@@ -731,6 +735,18 @@ class YouTubeProvider(MediaProvider):
                                 elif msg.get("status", "").startswith("error:"):
                                     logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_error status=%s", msg.get("status"))
                                     break
+                                elif msg.get("name") == "PlayerNotReady" and attempt < 4:
+                                    # A cold YouTube watch page can take longer
+                                    # than the script's readiness window to attach
+                                    # media data (readyState stays 0 while the SPA
+                                    # warms up). That is a TIMING signal, not a
+                                    # verdict: retry within the bounded loop, same
+                                    # tab, same resolved video.
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=player_not_ready_retry attempt=%d", attempt + 1)
+                                    continue
+                                elif msg.get("name") == "PlayerNotReady":
+                                    logger.info("[ROOT_YT] PLAY_LOOP_EXIT=player_not_ready_exhausted attempt=%d", attempt + 1)
+                                    break
                                 else:
                                     logger.info("[ROOT_YT] PLAY_LOOP_EXIT=unknown_status status=%s", msg.get("status"))
                                     break
@@ -740,17 +756,33 @@ class YouTubeProvider(MediaProvider):
                             elif not play_result.success:
                                 _err = str(getattr(play_result, 'error', '') or '')
                                 logger.info("[ROOT_YT] PLAY_LOOP_EXIT=script_failed error=%s attempt=%d", _err, attempt + 1)
-                                # The watch page may still be building its <video>
-                                # element (or the extension payload may be a
-                                # transient non-state). A no-media / not-yet-
-                                # playing failure is a timing signal, not a
-                                # verdict: retry within the bounded loop and only
-                                # give up after the last attempt.
+                                _err_lower = _err.lower()
+                                # BUG 5: a lost tab is a DEFINITIVE condition, not
+                                # a timing signal. Chrome reports "No tab with id" /
+                                # "Cannot access contents of the page" when the tab
+                                # was closed/crashed mid-operation. Stop retrying,
+                                # classify it, and let the caller fail truthfully.
+                                _TAB_LOST_MARKERS = (
+                                    "no tab with id", "cannot access contents",
+                                    "tab was closed", "no tab", "tab not found",
+                                    "could not access the tab",
+                                )
+                                if any(k in _err_lower for k in _TAB_LOST_MARKERS):
+                                    _tab_lost = "The YouTube tab closed during playback."
+                                    break
+                                # Otherwise the watch page may still be building its
+                                # <video> element (or the extension payload may be
+                                # a transient non-state). A no-media / not-yet-
+                                # playing failure is a timing signal, not a verdict:
+                                # retry within the bounded loop and only give up
+                                # after the last attempt. A definitive verification
+                                # verdict ("did not advance" / "cannot read
+                                # playback") is NOT retried — retrying it is what
+                                # produced the multi-minute spiral (BUG 4).
                                 _retryable = any(
-                                    k in _err.lower()
+                                    k in _err_lower
                                     for k in (
-                                        "no media", "did not advance",
-                                        "cannot read playback", "returned no payload",
+                                        "no media", "returned no payload",
                                         "non-state payload", "reported: no media",
                                     )
                                 )
@@ -775,50 +807,100 @@ class YouTubeProvider(MediaProvider):
                 _artist = _parts[1].strip()
 
             # RC8: a selected-video identity mismatch is a truthful PLAY FAILURE.
-            # Never report success on the wrong video.
+            # Never report success on the wrong video. The detailed mismatch (with
+            # video IDs) stays in the diagnostics log; the user-facing error is
+            # natural and never exposes internal IDs.
             if _identity_fail:
                 logger.info("[ROOT_YT] RETURN=R9 identity_fail %s", _identity_fail)
+                _label = user_facing_media_label(clean_query) or _selected_title or "the requested media"
                 return MediaResult(
                     success=False,
-                    error=_identity_fail,
+                    error=f"I couldn't start {_label}.",
                     player="youtube",
+                    no_fallback=_resolved_exact,
+                )
+
+            # BUG 5: the tab disappeared mid-operation. Report the loss
+            # truthfully instead of "Opened on YouTube" (which would be false
+            # — the tab is gone) or a generic script error. The resolved media
+            # is gone with it, so no other provider can take over.
+            if _tab_lost:
+                logger.info("[ROOT_YT] RETURN=R10 tab_lost %s", _tab_lost)
+                return MediaResult(
+                    success=False,
+                    error=_tab_lost,
+                    player="youtube",
+                    no_fallback=_resolved_exact,
                 )
 
             self._tab_id = tab_id
             # RC8: the session's canonical URL must be the ACTUAL loaded watch
             # URL (the video really playing), not the search-results URL.
             _session_url = _actual_watch_url or url
-            self._session = MediaSession(
-                player=PlayerType.YOUTUBE,
-                tab_id=tab_id,
-                state=playback_state,
-                query=clean_query,
-                title=_title,
-                artist=_artist,
-                url=_session_url,
-                domain_hint="youtube.com",
-                media_type=self._detect_type(clean_query),
-            )
-            self._session.touch()
 
-            display_query = clean_query
-            if clean_query.startswith(("http://", "https://", "www.")):
-                display_query = "the requested media"
-            message = (
-                f"Playing on YouTube: {display_query}" if playback_state == MediaState.PLAYING else
-                "Video ready on YouTube." if playback_state == MediaState.READY else
-                f"Opened on YouTube: {display_query}"
-            )
-            logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=%s has_session=%s message=%s",
-                        playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
-                        playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
-                        self._session is not None,
-                        message)
+            # Media contract (URL leak): a user-supplied YouTube URL is parsed
+            # as INPUT, but user-facing text must use the RESOLVED media title,
+            # never the URL. Once playback is established on a direct-URL tab,
+            # read the loaded page title and use it for the session title and
+            # the reply; the canonical URL stays internal (session.url).
+            _page_title = ""
+            if _is_direct_url and playback_state in (
+                MediaState.PLAYING, MediaState.READY, MediaState.PAUSED,
+            ):
+                try:
+                    _info = safe_run_async(play_conn.execute_script(tab_id, "get_page_info"))
+                    if _info.success and isinstance(_info.message, dict):
+                        _pt = str(_info.message.get("title") or "").strip()
+                        if _pt and _pt.lower() not in ("youtube", "- youtube"):
+                            _page_title = re.sub(r"\s*[-|–]\s*YouTube\s*$", "", _pt).strip()
+                except Exception:
+                    pass
+
+            if playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED):
+                _label = user_facing_media_label(clean_query) or _page_title or "the requested media"
+                self._session = MediaSession(
+                    player=PlayerType.YOUTUBE,
+                    tab_id=tab_id,
+                    state=playback_state,
+                    query=clean_query,
+                    title=_page_title or _title,
+                    artist=_artist,
+                    url=_session_url,
+                    domain_hint="youtube.com",
+                    media_type=self._detect_type(clean_query),
+                )
+                self._session.touch()
+
+                # Media contract: natural titled replies, never platform-
+                # qualified or URL-bearing. Playback is already verified above
+                # (PLAY_VERIFY_FINAL), so "Playing X." is a verified claim.
+                message = (
+                    f"Playing {_label}." if playback_state == MediaState.PLAYING else
+                    "The video is ready." if playback_state == MediaState.READY else
+                    f"Opened {_label}."
+                )
+                logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True message=%s",
+                            playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
+                            message)
+                return MediaResult(
+                    success=True,
+                    message=message,
+                    session=self._session,
+                    player="youtube",
+                )
+
+            # Truthful failure: playback was NOT established on the resolved tab.
+            # Report it naturally (never the internal URL/video ID) and set
+            # no_fallback so MediaManager does not abandon the resolved media
+            # for a generic browser search page.
+            _label = user_facing_media_label(clean_query) or _page_title or "the requested media"
+            _err = f"I couldn't start {_label}."
+            logger.info("[ROOT_YT] FINAL_RETURN failure error=%s", _err)
             return MediaResult(
-                success=playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED),
-                message=message,
-                session=self._session,
+                success=False,
+                error=_err,
                 player="youtube",
+                no_fallback=_resolved_exact,
             )
         except Exception as exc:
             logger.info("[ROOT_YT] RETURN=R5 outer_exception exc=%s", exc)
@@ -1161,6 +1243,20 @@ class YouTubeProvider(MediaProvider):
                         _ar = msg.get("_audio_restored")
                         logger.info("[MEDIA_AUDIO] action=%s before_muted=%s before_volume=%s after_muted=%s after_volume=%s audio_restored=%s",
                                     action, _abm, _abv, msg.get("muted"), msg.get("volume"), _ar)
+                    # Truthful play/resume verdict (BUG 3 contract): the play
+                    # script reports status='paused' when playback was NOT
+                    # observed in the final state. For a play/resume request a
+                    # paused outcome means the action did NOT take effect — it
+                    # must be a truthful failure, never a success that Media
+                    # Manager would echo as "Resumed.".
+                    if action in ("play", "resume") and msg.get("status") != "playing":
+                        logger.info("[MM_TRANSPORT] play/resume not observed: status=%s", msg.get("status"))
+                        return MediaResult(
+                            success=False,
+                            error="I couldn't resume playback." if action == "resume" else "I couldn't start playback.",
+                            session=self._session,
+                            player="youtube",
+                        )
                     if msg.get("status") == "playing":
                         new_state = MediaState.PLAYING
                     elif msg.get("status") == "paused":

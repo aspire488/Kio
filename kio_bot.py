@@ -148,6 +148,13 @@ def _build_app() -> Application:
         .read_timeout(30)
         .write_timeout(30)
         .pool_timeout(30)
+        # PTB defaults to processing updates one-by-one: a slow media op
+        # (play verification polls up to ~10s per attempt) blocks every other
+        # message for minutes. Allow a small concurrent pool so a "hi" is
+        # answered while playback is being resolved. The connector serializes
+        # extension commands on its single WS loop, so concurrent callers only
+        # interleave there — no shared-state corruption.
+        .concurrent_updates(4)
     )
     if TELEGRAM_PROXY:
         logger.info("[TELEGRAM_PROXY] configured: %s", TELEGRAM_PROXY)

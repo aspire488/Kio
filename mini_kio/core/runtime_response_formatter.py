@@ -100,27 +100,55 @@ def _extract_url_name(target: str) -> str:
     return url_part.capitalize()
 
 
+def _safe_display_target(target: str) -> str:
+    """User-safe display name for a target (BC-5: no raw URLs / :: chains)."""
+    from mini_kio.core.target_ref import display_target_name
+    return display_target_name(str(target or ""))
+
+
 def format_open_app(target: str, success: bool, message: str) -> str:
     if not success:
         return _format_error(_ensure_str(message))
-    display = target.strip().capitalize()
+    display = _safe_display_target(target)
     return f"Opened {display}."
 
 
 def format_close_app(target: str, success: bool, details: Dict[str, Any]) -> str:
+    """Translate a structured close outcome into concise user-facing language.
+
+    BUG 7: the response must correspond to the strongest verified state and
+    must never contradict itself. Outcome classes from app_operator:
+      SUCCESS                -> "Closed X."
+      SUCCESS_WITH_RESIDUALS -> "Closed X, but some background processes are
+                                 still running." (partial, but concise)
+      NOT_RUNNING            -> "X wasn't running."
+      FAILED / other         -> truthful failure via the message.
+    Implementation detail (pids, process trees, registry names) stays in the
+    structured fields and is never surfaced.
+    """
+    if details.get("capability_closed"):
+        cap_name = details.get("capability_name") or _safe_display_target(target)
+        return f"Closed {cap_name}."
+
+    display = _safe_display_target(target)
+    outcome = str(details.get("outcome_class") or "").upper()
+    verification = str(details.get("verification_status") or "").lower()
+
     if not success:
         msg = _ensure_str(details.get("message", ""))
-        if "not running" in msg.lower() or "already closed" in msg.lower() or "was already closed" in msg.lower():
-            return f"{target.capitalize()} was already closed."
+        if outcome == "NOT_RUNNING" or verification == "not_running" or \
+           "not running" in msg.lower() or "wasn't running" in msg.lower() or \
+           "was already closed" in msg.lower() or "already closed" in msg.lower():
+            return f"{display} wasn't running."
         if "ambiguous" in msg.lower():
-            return f"Couldn't close {target}: multiple matches found."
+            return f"Couldn't close {display}: multiple matches found."
         if "not found" in msg.lower() or "not track" in msg.lower():
-            return f"Couldn't find {target} to close."
+            return f"Couldn't find {display} to close."
         return _format_error(msg)
-    if details.get("capability_closed"):
-        cap_name = details.get("capability_name", target)
-        return f"Closed the {cap_name} session."
-    display = target.strip().capitalize()
+
+    # Success path — but be truthful about residuals.
+    if outcome == "SUCCESS_WITH_RESIDUALS" or verification == "passed_with_residuals" or details.get("residual_pid"):
+        return f"Closed {display}, but some background processes are still running."
     return f"Closed {display}."
 
 
@@ -174,7 +202,15 @@ def format_result(
     action: str, target: str, success: bool, details: Dict[str, Any]
 ) -> str:
     message = _ensure_str(details.get("message", ""))
-    if _is_natural(message) and not _contains_dev_terms(message):
+    # BUG 7: a PARTIAL close (primary terminated, background components remain)
+    # must be rendered by the structured formatter so the residual note
+    # surfaces even though the operator message ("Closed Chrome.") is itself
+    # natural — otherwise success and partial would read identically.
+    _needs_structured = (
+        action in ("close_app", "close")
+        and str(details.get("outcome_class") or "").upper() == "SUCCESS_WITH_RESIDUALS"
+    )
+    if _is_natural(message) and not _contains_dev_terms(message) and not _needs_structured:
         _DIAG["response_already_natural"] += 1
         return message
     formatted = _dispatch_format(action, target, success, details)
