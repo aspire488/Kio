@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -125,10 +126,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"[TELEGRAM] uid={user_id} cmd={command!r}")
     await update.message.chat.send_action("typing")
 
+    # Lightweight round-trip diagnostic (no message secrets): proves
+    # update received -> routed -> response generated -> response sent.
+    from mini_kio.core.runtime import emit_runtime_trace
+    _rt_start = time.monotonic()
     try:
         reply = await asyncio.to_thread(route, command, user_id)
+        _rt_route_ms = int((time.monotonic() - _rt_start) * 1000)
         logger.info(f"[TELEGRAM_REPLY] uid={user_id} reply={reply!r}")
-        await update.message.reply_text(reply)
+        sent = await update.message.reply_text(reply)
+        _rt_total_ms = int((time.monotonic() - _rt_start) * 1000)
+        emit_runtime_trace(
+            "telegram_roundtrip",
+            uid=user_id,
+            update_id=getattr(update, "update_id", None),
+            route_ms=_rt_route_ms,
+            total_ms=_rt_total_ms,
+            reply_len=len(reply),
+            send_ok=bool(sent is not None),
+        )
     except BaseException as exc:
         logger.exception(f"[TELEGRAM] handler error: {exc}")
         await update.message.reply_text(
@@ -201,7 +217,8 @@ def _build_app() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(
         CommandHandler(
-            ["health", "status", "uptime", "system", "systemhealth", "resources"],
+            ["health", "status", "uptime", "system", "systemhealth", "resources",
+             "lock", "unlock", "credentials"],
             cmd_operational,
         )
     )

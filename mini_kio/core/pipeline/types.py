@@ -28,6 +28,7 @@ class IntentType(enum.Enum):
     MEMORY = "memory"
     FILE = "file"
     MCP = "mcp"
+    CREDENTIAL = "credential"
 
 
 @dataclass

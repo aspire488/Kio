@@ -18,7 +18,13 @@ import time
 import psutil
 from typing import Optional, Dict, Any
 from mini_kio.core.config import DEFAULT_BROWSER
-from mini_kio.core.app_operator import APP_REGISTRY, _find_in_registry, _resolve_path, WEB_URLS, _normalize_web_target_to_url
+from mini_kio.core.app_operator import (
+    APP_REGISTRY,
+    _find_in_registry,
+    _resolve_path,
+    _find_installed_app,
+    _web_url_for_open,
+)  # _find_in_registry is used at module level below
 from mini_kio.core.capability_registry import get_capability_registry
 
 logger = logging.getLogger(__name__)
@@ -177,38 +183,88 @@ def get_latest_capability() -> Optional[Dict[str, Any]]:
         "active": entry.active,
     }
 
-def probe_app_existence(name: str) -> bool:
-    """Check if an app is registered or resolvable on the system."""
+def probe_registered_app(name: str) -> bool:
+    """True when `name` is an explicit APP_REGISTRY entry that is launchable.
+
+    A registered entry is evidence of installation even when no exe path
+    resolves (URI-launched apps like Microsoft Store / Settings / Photos,
+    system apps, UWP entries).
+    """
     info = _find_in_registry(name)
     if info:
+        if info.get("uri") or info.get("system") or info.get("uwp_packages"):
+            return True
         path = _resolve_path(info)
         return path is not None
     return False
 
+
+def probe_app_existence(name: str) -> bool:
+    """Check if an app is installed on the system (native target resolution):
+    registered APP_REGISTRY entry OR generic installed-app discovery."""
+    return probe_registered_app(name) or _find_installed_app(name) is not None
+
 def get_browser_routing(target: str, browser_name: Optional[str] = None) -> Dict[str, Any]:
     """
-    Centralized routing logic: Native app exists? -> Native else Browser.
+    Canonical target-kind resolution for open/launch requests.
+
+    Decision order (Part II):
+      1. REGISTERED native application — explicit APP_REGISTRY entry that
+         resolves (path / URI / system / UWP). Exact-identity only.
+      2. Explicit web target — known web app / explicit URL / dotted domain
+         only. NO single-word .com synthesis here: an installed single-word
+         app ("winrar") must never be hijacked to its website, and the
+         classifier must never turn an app-like name into a made-up domain.
+      3. Generic installed-app discovery — arbitrary installed applications
+         without a registry entry (Start Menu / App Paths / PATH).
+      4. not found — truthful "couldn't find X installed" (the execution path
+         may still single-word-synthesize as a last resort AFTER its own
+         discovery step, keeping classifier and executor consistent).
+
+    Known web apps (youtube, chatgpt, ...) resolve to the browser BEFORE
+    generic discovery so a containment match against an installed app's name
+    can never hijack a web-app open.
     """
     browser = (browser_name or DEFAULT_BROWSER).lower()
     target_lower = target.lower().strip()
     
     reg = get_browser_registry()
-    # 1. Canonicalize target
     canonical_target = reg.canonicalize(target_lower)
     
-    # 2. Check if it's a known native app
-    if probe_app_existence(canonical_target):
-        logger.info(f"[ROUTING] Native app found for {canonical_target}, using native route.")
+    # 1. Registered native application (exact APP_REGISTRY identity).
+    if probe_registered_app(canonical_target):
+        logger.info(f"[ROUTING] Registered native app found for {canonical_target}, native route.")
         return {
             "route_type": "native",
             "action": "open_app",
             "target": canonical_target
         }
     
-    # 3. Check if it's a known web app or explicit URL (use canonical target first)
-    url = reg.get_url(canonical_target) or _normalize_web_target_to_url(target_lower)
+    # 2. Web only for EXPLICIT web targets: known web app, explicit URL, or
+    #    dotted domain. Single-word .com synthesis is deliberately NOT applied
+    #    here (default flag) so generic discovery in step 3 can claim an
+    #    installed single-word app first. Multi-word names ("da vinci resolve",
+    #    "microsoft store") are never synthesized into .com domains at all.
+    #
+    #    DUAL-MODALITY check: when a name has BOTH a registered native identity
+    #    and a web alias (e.g. "telegram" is a native app AND web.telegram.org),
+    #    but the native app is not installed, opening the web version is a
+    #    FALLBACK — it must go through the executor (launch_app) which attaches
+    #    the explicit disclosure, never a silent browser_fallback.
+    url = reg.get_url(canonical_target) or _web_url_for_open(target_lower)
     if url:
-        logger.info(f"[ROUTING] No native app for {canonical_target}, falling back to browser: {browser}")
+        if _find_in_registry(canonical_target) is not None:
+            logger.info(
+                f"[ROUTING] {canonical_target} has native identity but is not installed; "
+                f"routing through executor for disclosed web fallback: {url}"
+            )
+            return {
+                "route_type": "not_found",
+                "action": "open_app",
+                "target": canonical_target,
+                "web_fallback_url": url,
+            }
+        logger.info(f"[ROUTING] No registered native app for {canonical_target}, explicit web target: {url}")
         return {
             "route_type": "browser_fallback",
             "action": "execute_capability",
@@ -217,9 +273,20 @@ def get_browser_routing(target: str, browser_name: Optional[str] = None) -> Dict
             "canonical_target": canonical_target
         }
     
-    # 4. Default fallback (search)
+    # 3. Generic installed-app discovery (arbitrary apps, no registry entry).
+    if _find_installed_app(canonical_target) is not None:
+        logger.info(f"[ROUTING] Generic discovery found for {canonical_target}, native route.")
+        return {
+            "route_type": "native",
+            "action": "open_app",
+            "target": canonical_target
+        }
+
+    # 4. Truthful not-found — the pipeline routes this to the native open path
+    #    which reports "couldn't find X installed" without opening a website.
+    logger.info(f"[ROUTING] No installed app or web target for {canonical_target}, not_found route.")
     return {
-        "route_type": "search_fallback",
-        "action": "search_web",
-        "target": target
+        "route_type": "not_found",
+        "action": "open_app",
+        "target": canonical_target
     }

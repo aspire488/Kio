@@ -24,7 +24,12 @@ class Gate2RegressionTests(unittest.TestCase):
     def test_browser_normalization_malformed(self):
         """Verify malformed inputs are rejected."""
         self.assertIsNone(_normalize_web_target_to_url("google..com"))
-        self.assertIsNone(_normalize_web_target_to_url("http://google.com"))  # Scheme should be added by normalizer, not passed in
+        # Contract update (pre-slice execution corrections): explicit scheme
+        # URLs are now accepted — the mandate requires "Open https://..." ->
+        # website. Scheme passthrough is intentional; the safety contract that
+        # matters is that malformed/internal/command-injected targets below
+        # remain rejected.
+        self.assertEqual(_normalize_web_target_to_url("http://google.com"), "http://google.com")
         self.assertIsNone(_normalize_web_target_to_url("google.com/"))
         self.assertIsNone(_normalize_web_target_to_url("google/path/extra"))
 

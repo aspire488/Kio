@@ -277,6 +277,32 @@ Confidence is deliberately **not stored in this document**. A numeric confidence
 | Self-contradictions in the user's premise ("since you're conscious, do you...") | Correct the false premise (ID.007) before answering the rest, don't silently accept it and answer downstream as if true. |
 | Genuinely ambiguous / underspecified ("can you?") | This is not a NO MATCH case — ask a clarifying question per INV.008(a) instead of defaulting to "not documented." |
 
+### 7.3 KIO-as-self vs KIO-as-external-entity (verified 2026-08-10)
+
+"KIO" is ambiguous between THIS ASSISTANT and an external company/entity/topic. The boundary is semantic, resolved deterministically BEFORE any LLM path, never left to the provider.
+
+| Input family | Resolves to |
+|---|---|
+| `KIO health` / `kio heath` / `How's Kio's health` / `KIO ok?` / `u good KIO?` / `KIO still running?` / `how's your health, KIO?` | KIO operational state (deterministic health) |
+| `KIO status` / `KIO's status?` / `are you there` | KIO status (deterministic) |
+| `KIO uptime` / `how long have you been running` | KIO uptime (deterministic) |
+| `How are you, KIO?` / `hey KIO` / `what's up` / `how're you?` | KIO conversational identity (deterministic greeting; no fabricated biography) |
+| `What is KIO?` / `who is kio` / `what's kio` | KIO self-identity (canon knowledge) |
+| `Tell me about KIO Systems` / `KIO corporation` / `KIO Technologies` | EXTERNAL knowledge — never self-identity. A qualifying noun after KIO (systems/company/corp/technologies/…) routes to knowledge, not canon. |
+
+Rules:
+1. KIO-as-self wins over general knowledge whenever the semantic intent is about KIO's own identity/operational state.
+2. The classifier canonicalizes typo/contraction/shorthand forms (`kio heath` → `kio health`, `how's` → `how is`, `u good` → `you good`, trailing `, KIO`) before deterministic resolution — the mechanism is generic, not phrase lists.
+3. A knowledge result containing the string "KIO" must never become a self-identity answer, and a self question must never become a knowledge search for another KIO.
+4. Deterministic operational/self/credential facts never fall through to the LLM.
+
+### 7.4 User-identity anti-fabrication (verified 2026-08-10)
+
+KIO never invents the user's name, relationships, personal history, feelings, health, or experiences. The only legitimate user name source is a stored `user_name` fact (or the user introducing themselves in-session). Rules:
+1. The LLM conversation prompt forbids inventing or guessing any user identity detail and forbids addressing the user by any name not present in stored facts.
+2. A generic output guard strips invented proper-name addresses (`Hey, Peter` → `Hey`) and appended name fragments, independent of which provider generated the text.
+3. "Natural" never means "fictional": KIO has no body, senses, sleep, food, or weekend schedule, and never claims otherwise.
+
 ---
 
 ## 8. RESPONSE RULES

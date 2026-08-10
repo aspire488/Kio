@@ -642,11 +642,64 @@ def format_uptime() -> str:
     return f"KIO has been running for {_fmt_duration_words(snap.get('uptime_s'))}."
 
 
+def _system_boot_ts() -> Optional[float]:
+    """Authoritative OS boot/session timestamp (unix)."""
+    try:
+        import psutil
+        return float(psutil.boot_time())
+    except Exception:
+        return None
+
+
+def _fast_startup_enabled() -> Optional[bool]:
+    """Windows Fast Startup / Hiberboot state (None = cannot determine)."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Power",
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "HiberbootEnabled")
+            return bool(int(val))
+    except Exception:
+        return None
+
+
 def format_system_uptime() -> str:
+    """OS session uptime reported truthfully: session duration + boot timestamp,
+    with the Fast Startup/hibernation caveat where the OS enables it. The user's
+    own recollection of a shutdown is never contradicted from uptime alone."""
     m = _system_metrics()
-    if m.get("system_uptime_s") is None:
+    boot_ts = _system_boot_ts()
+    if m.get("system_uptime_s") is None or boot_ts is None:
         return "I can't read the system uptime right now."
-    return f"This computer has been up for {_fmt_duration_words(m['system_uptime_s'])}."
+    try:
+        import datetime
+        boot_dt = datetime.datetime.fromtimestamp(boot_ts).strftime("%b %d, %Y %I:%M %p")
+    except Exception:
+        boot_dt = ""
+    base = f"Windows reports the current system session has been running for {_fmt_duration_words(m['system_uptime_s'])}."
+    if boot_dt:
+        base += f" It started on {boot_dt}."
+    fs = _fast_startup_enabled()
+    if fs:
+        base += (" Fast Startup is enabled, so a shutdown can resume the same session — "
+                 "I can't confirm from uptime alone when the machine was last physically shut down.")
+    return base
+
+
+def format_lock_state() -> str:
+    """Truthful workstation lock state (real OS detection, never guessed)."""
+    try:
+        from mini_kio.core.system_operator import is_workstation_locked
+        locked = is_workstation_locked()
+    except Exception:
+        locked = None
+    if locked is None:
+        return "I can't confirm the lock state right now."
+    return "Your computer is locked." if locked else "Your computer isn't locked."
 
 
 def format_system_health() -> str:
@@ -769,7 +822,10 @@ def format_whats_wrong() -> str:
         kio_issues.append("KIO is running in a degraded state.")
     if snap.get("warning_count"):
         n = snap["warning_count"]
-        kio_issues.append(f"{n} internal issue{'s' if n != 1 else ''} were recorded recently.")
+        kio_issues.append(
+            f"{n} internal issue{'s' if n != 1 else ''} "
+            f"{'was' if n == 1 else 'were'} recorded recently."
+        )
     if comps.get("browser") == "disconnected":
         kio_issues.append("The browser connection is down.")
     if comps.get("telegram") == "unavailable":
@@ -920,6 +976,7 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
         "uptime": format_uptime,
         "system": format_system_health,
         "system_uptime": format_system_uptime,
+        "lock_state": format_lock_state,
         "cpu": lambda: format_metric("cpu"),
         "ram": lambda: format_metric("ram"),
         "gpu": lambda: format_metric("gpu"),
@@ -932,6 +989,21 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
         "resources_cpu": lambda: format_resources("cpu"),
         "resources_storage": format_storage_attribution,
         "diagnostic": format_diagnostic,
+        "app_installed": lambda: _format_app_installed(target),
     }
     message = formatters.get(action, format_status)()
     return {"success": True, "message": message, "action": action, "target": target}
+
+
+def _format_app_installed(target: str) -> str:
+    """Deterministic installed-app existence answer — real OS probe, never an
+    LLM guess. "I couldn't find X installed" when discovery cannot prove it;
+    truthful affirmative with the resolved name when it can.
+    """
+    from mini_kio.core.routing_utils import probe_app_existence
+    app = (target or "").strip()
+    if not app:
+        return "What app would you like me to check?"
+    if probe_app_existence(app):
+        return f"Yes — {app} is installed."
+    return f"I couldn't find {app} installed on your computer."

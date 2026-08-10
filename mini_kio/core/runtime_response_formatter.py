@@ -48,15 +48,24 @@ _PROVIDER_DISPLAY = {
 
 
 def _credential_label(prereq_id: str) -> str:
-    """Map a `credential:<provider>:<type>` prerequisite id to natural language
-    without leaking internal ids."""
+    """Map a `credential:<provider>:<type>[:state]` prerequisite id to natural
+    language without leaking internal ids. Slice 9 state-qualified ids (e.g.
+    `credential:github:oauth2:expired`) render the truthful reason."""
     parts = prereq_id.split(":")
     if len(parts) >= 3 and parts[0] == "credential":
         provider = parts[1]
         cred_type = parts[2]
         type_word = cred_type.replace("_", " ")
         display_provider = _PROVIDER_DISPLAY.get(provider.lower(), provider.capitalize())
-        return f"your {display_provider} {type_word} credentials"
+        noun = f"your {display_provider} {type_word} credentials"
+        state = parts[3] if len(parts) >= 4 else ""
+        if state == "expired":
+            return f"{noun} to be reconnected (they've expired)"
+        if state == "revoked":
+            return f"{noun} to be reconnected (they were revoked)"
+        if state == "unavailable":
+            return f"{noun} to be reconnected (they're unavailable)"
+        return noun
     return ""
 
 
@@ -140,9 +149,18 @@ def _safe_display_target(target: str) -> str:
     return display_target_name(str(target or ""))
 
 
-def format_open_app(target: str, success: bool, message: str) -> str:
+def format_open_app(target: str, success: bool, message: str, details: Optional[Dict[str, Any]] = None) -> str:
     if not success:
         return _format_error(_ensure_str(message))
+    # FUNDAMENTAL INVARIANT: a disclosed web fallback must never collapse into
+    # "Opened X." — the user must always know the native app was not used and
+    # the web version was opened instead. Preserve the operator's disclosure
+    # message verbatim, or compose one when it is missing.
+    if details and details.get("modality") == "web_fallback":
+        return _ensure_str(message).strip() or (
+            f"I couldn't find {_safe_display_target(target)} installed on your computer, "
+            f"so I opened its web version in your browser."
+        )
     display = _safe_display_target(target)
     return f"Opened {display}."
 
@@ -273,7 +291,16 @@ def format_result(
         action in ("close_app", "close")
         and str(details.get("outcome_class") or "").upper() == "SUCCESS_WITH_RESIDUALS"
     )
-    if _is_natural(message) and not _contains_dev_terms(message) and not _needs_structured:
+    # FUNDAMENTAL INVARIANT: a web-fallback result must NEVER be returned as
+    # an empty or generic message — the disclosed fallback must surface (or be
+    # composed by the structured formatter). Route it through the formatter.
+    _is_fallback = details.get("modality") == "web_fallback"
+    if (
+        _is_natural(message)
+        and not _contains_dev_terms(message)
+        and not _needs_structured
+        and not _is_fallback
+    ):
         _DIAG["response_already_natural"] += 1
         return message
     formatted = _dispatch_format(action, target, success, details)
@@ -286,7 +313,7 @@ def _dispatch_format(
 ) -> str:
     msg = _ensure_str(details.get("message", ""))
     if action in ("open_app", "open"):
-        return format_open_app(target, success, msg)
+        return format_open_app(target, success, msg, details)
     if action in ("close_app", "close"):
         return format_close_app(target, success, details)
     if action in ("search_web", "search"):

@@ -399,7 +399,169 @@ APP_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Generic installed-application discovery (system-level, no hard-coded list)
+# ---------------------------------------------------------------------------
+# Sources (bounded, read-only):
+#   1. App Paths registry (HKLM + HKCU "...\CurrentVersion\App Paths\<name>.exe")
+#   2. Start Menu shortcuts (.lnk) under user + common Programs
+#   3. shutil.which / `where` for the executable name
+#   4. WindowsApps aliases
+# Result is a launch descriptor {"kind": "exe"|"shortcut"|"uri", "target", "display"}.
+
+
+def _discovery_key(name: str) -> str:
+    """Normalize a name for generic identity matching (case + non-alnum)."""
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def _discovery_match(name: str, candidate: str) -> bool:
+    """Generic identity match with a length guard so short fragments never over-match."""
+    a, b = _discovery_key(name), _discovery_key(candidate)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) >= 4 and len(b) >= 4:
+        return a in b or b in a
+    return False
+
+
+def _app_paths_discovery(name: str) -> Optional[str]:
+    """Find an installed executable through the App Paths registry."""
+    if not _IS_WINDOWS:
+        return None
+    try:
+        import winreg
+    except Exception:
+        return None
+    key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, key_path) as base:
+                i = 0
+                while True:
+                    try:
+                        sub = winreg.EnumKey(base, i)
+                    except OSError:
+                        break
+                    i += 1
+                    if _discovery_match(name, sub.replace(".exe", "")):
+                        try:
+                            with winreg.OpenKey(base, sub) as key:
+                                val, _ = winreg.QueryValueEx(key, None)
+                            if val and os.path.isfile(val):
+                                return val
+                        except OSError:
+                            continue
+        except OSError:
+            continue
+    return None
+
+
+def _start_menu_discovery(name: str) -> Optional[str]:
+    """Find a Start Menu .lnk shortcut matching the requested name (bounded walk)."""
+    if not _IS_WINDOWS:
+        return None
+    roots = [
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+    ]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                if dirpath[len(root):].count(os.sep) > 4:
+                    continue
+                for f in files:
+                    if not f.lower().endswith(".lnk"):
+                        continue
+                    stem = os.path.splitext(f)[0]
+                    if _discovery_match(name, stem):
+                        return os.path.join(dirpath, f)
+        except (PermissionError, OSError):
+            continue
+    return None
+
+
+def _windows_apps_alias(name: str) -> Optional[str]:
+    """Resolve a WindowsApps app-execution alias (Store/UWP) if present."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    if not local:
+        return None
+    base = os.path.join(local, "Microsoft", "WindowsApps")
+    if not os.path.isdir(base):
+        return None
+    for exe_name in (name, name + ".exe"):
+        candidate = exe_name if exe_name.endswith(".exe") else exe_name + ".exe"
+        if os.path.isfile(os.path.join(base, candidate)):
+            return os.path.join(base, candidate)
+    return None
+
+
+def _find_installed_app(name: str) -> Optional[Dict]:
+    """Generic Windows installed-application discovery (no hard-coded list).
+
+    Returns a launch descriptor or None. Arbitrary installed GUI apps are
+    discoverable through the same mechanism.
+    """
+    if not _IS_WINDOWS or not name:
+        return None
+    norm = name.lower().strip()
+    exe = _app_paths_discovery(norm)
+    if exe:
+        return {"kind": "exe", "target": exe, "display": name.strip()}
+    lnk = _start_menu_discovery(norm)
+    if lnk:
+        return {"kind": "shortcut", "target": lnk, "display": name.strip()}
+    for exe_name in (norm, norm + ".exe"):
+        found = shutil.which(exe_name)
+        if found:
+            return {"kind": "exe", "target": found, "display": name.strip()}
+    alias = _windows_apps_alias(norm)
+    if alias:
+        return {"kind": "exe", "target": alias, "display": name.strip()}
+    return None
+
+
+def _launch_discovered(desc: Dict, name: str) -> dict:
+    """Launch a generic discovered application (exe path or .lnk shortcut).
+
+    On success the process is registered with the runtime under the requested
+    name so a subsequent "Close it" resolves to this app (never the browser
+    host or an unrelated process).
+    """
+    kind = desc.get("kind")
+    target = desc.get("target", "")
+    result = None
+    if kind == "shortcut" and target:
+        try:
+            os.startfile(target)
+            result = {"success": True, "message": f"Opened {name}", "verification_mode": "shell"}
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
+    elif kind == "exe" and target:
+        result = _launch_path(target, name)
+    else:
+        return {"success": False, "message": f"Failed to open {name}."}
+
+    # Bounded ownership registration: track the resolved pid so "Close it"
+    # targets exactly this application.
+    if result and result.get("success") and isinstance(result.get("pid"), int):
+        try:
+            from mini_kio.core.runtime import get_runtime
+            rt = get_runtime()
+            if rt:
+                rt.register_tracked_process(int(result["pid"]), name.lower().strip())
+        except Exception:
+            pass
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Web apps — opened directly in the default browser
+# ---------------------------------------------------------------------------
 WEB_URLS: Dict[str, str] = {
     "youtube":      "https://youtube.com",
     "whatsapp":     "https://web.whatsapp.com",
@@ -536,6 +698,127 @@ def _normalize_public_result(action: str, target: str, result: Dict[str, Any], s
 
     return out
 
+def _web_url_for_open(name: str, *, allow_single_word_synthesis: bool = False) -> Optional[str]:
+    """Resolve a URL for an OPEN request without silent domain substitution.
+
+    Returns a URL only when the request is explicitly web-shaped:
+      - known web app alias (WEB_URLS / WEB_DOMAIN_ALIASES)
+      - explicit http(s) URL
+      - dotted domain with an allowed TLD
+      - single-word domain-like label ("chatgpt" -> chatgpt.com) — only when
+        `allow_single_word_synthesis=True` (callers check generic app discovery
+        FIRST, so an installed single-word app is never hijacked to its .com
+        website).
+
+    Arbitrary multi-word names ("da vinci resolve", "microsoft store") are
+    NEVER turned into .com domains here — that silent substitution is the
+    app-open bug this fixes. Multi-word web synthesis remains available only
+    for explicit web-intent phrases ("open X in chrome", "go to X").
+    """
+    normalized = " ".join((name or "").lower().strip().split())
+    if not normalized:
+        return None
+    if normalized in WEB_URLS:
+        return WEB_URLS[normalized]
+    if normalized in WEB_DOMAIN_ALIASES:
+        return WEB_DOMAIN_ALIASES[normalized]
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    if _SAFE_EXPLICIT_DOMAIN_RE.fullmatch(normalized):
+        parts = normalized.split(".")
+        if len(parts) >= 2 and parts[-1] in _ALLOWED_WEB_TLDS:
+            return f"https://{normalized}"
+        return None
+    if _contains_forbidden_web_chars(normalized) or _is_internal_or_local_web_target(normalized):
+        return None
+    if allow_single_word_synthesis and _can_synthesize_single_label_domain(normalized):
+        return f"https://{normalized}.com"
+    return None
+
+
+def _web_fallback_url(name: str, *, allow_synthesis: bool = True) -> Optional[str]:
+    """Resolve the legitimate web version for a DISCLOSED fallback.
+
+    Two distinct call sites:
+
+    NOT-FOUND fallback (allow_synthesis=True, default): the native application
+    was proved absent by OS discovery. Single-word .com synthesis is permitted
+    because the canonical <name>.com presence IS the standard web presence of
+    that product — and the user is ALWAYS told the native app was not found
+    and a web version was opened instead, so it is never a silent/fabricated
+    substitution (FUNDAMENTAL INVARIANT).
+
+    LAUNCH-FAILED fallback (allow_synthesis=False): the native application
+    EXISTS but could not be launched. Here a synthesized <name>.com is a
+    fabricated URL, not a "web version of the app" — so only KNOWN web
+    versions (WEB_URLS / WEB_DOMAIN_ALIASES / explicit URL / dotted domain)
+    qualify. The caller reports the truthful "found but couldn't launch"
+    when no known web version exists.
+
+    Shared guards: multi-word names are never collapsed into domains
+    ("da vinci resolve" stays a truthful failure); reserved labels (explorer,
+    cmd, powershell, terminal, appdata, ...) and internal hosts stay blocked.
+    """
+    normalized = " ".join((name or "").lower().strip().split())
+    if not normalized:
+        return None
+    if normalized in WEB_URLS:
+        return WEB_URLS[normalized]
+    if normalized in WEB_DOMAIN_ALIASES:
+        return WEB_DOMAIN_ALIASES[normalized]
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    if _SAFE_EXPLICIT_DOMAIN_RE.fullmatch(normalized):
+        parts = normalized.split(".")
+        if len(parts) >= 2 and parts[-1] in _ALLOWED_WEB_TLDS:
+            return f"https://{normalized}"
+        return None
+    if _contains_forbidden_web_chars(normalized) or _is_internal_or_local_web_target(normalized):
+        return None
+    if allow_synthesis and normalized.isascii() and normalized not in _RESERVED_SYNTHETIC_WEB_LABELS:
+        if _SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized):
+            return f"https://{normalized}.com"
+    return None
+
+
+def _web_fallback_result(
+    key: str, name: str, start_time: float, *, reason: str = "not_found"
+) -> Optional[Dict]:
+    """Open the legitimate web version of an unavailable native application
+    WITH explicit disclosure (FUNDAMENTAL INVARIANT: never hide a modality
+    fallback).
+
+    reason="not_found":    the native app is not installed / not discoverable.
+    reason="launch_failed": the native app exists but could not be launched.
+
+    Returns a normalized public launch result (success) whose message states
+    exactly what happened, or None when no legitimate web target exists (the
+    caller then reports the truthful native-only failure).
+
+    allow_synthesis is disabled for launch_failed so a native app that EXISTS
+    but failed to launch only falls back to a KNOWN web version — never a
+    fabricated <name>.com.
+    """
+    web_url = _web_fallback_url(key, allow_synthesis=(reason != "launch_failed"))
+    if web_url is None:
+        return None
+    result = _open_url(web_url, key)
+    if not result.get("success"):
+        return None
+    result["modality"] = "web_fallback"
+    if reason == "launch_failed":
+        result["message"] = (
+            f"I couldn't launch the installed {name} app, "
+            f"so I opened its web version in your browser."
+        )
+    else:
+        result["message"] = (
+            f"I couldn't find {name} installed on your computer, "
+            f"so I opened its web version in your browser."
+        )
+    return _normalize_public_result("launch", key, result, start_time)
+
+
 def launch_app(name: str) -> dict:
     """Launch an application by name.  Returns {"success": bool, "message": str, "pid": int, "canonical_name": str}."""
     start_time = time.time()
@@ -557,39 +840,100 @@ def launch_app(name: str) -> dict:
             start_time,
         )
 
-    # 1. Registry
+    # 1. Registered native app (path / URI / system / UWP entry) — the entry
+    #    itself is evidence of installation even without a resolvable path
+    #    (e.g. Microsoft Store launches via its protocol URI). Exact identity.
     info = _find_in_registry(key)
-    if info:
-        # Resolve canonical name from registry key
+    if info and (
+        info.get("uri") or info.get("system") or info.get("uwp_packages")
+        or _resolve_path(info) is not None
+    ):
         canonical = key
         for k, v in APP_REGISTRY.items():
             if v == info:
                 canonical = k
                 break
         result = _launch_from_info(info, key)
+        if result.get("success"):
+            result["canonical_name"] = canonical
+            return _normalize_public_result("launch", canonical, result, start_time)
+        # E. Native app found but launch failed — if a legitimate web version
+        #    exists, disclose the fallback; otherwise report the native
+        #    failure truthfully ("found but couldn't launch", never a
+        #    misleading "not installed").
+        fallback = _web_fallback_result(key, name, start_time, reason="launch_failed")
+        if fallback is not None:
+            return fallback
+        result = {"success": False, "message": f"I found {name} installed, but I couldn't launch it."}
         result["canonical_name"] = canonical
         return _normalize_public_result("launch", canonical, result, start_time)
 
-    # 2. Web URL
-    if key in WEB_URLS:
-        result = _open_url(WEB_URLS[key], key)
-        return _normalize_public_result("launch", key, result, start_time)
-
-    # 2b. Deterministic web domain aliases
-    if key in WEB_DOMAIN_ALIASES:
-        result = _open_url(WEB_DOMAIN_ALIASES[key], key)
-        return _normalize_public_result("launch", key, result, start_time)
-
-    normalized_url = _normalize_web_target_to_url(key)
+    # 2. Explicit web target (KNOWN web apps / URL / dotted domain only).
+    #    Canonical web apps resolve BEFORE generic discovery so a containment
+    #    match against an installed app can never hijack a web-app open.
+    #
+    #    Dual-modality names (a registered native identity ALSO exists, e.g.
+    #    "telegram"): step 1 proved the native app is unavailable, so this web
+    #    open is a FALLBACK and must be disclosed — never presented as opening
+    #    the application.
+    normalized_url = _web_url_for_open(key, allow_single_word_synthesis=False)
     if normalized_url is not None:
         result = _open_url(normalized_url, key)
+        # Dual-modality disclosure only when the web open actually succeeded.
+        # A failed _open_url must keep its truthful failure message — never
+        # "so I opened its web version" attached to success=False.
+        if _find_in_registry(key) is not None and result.get("success"):
+            result["modality"] = "web_fallback"
+            result["message"] = (
+                f"I couldn't find {name} installed on your computer, "
+                f"so I opened its web version in your browser."
+            )
         return _normalize_public_result("launch", key, result, start_time)
 
-    # 3. Discovery
-    result = _discover_and_launch(key)
-    if "canonical_name" not in result:
+    # 3. Generic installed-application discovery (arbitrary apps, no registry).
+    #    Runs BEFORE single-word .com synthesis so an installed single-word app
+    #    (e.g. "winrar") is never hijacked to its website.
+    discovered = _find_installed_app(key)
+    if discovered:
+        result = _launch_discovered(discovered, key)
+        if result.get("success"):
+            result["canonical_name"] = key
+            return _normalize_public_result("launch", key, result, start_time)
+        # E. Discovered app found but launch failed — disclosed web fallback;
+        #    otherwise report truthfully (found but couldn't launch).
+        fallback = _web_fallback_result(key, name, start_time, reason="launch_failed")
+        if fallback is not None:
+            return fallback
+        result = {"success": False, "message": f"I found {name} installed, but I couldn't launch it."}
         result["canonical_name"] = key
-    return _normalize_public_result("launch", result.get("canonical_name", key), result, start_time)
+        return _normalize_public_result("launch", key, result, start_time)
+
+    # 4. Native application unavailable → DISCLOSED web fallback (FUNDAMENTAL
+    #    INVARIANT). Never hide a modality fallback: when a legitimate web
+    #    version is available, open it but explicitly disclose that the native
+    #    app was not found. Single-word .com synthesis is only applied HERE —
+    #    after discovery proved no native app exists — so an installed
+    #    single-word app is never hijacked. Multi-word names are never
+    #    synthesized into fabricated domains.
+    fallback = _web_fallback_result(key, name, start_time)
+    if fallback is not None:
+        return fallback
+
+    # 5. Truthful failure — neither a native app nor a usable web version.
+    return _normalize_public_result(
+        "launch",
+        key,
+        {
+            "success": False,
+            "message": (
+                f"I couldn't find {name} installed on your computer, "
+                f"and I couldn't find a usable web version either."
+            ),
+            "failure_class": "not_installed",
+            "pid": None,
+        },
+        start_time,
+    )
 
 
 def _close_web_target(name: str, key: str, start_time: float) -> dict:
@@ -726,8 +1070,6 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
         return _close_web_target(name, key, start_time)
 
     info = _find_in_registry(key)
-
-    info = _find_in_registry(key)
     canonical = key
     if info:
         for registry_key, registry_info in APP_REGISTRY.items():
@@ -813,6 +1155,29 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
         if discovered_pid is not None:
             logger.info("[APP] close_app process-discovery fallback: discovered %s pid=%d", key, discovered_pid)
             return close_app(name, pid=discovered_pid)
+        # Registered app, no matching NATIVE process. If this name ALSO has a
+        # legitimate web version (dual-modality, e.g. Telegram) that KIO may
+        # have opened through the disclosed web fallback, the close must
+        # resolve to the WEB TARGET — never a false "wasn't running" while a
+        # web session exists. _close_web_target truthfully reports "not open
+        # in the browser" when no such session exists.
+        #
+        # MODALITY CONSISTENCY: mirror launch_app's fallback rules exactly.
+        #   - INSTALLED registered app (path/URI/system/UWP resolves): launch
+        #     only ever fell back to a KNOWN web version (launch_failed uses
+        #     allow_synthesis=False) — so close checks known web versions only.
+        #     A synthesized <name>.com (vlc.com, vscode.com) is NOT a web
+        #     version launch would have opened for an installed native app.
+        #   - NOT-installed registered name: launch may have opened the
+        #     disclosed not-found fallback (which may synthesize .com) — so
+        #     close must resolve to that same web scope.
+        installed = bool(
+            info.get("uri") or info.get("system") or info.get("uwp_packages")
+            or _resolve_path(info) is not None
+        )
+        if _web_fallback_url(key, allow_synthesis=not installed) is not None:
+            logger.info("[APP] close_app dual-modality web scope: %s", key)
+            return _close_web_target(name, key, start_time)
         # Registered app, no matching process anywhere -> it is simply not
         # running. Report that truthfully instead of claiming ownership
         # refusal (which would be misleading) or a false close.
@@ -828,6 +1193,62 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
             },
             start_time,
         )
+
+    # Generic discovered-app fallback (Part IV): an application KIO launched
+    # through generic installed-app discovery (no APP_REGISTRY entry) must still
+    # be closable at its own scope. The runtime registration from
+    # _launch_discovered already covers tracked pids; this covers apps whose
+    # tracked entry was lost (e.g. process restart) by matching the discovered
+    # executable name — never a blind system-wide sweep, never the browser host.
+    #
+    # Both discovery kinds are handled: exe paths AND Start Menu shortcuts
+    # (shortcut-installed apps like Cursor must close at native scope, never
+    # fall through to a synthesized <name>.com web scope).
+    try:
+        from mini_kio.core.runtime import get_runtime
+        rt = get_runtime()
+        if rt:
+            tracked = rt.get_tracked_process(key)
+            if tracked and isinstance(tracked.get("pid"), int):
+                return close_app(name, pid=int(tracked["pid"]))
+        discovered = _find_installed_app(key)
+        if discovered:
+            exe_base = Path(discovered["target"]).stem.lower()
+            pseudo_info = {"lifecycle": "standard", "process": exe_base + ".exe"}
+            discovered_pid = _find_matching_process_pid(key, pseudo_info)
+            if discovered_pid is not None:
+                logger.info("[APP] close_app discovered-app fallback: %s pid=%d", key, discovered_pid)
+                return close_app(name, pid=discovered_pid)
+            # Native app IS installed but not running — report that truthfully
+            # at native scope. A disclosed web fallback only ever opens when
+            # the native app is absent, so an installed app must NOT fall
+            # through to a synthesized web scope ("close cursor" after
+            # "open cursor" must never become a cursor.com browser close).
+            logger.info("[APP] close_app discovered-not-running target=%s", key)
+            return _normalize_public_result(
+                "close",
+                key,
+                {
+                    "success": False,
+                    "message": f"{name} wasn't running.",
+                    "pid": None,
+                    "failure_class": "not_running",
+                },
+                start_time,
+            )
+    except Exception:
+        pass
+
+    # Web-fallback modality consistency: when the native application was never
+    # found but a legitimate web version exists (the same disclosed fallback
+    # launch_app uses), "Close it" must resolve to the WEB TARGET at tab scope
+    # — never an ownership refusal ("I didn't open it"), never a process kill.
+    try:
+        if _web_fallback_url(key) is not None:
+            logger.info("[APP] close_app web-fallback scope: %s", key)
+            return _close_web_target(name, key, start_time)
+    except Exception:
+        pass
 
     # No ownership found -> Refuse to close arbitrary processes
     logger.info("[APP] close_refused target=%s reason=not_tracked", key)

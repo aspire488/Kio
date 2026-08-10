@@ -57,7 +57,8 @@ from mini_kio.core.file_operator import (
     open_folder, FILE_OPERATOR_DESCRIPTOR
 )
 from mini_kio.core.system_operator import (
-    lock_system, shutdown_system, restart_system, recovery_runtime, SYSTEM_OPERATOR_DESCRIPTOR
+    lock_system, unlock_system, lock_state, shutdown_system, restart_system,
+    recovery_runtime, SYSTEM_OPERATOR_DESCRIPTOR
 )
 
 logger = logging.getLogger(__name__)
@@ -239,6 +240,18 @@ STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
         "category": "system_control",
         "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
     },
+    "unlock_system": {
+        "handler": unlock_system,
+        "canonical_name": "unlock_system",
+        "category": "system_control",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
+    "lock_state": {
+        "handler": lock_state,
+        "canonical_name": "lock_state",
+        "category": "system_control",
+        "descriptor": SYSTEM_OPERATOR_DESCRIPTOR
+    },
     "recovery_runtime": {
         "handler": recovery_runtime,
         "canonical_name": "recovery_runtime",
@@ -290,6 +303,9 @@ _ACTION_MAP: dict[str, str] = {
     "search_youtube": "search_youtube",
     "lock": "lock_system",
     "lock_system": "lock_system",
+    "unlock": "unlock_system",
+    "unlock_system": "unlock_system",
+    "lock_state": "lock_state",
     "recovery": "recovery_runtime",
     "recovery_runtime": "recovery_runtime",
     "shutdown": "shutdown_system",
@@ -987,9 +1003,9 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             except Exception as pid_lookup_exc:
                 logger.warning("PID lookup failed for close: %s", pid_lookup_exc)
 
-        if canonical_action == "lock_system":
-            result = handler()
-        elif canonical_action == "recovery_runtime":
+        if canonical_action in ("lock_system", "unlock_system", "lock_state", "recovery_runtime"):
+            # No-argument system-control handlers (lock/unlock/lock-state query
+            # and manual recovery) must not receive the positional target arg.
             result = handler()
         elif canonical_action == "close_app" and pid_for_close is not None:
             result = handler(target, pid=pid_for_close)

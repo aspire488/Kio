@@ -289,7 +289,15 @@ def test_close_app_generic_fallback_for_non_browser_app(monkeypatch):
 
 def test_close_app_not_running_registered_app(monkeypatch):
     """BUG 6: a registered app with no matching process reports 'wasn't
-    running' — not a misleading ownership refusal."""
+    running' — not a misleading ownership refusal.
+
+    VLC is mocked as INSTALLED (path resolves) so the modality-consistent
+    close rule stays native-scope: an installed native app that is not running
+    has no web session (launch would have opened the native app, and a launch
+    failure only ever falls back to KNOWN web versions, never a synthesized
+    vlc.com). A NOT-installed registered name would instead resolve to the
+    disclosed web-fallback scope — covered by DisclosedWebFallbackTest.
+    """
     from mini_kio.core import app_operator, runtime
 
     import psutil
@@ -298,6 +306,7 @@ def test_close_app_not_running_registered_app(monkeypatch):
         "get_tracked_process": lambda canonical: None,
         "unregister_tracked_process": lambda canonical, pid=None: None,
     })())
+    monkeypatch.setattr(app_operator, "_resolve_path", lambda info: "C:/fake/VLC/vlc.exe")
     monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: [])
     monkeypatch.setattr(app_operator, "_graceful_uwp_close", lambda pid, name: None)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import random
@@ -24,6 +25,52 @@ def _bad_kio_reply(reply: str) -> bool:
     if not reply or not reply.strip():
         return True
     return bool(_BAD_REPLY_RE.search(reply) or _MOJIBAKE_RE.search(reply))
+
+
+# User names KIO may legitimately use. Everything else is treated as an
+# invented address the model must never emit.
+_KNOWN_USER_NAMES = frozenset({"joel", "kio"})
+
+
+def _sanitize_llm_name_address(reply: str) -> str:
+    """Generic anti-fabrication guard for LLM conversational output.
+
+    The model is never allowed to invent the user's name. This strips/rewrites
+    two generic address patterns WITHOUT hard-coding any specific name:
+      - a standalone trailing proper-name sentence ("...serious. Peter")
+      - a greeting + proper-name address ("Hey, Peter ...")
+    Known names (joel/kio) pass through untouched.
+    """
+    if not reply or not reply.strip():
+        return reply
+    sentences = re.split(r"(?<=[.!?]) +", reply.strip())
+    kept: list[str] = []
+    for s in sentences:
+        word = s.strip().strip(".,!?;:")
+        # Lone capitalized single-word sentence that is not a known name:
+        # drop it only when it is an appended fragment (2+ sentences), never
+        # the whole reply ("OpenAI." as the only sentence stays).
+        if (
+            len(sentences) >= 2
+            and word
+            and word[0].isupper()
+            and len(word) <= 24
+            and re.fullmatch(r"[A-Za-z]+", word)
+            and word.lower() not in _KNOWN_USER_NAMES
+        ):
+            continue
+        # Greeting + invented name address -> keep just the greeting.
+        m = re.match(
+            r"^(hey|hi|hello|oh|wait|listen|look)\b\s*,?\s+([A-Z][a-z]+)\b",
+            s,
+            re.IGNORECASE,
+        )
+        if m and m.group(2).lower() not in _KNOWN_USER_NAMES:
+            kept.append(m.group(1).capitalize() + s[m.end():].strip())
+            continue
+        kept.append(s)
+    out = " ".join(k for k in kept if k).strip()
+    return out if out else reply
 
 
 class Pipeline:
@@ -111,7 +158,7 @@ class _IntentClassifier:
 
     THANKS = frozenset({"thanks", "thank you", "thankyou", "ty", "thx"})
 
-    SYSTEM_ACTIONS = frozenset({"shutdown", "restart", "lock", "recovery", "recover"})
+    SYSTEM_ACTIONS = frozenset({"shutdown", "restart", "lock", "unlock", "recovery", "recover"})
 
     MEDIA_TRANSPORT = frozenset({
         "pause", "resume", "stop", "mute", "unmute",
@@ -131,8 +178,169 @@ class _IntentClassifier:
         "explorer", "terminal", "services",
     })
 
+    # ── KIO-self canonicalization (identity/operational root fix) ──────────
+    # Bounded, deterministic normalization so the KIO-self families (health /
+    # status / uptime / greeting) match robustly before any LLM path can see
+    # the query. Never applied to raw text sent to providers — classification
+    # only. Contractions, casual spellings, trailing "kio" references and
+    # stray punctuation are collapsed into the canonical forms the route
+    # tables already understand.
+    # Minimal contraction set — ONLY the forms the KIO-self route tables need.
+    # Negation contractions (isn't/aren't/don't/can't) are deliberately NOT
+    # expanded: anchored routes already handle them literally ("why isn't
+    # something working"), and expanding would break those matches.
+    _CONTRACTION_EXPANSIONS: dict[str, str] = {
+        "how's": "how is", "hows": "how is", "howre": "how are",
+        "how're": "how are", "how'r": "how are",
+        "what's": "what is", "whats": "what is",
+        "you're": "you are", "youre": "you are",
+        "i'm": "i am", "im": "i am",
+    }
+    _CASUAL_EXPANSIONS: dict[str, str] = {
+        "u": "you", "ur": "your", "ya": "you", "yea": "yes",
+        "yep": "yes", "whts": "what is", "wats": "what is",
+        "r": "are", "k": "okay",
+    }
+    # Words that legitimately precede a trailing KIO self-reference
+    # ("u good kio?", "how are you kio"). Bounded — "open chrome kio" never
+    # strips because "chrome" is not in this set.
+    # Only unambiguous KIO-self vocabulary may precede a trailing "kio"
+    # reference. Common words (is/are/health/status/...) are deliberately
+    # excluded so "what is kio" can never be mangled into "what".
+    _TRAILING_KIO_WORDS = frozenset({
+        "you", "u", "your", "good", "ok", "okay", "alright", "fine",
+        "healthy", "still", "running", "up", "alive", "online", "working",
+        "there", "busy",
+    })
+    # Lexicon used ONLY for typo-correction of the deterministic operational
+    # family ("kio heath" -> "kio health"). Bounded and ratio-gated; knowledge
+    # queries that merely share a word are unaffected.
+    _OPERATIONAL_KEYWORDS = frozenset({
+        "health", "status", "uptime", "system", "resources", "okay",
+        "running", "open", "cpu", "ram", "gpu", "storage", "battery",
+        "diagnose", "wrong", "credentials", "installed", "good", "fine",
+        "alright", "healthy", "online", "alive", "working", "ping",
+        "everything",
+    })
+
+    # KIO-as-self routes evaluated on the FULL canonical text BEFORE name-strip
+    # so "kio ok?" is never reduced to a bare "ok" (which would misroute to
+    # offer-acceptance) and "kio heath" keeps its subject.
+    _KIO_SELF_ROUTES: tuple[tuple[re.Pattern, str, str], ...] = (
+        (re.compile(r"^kio(?:'s)?\s+health\b"), "health", ""),
+        (re.compile(r"^kio(?:'s)?\s+(?:status|state)\b"), "status", ""),
+        (re.compile(r"^kio(?:'s)?\s+uptime\b"), "uptime", ""),
+        (re.compile(r"^kio(?:'s)?\s+(?:diagnose|diagnostics)\b"), "whats_wrong", ""),
+        (re.compile(r"^kio\s+(?:ok(?:ay)?|good|fine|alright|healthy)\b"), "health", ""),
+        (re.compile(r"^kio\s+still\s+(?:running|up|alive|online|working)\b"), "health", ""),
+        (re.compile(r"^kio\s+(?:running|up|alive|online)\b"), "health", ""),
+    )
+
+    def _canonicalize_self_reference(self, text: str) -> str:
+        """Collapse KIO-self phrasing into canonical classification form.
+
+        Steps (all bounded, all idempotent):
+          1. expand contractions and casual tokens ("how's" -> "how is",
+             "u" -> "you")
+          2. strip a trailing ", kio" / " kio" self-reference when the
+             preceding word is KIO-self vocabulary
+          3. strip stray surrounding punctuation so anchored route tables
+             match ("kio status?" -> "kio status")
+        """
+        t = text.strip()
+        if not t:
+            return t
+        out: list[str] = []
+        for tok in t.split():
+            leading = trailing = ""
+            core = tok
+            m = re.match(r"^([^a-z0-9']+)(.+)$", core, re.IGNORECASE)
+            if m:
+                leading, core = m.group(1), m.group(2)
+            m = re.match(r"^(.+?)([^a-z0-9']+)$", core, re.IGNORECASE)
+            if m and m.group(2):
+                core, trailing = m.group(1), m.group(2)
+            low = core.lower()
+            if low in self._CONTRACTION_EXPANSIONS:
+                out.append(leading + self._CONTRACTION_EXPANSIONS[low] + trailing)
+            elif low in self._CASUAL_EXPANSIONS:
+                out.append(leading + self._CASUAL_EXPANSIONS[low] + trailing)
+            else:
+                out.append(tok)
+        t = " ".join(out)
+        m = re.search(r",\s*kio\s*[.,!?;:]*$", t, re.IGNORECASE)
+        if m:
+            t = t[: m.start()].rstrip().strip(".,!?;: ")
+        else:
+            wl = "|".join(sorted(self._TRAILING_KIO_WORDS, key=len, reverse=True))
+            # Capture-group anchored on "kio" only: "you good kio" strips the
+            # trailing "kio", never the whitelist word before it.
+            m = re.search(rf"\b(?:{wl})\s+(kio)\s*[.,!?;:]*$", t, re.IGNORECASE)
+            if m:
+                t = t[: m.start(1)].rstrip().strip(".,!?;: ")
+        return t.strip(" .,!?;:")
+
+    def _typo_fix_operational(self, text: str) -> str:
+        """Bounded typo-correction for the deterministic operational family.
+
+        Words >=4 chars that are close to an operational keyword (difflib ratio
+        >= 0.8) are corrected ("heath" -> "health"). Returns the original
+        string untouched when nothing changed, so knowledge queries are never
+        silently rewritten.
+        """
+        toks = text.split()
+        out: list[str] = []
+        changed = False
+        for tok in toks:
+            core = tok.strip(".,!?;:")
+            low = core.lower()
+            if len(core) >= 4 and low not in self._OPERATIONAL_KEYWORDS:
+                best = difflib.get_close_matches(
+                    low, self._OPERATIONAL_KEYWORDS, n=1, cutoff=0.8
+                )
+                if best:
+                    cand = best[0]
+                    # Never "correct" a word that is already a valid prefix or
+                    # derived form of a lexicon word: "resource" -> "resources"
+                    # (prefix) and "unhealthy" -> "healthy" (negated stem) are
+                    # legitimate English, not typos.
+                    _prefix_or_substring = (
+                        cand.startswith(low) or low.startswith(cand)
+                    )
+                    _derived_form = any(
+                        len(w) >= 4 and w in low and len(low) - len(w) <= 3
+                        for w in self._OPERATIONAL_KEYWORDS
+                    )
+                    if not _prefix_or_substring and not _derived_form:
+                        out.append(tok.replace(core, cand))
+                        changed = True
+                        continue
+            out.append(tok)
+        return " ".join(out) if changed else text
+
+    def _detect_kio_self(self, lower: str, text: str) -> Optional[RoutingDecision]:
+        """KIO-prefixed self-state query on the FULL canonical text."""
+        for pattern, action, target in self._KIO_SELF_ROUTES:
+            if pattern.match(lower):
+                return RoutingDecision(
+                    IntentType.OPERATIONAL, action, target, text, lower,
+                    confidence=1.0,
+                )
+        return None
+
     def classify(self, text: str, raw_text: str) -> RoutingDecision:
+        # R1 politeness prefix also applies to text that reaches the classifier
+        # through greeting/name recursion ("hey KIO, can you open winrar" ->
+        # name-strip leaves "can you open winrar" -> polite strip leaves
+        # "open winrar"). Idempotent: already-stripped text has no match.
+        text = self._strip_polite_prefix(text)
         lower = text.lower().strip()
+        # Identity/operational root fix: canonicalize KIO-self phrasing so the
+        # deterministic families match BEFORE any LLM path sees the query
+        # ("How's Kio's health" -> "how is kio's health", "Kio heath" is
+        # corrected inside the operational scan, "u good kio?" -> "you good").
+        # Original text is preserved for providers/execution.
+        lower = self._canonicalize_self_reference(lower)
         lower_clean = lower.strip(".,!?;:")
         words = lower.split()
 
@@ -150,6 +358,13 @@ class _IntentClassifier:
 
         if not words:
             return decision
+
+        # KIO-as-self wins over general knowledge: a KIO-prefixed self-state
+        # query ("kio ok?", "kio still running?") routes deterministically even
+        # though name-strip would otherwise reduce it to a bare word.
+        kio_self = self._detect_kio_self(lower, text)
+        if kio_self is not None:
+            return kio_self
 
         stripped = self._strip_greeting(lower_clean, first_word, second_word, words, text, raw_text)
         if stripped is not None:
@@ -220,6 +435,17 @@ class _IntentClassifier:
 
         return decision
 
+    def _strip_polite_prefix(self, text: str) -> str:
+        """Strip a leading polite/soft-start phrase (can/could/would/will you
+        ... / please ...) so the classifier sees the clean command verb.
+        Shared with _NormalizationService; applied here too because
+        greeting/name recursion re-enters classify() after the normalizer ran.
+        """
+        stripped = _NormalizationService._POLITE_PREFIX_RE.sub("", text, count=1).strip()
+        if stripped and text.lower() != stripped.lower():
+            return stripped
+        return text
+
     def _strip_greeting(self, lower_clean, first_word, second_word, words, text="", raw_text=""):
         names = ("kio", "bro", "joel")
         # Punctuation-tolerant: "KIO, what's open?" / "Hey, KIO" must strip
@@ -261,7 +487,15 @@ class _IntentClassifier:
                     )
                 logger.info("[GREETING_STRIP] remaining=%r", rest)
                 return self.classify(rest, "")
-        if lower_clean in self.GREETINGS | frozenset({"how are you", "how are you doing", "how are ya"}):
+        # Greeting family incl. canonicalized contraction forms ("how's it
+        # going" -> "how is it going", "what's up" -> "what is up") and
+        # day-progress forms handled deterministically by _reply_greeting.
+        if lower_clean in self.GREETINGS | frozenset({
+            "how are you", "how are you doing", "how are ya", "how is it going",
+            "how are things", "what is up", "you there", "how have you been",
+            "how are you today", "how is your day", "how was your day",
+            "how is everything going", "how are you doing today",
+        }):
             return RoutingDecision(
                 IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
             )
@@ -273,12 +507,32 @@ class _IntentClassifier:
 
     def _check_identity(self, lower, raw_text="", normalized_text=""):
         from mini_kio.llm.identity_dataset import get_identity_answer
+        # KIO-as-assistant vs KIO-as-external-entity boundary: identity answers
+        # only fire for KIO-itself questions. A qualifying noun after KIO
+        # ("tell me about KIO Systems", "KIO Technologies") is an external
+        # entity and must flow to the knowledge path, never self-identity.
+        if re.search(
+            r"\bkio\b.*\b(systems?|corporation|corp|inc|llc|technolog(?:y|ies)|company|platform|product|brand|services)\b",
+            lower,
+        ):
+            return None
         if get_identity_answer(lower):
             return RoutingDecision(IntentType.IDENTITY, "", "", raw_text or normalized_text, normalized_text or lower, confidence=1.0)
         return None
 
     def _is_forbidden(self, lower, first_word):
-        norm = lower[5:].strip().lower() if first_word == "open" else lower
+        # Phrasal-verb-first ordering, mirroring _open_verb_target, so
+        # "open up cmd" resolves the target "cmd" exactly like "open cmd"
+        # (never bypasses the forbidden-target gate via "up cmd").
+        norm = None
+        for phrase in self._OPEN_PHRASES[0]:
+            if lower.startswith(phrase):
+                norm = lower[len(phrase):].strip().lower()
+                break
+        if norm is None and first_word in self._OPEN_VERBS:
+            norm = lower[len(first_word):].strip().lower()
+        if norm is None:
+            norm = lower
         if norm.endswith(".exe"):
             norm = norm[:-4]
         return norm in self.FORBIDDEN_TARGETS
@@ -293,8 +547,8 @@ class _IntentClassifier:
         return None
 
     def _has_trailing_conjunction(self, lower, first_word):
-        verbs = {"open", "close", "search", "play", "launch", "folder"}
-        if first_word in verbs:
+        verbs = {"open", "close", "search", "play", "launch", "folder", "start", "run", "fire up"}
+        if first_word in verbs or any(lower.startswith(p) for p in self._OPEN_PHRASES[0]):
             return bool(re.search(r"\b(?:and|then|anf|andd|thenn|theen)\s*$", lower))
         return False
 
@@ -327,6 +581,10 @@ class _IntentClassifier:
         operational_routing = self._detect_operational(lower, text)
         if operational_routing:
             return operational_routing
+
+        credential_routing = self._detect_credential(lower, text)
+        if credential_routing:
+            return credential_routing
 
         if self._detect_list_tabs(lower):
             return RoutingDecision(IntentType.BROWSER_TABS, "list_tabs", "", text, lower, confidence=1.0)
@@ -377,12 +635,63 @@ class _IntentClassifier:
                     f"{browser}::open_url::{url}::{webapp}",
                     text, lower, confidence=1.0,
                 )
+            # Explicit "open X in <browser>" with a target that is NOT a valid
+            # web destination (internal host, malformed, forbidden chars) is a
+            # routing-time rejection. It must NEVER fall through to native
+            # app-open, and must never open an internal host in a browser.
+            return RoutingDecision(
+                IntentType.BROWSER_NAVIGATE, "invalid_web_target", webapp,
+                text, lower, confidence=1.0,
+            )
         return None
 
-    def _detect_open(self, lower, text, first_word):
-        if not first_word == "open":
+    # Open/launch verb family: "open vscode", "launch vscode", "start vscode",
+    # "run vscode", "fire up vscode" all resolve to the same native-app target
+    # through the canonical target-kind resolver. "run"/"start" are only open
+    # verbs when followed by a plausible app-like target (a bare "run" /
+    # "start" stays conversational/media).
+    _OPEN_VERBS = frozenset({"open", "launch", "start", "run"})
+    _OPEN_PHRASES = (("fire up ", "open up ", "bring up "), )
+
+    def _open_verb_target(self, lower, text, first_word):
+        """Return the target following an open/launch/start/run verb, or None.
+
+        Phrasal verbs ("open up X", "fire up X", "bring up X") are matched
+        FIRST because their phrase is longer than the bare verb — otherwise
+        "open up winrar" would slice on "open" and produce target "up
+        winrar". Bare verbs then fall through.
+        """
+        target = None
+        for phrase in self._OPEN_PHRASES[0]:
+            if lower.startswith(phrase):
+                target = text[len(phrase):].strip()
+                break
+        if target is None and first_word in self._OPEN_VERBS:
+            target = text[len(first_word):].strip()
+        if not target:
             return None
-        target = text[5:].strip()
+        # "run"/"start" must be followed by an app-like noun phrase, not a
+        # question/search fragment ("run a search", "start a timer").
+        if first_word in ("run", "start"):
+            first_t = target.lower().split()[0] if target.split() else ""
+            if first_t in ("a", "an", "the", "for", "with", "this", "that",
+                           "my", "your", "search", "timer", "what", "how",
+                           "why", "when", "where", "who"):
+                return None
+        return target
+
+    def _detect_open(self, lower, text, first_word):
+        target = self._open_verb_target(lower, text, first_word)
+        if target is None:
+            return None
+        # Generic noun-phrase cleanup for app-like targets: strip a leading
+        # article and a trailing qualifier ("the winrar app" -> "winrar",
+        # "open up the winrar app" -> "winrar"). This is a semantic family
+        # rule, not per-app phrasing.
+        target = re.sub(r"^(?:the|a|an)\s+", "", target.strip(), flags=re.IGNORECASE)
+        target = re.sub(r"\s+(?:app|application|program|software)\s*$", "", target, flags=re.IGNORECASE).strip()
+        if not target:
+            return None
         target_lower = target.lower()
         words_set = set(target_lower.split())
 
@@ -411,7 +720,9 @@ class _IntentClassifier:
                 metadata={"canonical_target": route_info.get("canonical_target", ""), "browser": route_info.get("browser", "")},
             )
         else:
-            return RoutingDecision(IntentType.SEARCH, "search_web", target, text, lower, confidence=0.6)
+            # not_found -> truthful native-open failure ("couldn't find X
+            # installed"), never a silent web substitution.
+            return RoutingDecision(IntentType.DESKTOP_OPEN, "open_app", route_info.get("target") or target, text, lower, confidence=1.0)
 
     def _detect_focus(self, lower, text, first_word, second_word):
         if first_word == "focus":
@@ -439,6 +750,8 @@ class _IntentClassifier:
         re.compile(r"^what\s+(?:apps|applications|windows)\s+are\s+(?:open|running|active)\b"),
         re.compile(r"^which\s+(?:apps|applications|windows)\s+are\s+(?:open|running|active)\b"),
         re.compile(r"^what\s+do\s+i\s+(?:currently\s+)?have\s+(?:open|running)\b"),
+        # colloquial "what have I got open" / "what've I got open" family
+        re.compile(r"^what(?:\s+have|'ve|\s+'ve)\s+i\s+got\s+(?:open|running|active)\b"),
         re.compile(r"^what(?:'s|s| is)\s+(?:open\s+)?(?:in|on)\s+(?:chrome|edge|firefox|brave|the\s+browser|my\s+computer|this\s+computer)\b"),
         re.compile(r"^tell\s+me\s+what(?:'s|s| is)?\s+(?:open|running|using|active)\b"),
         re.compile(r"^tell\s+me\s+what\s+(?:apps|windows|tabs)\s+are\s+(?:open|running)\b"),
@@ -475,12 +788,15 @@ class _IntentClassifier:
         (re.compile(r"^what\s+is\s+kio\s+(?:currently\s+)?doing\b"), "status", ""),
         (re.compile(r"^what\s+are\s+you\s+currently\s+(?:handling|working\s+on)\b"), "status", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+your\s+(?:current\s+)?(?:status|state)\b"), "status", ""),
-        (re.compile(r"^what(?:'s|s| is)?\s+(?:kio(?:'s)?\s+)?(?:status|state)\b"), "status", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+kio(?:'s)?\s+(?:status|state)\b"), "status", ""),
         (re.compile(r"^tell\s+me\s+(?:your\s+|kio(?:'s)?\s+)?status\b"), "status", ""),
         # --- uptime ---
+        # "what is uptime" is a KNOWLEDGE question — only possessive/qualified
+        # forms (your/kio's) are operational, so the general question stays on
+        # the knowledge path.
         (re.compile(r"^uptime\s*$"), "uptime", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+your\s+uptime\b"), "uptime", ""),
-        (re.compile(r"^what(?:'s|s| is)?\s+(?:kio(?:'s)?\s+)?uptime\b"), "uptime", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+kio(?:'s)?\s+uptime\b"), "uptime", ""),
         (re.compile(r"^tell\s+me\s+(?:your\s+|kio(?:'s)?\s+)?uptime\b"), "uptime", ""),
         (re.compile(r"^how\s+long\s+(?:have\s+you|has\s+kio|has\s+the\s+bot|has\s+it)\s+been\s+(?:running|up|online)\b"), "uptime", ""),
         # --- system health ---
@@ -488,9 +804,13 @@ class _IntentClassifier:
         (re.compile(r"^system\s+(?:health|status)\b"), "system", ""),
         (re.compile(r"^computer\s+(?:health|status)\b"), "system", ""),
         (re.compile(r"^pc\s+(?:health|status)\b"), "system", ""),
-        (re.compile(r"^how\s+(?:is|are)\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|machine|system)\b"), "system", ""),
+        (re.compile(r"^how(?:'s|s| is| are)\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|machine|system)\b"), "system", ""),
         (re.compile(r"^is\s+my\s+(?:computer|pc|laptop)\s+(?:ok(?:ay)?|fine|healthy|good)\b"), "system", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:system|computer|pc)\s+(?:health|status)\b"), "system", ""),
+        # --- lock state ---
+        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|screen|system)\s+locked\b"), "lock_state", ""),
+        (re.compile(r"^am\s+i\s+locked\b"), "lock_state", ""),
+        (re.compile(r"^lock\s+(?:status|state)\b"), "lock_state", ""),
         # --- system uptime ---
         (re.compile(r"^(?:system|pc|computer)\s+uptime\b"), "system_uptime", ""),
         (re.compile(r"^how\s+long\s+has\s+(?:my\s+|the\s+)?(?:computer|pc|system|laptop)\s+been\s+(?:running|on|up)\b"), "system_uptime", ""),
@@ -537,10 +857,12 @@ class _IntentClassifier:
         (re.compile(r"^are\s+(?:the\s+)?(?:providers|services|subsystems)\s+(?:healthy|connected|working|ready|up|ok(?:ay)?)\b"), "components", "services"),
         (re.compile(r"^is\s+(?:the\s+)?(?:mcp|tools?)\s+(?:connected|working|ready|up|available)\b"), "components", "tools"),
         (re.compile(r"^is\s+(?:the\s+)?kio(?:'s)?\s+(?:runtime\s+)?(?:working|ok(?:ay)?|healthy|fine)\b"), "components", "kio"),
+        (re.compile(r"^is\s+kio\s+(?:running|alive|up)\b"), "health", ""),
         (re.compile(r"^what\s+(?:services|components|systems|things)\s+are\s+(?:connected|working|running|active)\b"), "components", ""),
         # --- whats wrong / diagnose ---
         (re.compile(r"^what(?:'s|s| is)?\s+wrong\s*$"), "whats_wrong", ""),
         (re.compile(r"^is\s+(?:there\s+)?(?:anything|something)\s+wrong\b"), "whats_wrong", ""),
+        (re.compile(r"^(?:anything|something)\s+wrong(?:\s+with\s+(?:my\s+|the\s+)?(?:pc|computer|laptop|system))?\b"), "whats_wrong", ""),
         (re.compile(r"^why\s+(?:are\s+you|is\s+kio)\s+(?:unhealthy|degraded|not\s+working)\b"), "whats_wrong", ""),
         (re.compile(r"^why\s+isn'?t\s+(?:something|anything)\s+working\b"), "whats_wrong", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+failing\b"), "whats_wrong", ""),
@@ -551,12 +873,70 @@ class _IntentClassifier:
         (re.compile(r"^kio(?:'s)?\s+status\b"), "status", ""),
         (re.compile(r"^kio(?:'s)?\s+uptime\b"), "uptime", ""),
         (re.compile(r"^kio(?:'s)?\s+diagnose\b"), "whats_wrong", ""),
+        # --- KIO self-state / typo-tolerant conversational-state family ---
+        (re.compile(r"^kio\s+(?:ok(?:ay)?|good|fine|alright|healthy)\b"), "health", ""),
+        (re.compile(r"^kio\s+still\s+(?:running|up|alive|online|working)\b"), "health", ""),
+        (re.compile(r"^kio\s+(?:running|up|alive|online)\b"), "health", ""),
+        (re.compile(r"^you\s+(?:ok(?:ay)?|good|alright|fine|healthy)\b"), "health", ""),
+        (re.compile(r"^still\s+(?:running|up|alive|online|working)\b"), "health", ""),
+        (re.compile(r"^are\s+you\s+still\s+(?:running|up|alive|online)\b"), "health", ""),
+        (re.compile(r"^how\s+is\s+your\s+health\b"), "health", ""),
+        (re.compile(r"^everything\s+ok(?:ay)?\b"), "health", ""),
+        (re.compile(r"^all\s+good\b"), "health", ""),
     )
+
+    # Credential management family (Slice 9): deterministic, secret-free.
+    # Knowledge questions that merely mention a provider ("what is github",
+    # "what is an oauth credential") stay on the knowledge path.
+    _CREDENTIAL_ROUTES: tuple[tuple[object, str, str], ...] = (
+        (re.compile(r"^what\s+credentials\s+do\s+i\s+have\b"), "list", ""),
+        (re.compile(r"^show\s+(?:me\s+)?(?:my\s+)?(?:connected\s+)?(?:accounts|credentials)\b"), "list", ""),
+        (re.compile(r"^list\s+(?:my\s+)?(?:credentials|connected\s+accounts)\b"), "list", ""),
+        (re.compile(r"^which\s+credentials\s+need\s+attention\b"), "attention", ""),
+        (re.compile(r"^do\s+i\s+need\s+to\s+reconnect\s+anything\b"), "attention", ""),
+        (re.compile(r"^revoke\s+my\s+([a-z0-9 ._-]+?)\s+(?:credential|account|credentials)\b"), "revoke", ""),
+        (re.compile(r"^is\s+my\s+([a-z0-9 ._-]+?)\s+(?:credential|account)\s+valid\b"), "status", ""),
+        (re.compile(r"^refresh\s+(?:my\s+|the\s+)?([a-z0-9 ._-]+?)\s+(?:credential|account)\b"), "refresh", ""),
+    )
+
+    def _detect_credential(self, lower, text):
+        norm = lower.lstrip("/")
+        for pattern, action, _target in self._CREDENTIAL_ROUTES:
+            m = pattern.match(norm)
+            if not m:
+                continue
+            target = m.group(1).strip() if m.groups() else ""
+            return RoutingDecision(
+                IntentType.CREDENTIAL, action, target, text, lower, confidence=1.0,
+            )
+        if norm in ("credentials",):
+            return RoutingDecision(IntentType.CREDENTIAL, "list", "", text, lower, confidence=1.0)
+        return None
+
+    # Deterministic installed-app existence query: "is winrar installed",
+    # "is vscode installed". Routes to the operational family (app_installed)
+    # which probes the real OS — never an LLM guess. Generic placeholders
+    # ("is everything installed") stay out.
+    _INSTALLED_QUERY_RE = re.compile(r"^is\s+(.+?)\s+installed\??\s*$")
+    _INSTALLED_PLACEHOLDERS = frozenset({
+        "everything", "anything", "something", "it", "this", "that",
+        "my apps", "the apps", "apps", "software", "all", "everything else",
+    })
 
     def _detect_operational(self, lower, text):
         # Command-style ("/health") and natural-style share one deterministic
-        # path; punctuation/case are already normalized upstream.
-        norm = lower.lstrip("/")
+        # path; punctuation/case are already normalized upstream. Bounded
+        # typo-correction ("heath" -> "health") is applied to the scan text
+        # only; the decision keeps the user's original text.
+        norm = self._typo_fix_operational(lower.lstrip("/"))
+        installed_match = self._INSTALLED_QUERY_RE.match(norm)
+        if installed_match:
+            app = installed_match.group(1).strip()
+            if app and app.lower() not in self._INSTALLED_PLACEHOLDERS:
+                return RoutingDecision(
+                    IntentType.OPERATIONAL, "app_installed", app,
+                    text, lower, confidence=1.0,
+                )
         for pattern, action, target in self._OPERATIONAL_ROUTES:
             if pattern.match(norm):
                 return RoutingDecision(
@@ -565,24 +945,57 @@ class _IntentClassifier:
         return None
 
     def _detect_close(self, lower, text, first_word):
-        if first_word == "close":
-            target = text[6:].strip()
-            browser_names = {"chrome", "edge", "firefox", "brave", "comet", "browser"}
-            if target.lower() in browser_names or target.lower().endswith(" browser"):
-                return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", target.lower().replace(" browser", ""), text, lower, confidence=1.0)
-            # BC-2: tab-scoped close — strip "the X tab" phrasing so the
-            # target resolves to the web-app name ("close the chatgpt tab" ->
-            # close_tab chatgpt), never to the host browser process.
-            tab_target = re.sub(r"^(?:the\s+)?(.+?)(?:\s+tab)?$", r"\1", target.lower()).strip()
-            if tab_target in browser_names:
-                return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", tab_target, text, lower, confidence=1.0)
-            return RoutingDecision(IntentType.BROWSER_FOCUS, "close_tab", tab_target or target, text, lower, confidence=1.0)
-        return None
+        # Close phrasal-verb family: "close X", "shut down X", "close down X".
+        # Semantic family, not per-app phrasing. System nouns ("shut down the
+        # computer") intentionally stay OUT of this family — "shut down" with
+        # no target is a system action handled elsewhere.
+        _CLOSE_PHRASES = ("shut down ", "close down ")
+        raw_target = None
+        if first_word == "close" and not lower.startswith("close down "):
+            raw_target = text[6:].strip()
+        else:
+            for phrase in _CLOSE_PHRASES:
+                if lower.startswith(phrase):
+                    raw_target = text[len(phrase):].strip()
+                    break
+        if raw_target is None:
+            return None
+        # Generic noun-phrase cleanup: strip leading article and trailing
+        # qualifiers ("the cursor thing" -> "cursor", "the chatgpt tab" ->
+        # "chatgpt").
+        target = re.sub(r"^(?:the|a|an)\s+", "", raw_target.strip(), flags=re.IGNORECASE)
+        target = re.sub(r"\s+(?:thing|app|application|program|software|tab)\s*$", "", target, flags=re.IGNORECASE).strip()
+        browser_names = {"chrome", "edge", "firefox", "brave", "comet", "browser"}
+        if target.lower() in browser_names or target.lower().endswith(" browser"):
+            return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", target.lower().replace(" browser", ""), text, lower, confidence=1.0)
+        # BC-2: tab-scoped close — strip "the X tab" phrasing so the target
+        # resolves to the web-app name ("close the chatgpt tab" -> close_tab
+        # chatgpt), never to the host browser process.
+        tab_target = re.sub(r"^(?:the\s+)?(.+?)(?:\s+tab)?$", r"\1", target.lower()).strip()
+        if tab_target in browser_names:
+            return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", tab_target, text, lower, confidence=1.0)
+        return RoutingDecision(IntentType.BROWSER_FOCUS, "close_tab", tab_target or target, text, lower, confidence=1.0)
 
     def _detect_system(self, lower, first_word):
+        mapping = {
+            "shutdown": "shutdown_system", "restart": "restart_system",
+            "lock": "lock_system", "unlock": "unlock_system",
+            "recovery": "recovery_runtime", "recover": "recovery_runtime",
+        }
         if first_word in self.SYSTEM_ACTIONS:
-            mapping = {"shutdown": "shutdown_system", "restart": "restart_system", "lock": "lock_system", "recovery": "recovery_runtime", "recover": "recovery_runtime"}
-            return RoutingDecision(IntentType.SYSTEM, mapping[first_word], "", "", "", confidence=1.0)
+            action = mapping.get(first_word)
+            if action:
+                return RoutingDecision(IntentType.SYSTEM, action, "", "", "", confidence=1.0)
+        # Natural lock/unlock phrasing: "lock my pc", "lock the computer",
+        # "secure my computer", "unlock my computer", "wake and unlock".
+        if re.match(r"^secure\s+my\s+(?:computer|pc|laptop|machine)\b", lower):
+            return RoutingDecision(IntentType.SYSTEM, "lock_system", "", "", "", confidence=1.0)
+        if re.match(r"^lock\s+(?:my\s+|the\s+|this\s+)?(?:computer|pc|laptop|machine|workstation)\b", lower):
+            return RoutingDecision(IntentType.SYSTEM, "lock_system", "", "", "", confidence=1.0)
+        if re.match(r"^unlock\s+(?:my\s+|the\s+|this\s+)?(?:computer|pc|laptop|machine|workstation)\b", lower):
+            return RoutingDecision(IntentType.SYSTEM, "unlock_system", "", "", "", confidence=1.0)
+        if lower in ("wake and unlock", "wake up and unlock"):
+            return RoutingDecision(IntentType.SYSTEM, "unlock_system", "", "", "", confidence=1.0)
         return None
 
     def _detect_file(self, lower, text, first_word):
@@ -871,6 +1284,7 @@ class _CapabilityResolver:
             IntentType.FILE: ("desktop", {"action": decision.action, "target": decision.target}),
             IntentType.MEMORY: ("memory", {"action": decision.action, "query": decision.target}),
             IntentType.MCP: ("mcp", {"raw": decision.raw_text}),
+            IntentType.CREDENTIAL: ("credential", {"action": decision.action, "target": decision.target}),
             IntentType.UNKNOWN: ("conversation", {"template": "unknown"}),
         }
         result = mapping.get(decision.intent_type, ("conversation", {"template": "unknown"}))
@@ -909,9 +1323,17 @@ class _ExecutionCoordinator:
             "coordinator": self._exec_coordinator,
             "memory": self._exec_memory,
             "mcp": self._exec_conversation,
+            "credential": self._exec_credential,
         }
         handler = dispatch.get(capability, self._exec_conversation)
         return handler(params, decision)
+
+    def _exec_credential(self, params: dict, decision: RoutingDecision) -> dict:
+        from mini_kio.core.credential_vault import credential_management_result
+        return credential_management_result(
+            params.get("action", "list"),
+            target=params.get("target", ""),
+        )
 
     def _exec_desktop(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.execution_boundary import execute_action
@@ -1053,6 +1475,12 @@ class _ExecutionCoordinator:
         )
 
         action = params["action"]
+
+        if action == "invalid_web_target":
+            # Deterministic rejection of an explicit "open X in <browser>"
+            # request whose target is not a valid web destination. Never
+            # falls through to native execution; never opens internal hosts.
+            return {"success": False, "message": "Invalid browser web target."}
 
         if action == "browser_goto":
             from mini_kio.core.execution_boundary import execute_action
@@ -1225,15 +1653,18 @@ class _ExecutionCoordinator:
         if any(
             k in lower
             for k in (
-                "how are you", "how's it going", "how are ya", "how are things",
-                "how have you been", "how you doing", "how's your day",
-                "how is your day", "how are you doing",
+                "how are you", "how's it going", "how is it going", "how are ya",
+                "how are things", "how have you been", "how you doing",
+                "how's your day", "how is your day", "how are you doing",
+                "what's up", "what is up",
             )
         ):
+            # Truthful, KIO-appropriate small talk: an assistant with a real
+            # operational state — never a fabricated human biography.
             return random.choice([
-                "I'm doing great, thanks for asking! How about you?",
-                "Feeling good and ready to help. What's on your mind?",
-                "All good on my end. What can I do for you?",
+                "All good on my end and ready to help. What's on your mind?",
+                "Running fine. What can I do for you?",
+                "Everything's working — what do you need?",
             ])
         return random.choice([
             "Hey! How's it going?",
@@ -1256,7 +1687,8 @@ class _ExecutionCoordinator:
         parts = [
             "You are KIO, an intelligent personal companion and desktop assistant. "
             "You are chatting naturally with a real user. Be warm, conversational and short-first: "
-            "reply in 1-2 sentences, then offer to go deeper (e.g. 'Want more detail?'). "
+            "reply in 1-2 sentences and stop. Never append robotic prompts such as "
+            "'Want more detail?', 'Anything else?', 'Let me know if you need anything'. "
             "Only expand unprompted when the user explicitly asked for depth. "
             "When asked for an opinion or to compare options, give a "
             "reasoned analytical perspective grounded in KIO's design philosophy (determinism, "
@@ -1270,7 +1702,13 @@ class _ExecutionCoordinator:
             "NEVER reference past conversation topics unless they appear in the 'Recent conversation' "
             "section below. If that section is empty, you have NO prior context - greet naturally and "
             "do not claim or imply you were discussing anything before. "
-            "You are honest that you are an AI companion when asked directly.",
+            "You are honest that you are an AI companion when asked directly. "
+            "NEVER invent the user's name, age, gender, appearance, location, feelings, health, "
+            "relationships, personal history, or past events. Never address the user by any name. "
+            "Never assume anything about the user's identity or life. Only the 'Known facts' section "
+            "may name the user (user_name), and only then may you use that name - otherwise no name. "
+            "If you don't know something about the user, say so instead of guessing. Do not speculate "
+            "about how the user is feeling or what they are doing unless they told you.",
         ]
         try:
             if ctx is not None:
@@ -1290,6 +1728,9 @@ class _ExecutionCoordinator:
             reply = None
         if reply:
             cleaned = reply.strip().strip('"').strip("'")
+            # Anti-fabrication: the model must never address the user by an
+            # invented name ("Hey, it sounds pretty serious. Peter").
+            cleaned = _sanitize_llm_name_address(cleaned)
             if len(cleaned) > 1 and cleaned.lower() != decision.normalized_text.lower().strip():
                 return cleaned
         return None
@@ -1435,6 +1876,7 @@ class _ExecutionCoordinator:
             "shutdown_system": "shutdown_system",
             "restart_system": "restart_system",
             "lock_system": "lock_system",
+            "unlock_system": "unlock_system",
             "recovery_runtime": "recovery_runtime",
         }
         canonical = action_map.get(params["action"], params["action"])
