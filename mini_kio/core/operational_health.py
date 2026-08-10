@@ -200,6 +200,8 @@ def _system_metrics() -> dict[str, Any]:
         "disk_free_gb": None,
         "battery_percent": None,
         "battery_charging": None,
+        "battery_secsleft": None,
+        "power_plugged": None,
         "system_uptime_s": None,
         "gpu": None,
     }
@@ -227,6 +229,12 @@ def _system_metrics() -> dict[str, Any]:
         if batt is not None:
             out["battery_percent"] = int(batt.percent)
             out["battery_charging"] = bool(batt.power_plugged)
+            out["power_plugged"] = bool(batt.power_plugged)
+            # Estimated remaining time when Windows actually reports it
+            # (POWER_TIME_UNLIMITED / UNKNOWN are -1 / -2 — never claim them).
+            secs = getattr(batt, "secsleft", None)
+            if isinstance(secs, int) and secs > 0:
+                out["battery_secsleft"] = int(secs)
     except Exception:
         pass
     try:
@@ -562,13 +570,24 @@ def _system_conditions() -> list[dict[str, Any]]:
         conditions.append(cond)
 
     batt = m.get("battery_percent")
-    if batt is not None and batt <= 20 and not m.get("battery_charging"):
-        conditions.append({
-            "id": "battery", "severity": "low", "metric": "battery",
-            "current_value": batt, "threshold": 20,
-            "explanation": f"Battery is down to {batt}% and not charging.",
-            "evidence": "sensors_battery", "observed_at": observed_at,
-        })
+    charging = m.get("battery_charging")
+    if batt is not None and not charging:
+        if batt <= 6:
+            conditions.append({
+                "id": "battery", "severity": "critical", "metric": "battery",
+                "current_value": batt, "threshold": 6,
+                "explanation": (
+                    f"Your battery is critically low at {batt}%. Plug in the charger."
+                ),
+                "evidence": "sensors_battery", "observed_at": observed_at,
+            })
+        elif batt <= 20:
+            conditions.append({
+                "id": "battery", "severity": "low", "metric": "battery",
+                "current_value": batt, "threshold": 20,
+                "explanation": f"Battery is down to {batt}% and not charging.",
+                "evidence": "sensors_battery", "observed_at": observed_at,
+            })
     return conditions
 
 
@@ -602,6 +621,36 @@ def _kio_health_label(snap: dict[str, Any], comps: dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 def format_kio_health() -> str:
+    """Natural, truthful KIO health prose (2026-08-10 response policy).
+
+    Healthy reads as a short natural statement; degraded names only what is
+    genuinely wrong. Detailed per-component status remains available through
+    format_health_detail() (used by the /health command and status queries).
+    """
+    snap = _kio_health_snapshot()
+    if not snap.get("running"):
+        return "KIO is not running right now."
+    comps = _component_states()
+    label = _kio_health_label(snap, comps)
+    if label == "healthy":
+        return "KIO's healthy and running normally."
+    parts = ["KIO's running, but some things need attention."]
+    if comps.get("browser") == "disconnected":
+        parts.append("The browser connection is down.")
+    if comps.get("telegram") == "unavailable":
+        parts.append("Telegram isn't connected.")
+    if comps.get("media") == "unavailable":
+        parts.append("Media isn't available.")
+    if comps.get("tools") == "unavailable":
+        parts.append("External tools aren't connected.")
+    if snap["state"] == "degraded":
+        parts.append("KIO is running in a degraded state.")
+    return " ".join(parts)
+
+
+def format_health_detail() -> str:
+    """Detailed per-component health (uptime + each component state) — used by
+    the explicit /health command where the user asked for the full picture."""
     snap = _kio_health_snapshot()
     if not snap.get("running"):
         return "KIO is not running right now."
@@ -702,6 +751,31 @@ def format_lock_state() -> str:
     return "Your computer is locked." if locked else "Your computer isn't locked."
 
 
+def _fmt_battery_line(m: dict[str, Any]) -> str:
+    """Battery + power-state line from real metrics; never fabricated.
+
+    Combines percentage, AC/charging state and a reliably-reported estimated
+    remaining time. On a desktop (no battery) returns "" — the caller then
+    omits the line entirely rather than inventing one.
+    """
+    batt = m.get("battery_percent")
+    if batt is None:
+        return ""
+    charging = m.get("battery_charging")
+    if charging:
+        return f"Battery: {batt}% and charging"
+    line = f"Battery: {batt}% (on battery)"
+    secs = m.get("battery_secsleft")
+    if isinstance(secs, int) and secs > 0:
+        mins = max(1, int(secs // 60))
+        if mins < 60:
+            line += f", about {mins} min left"
+        else:
+            h, mm = divmod(mins, 60)
+            line += f", about {h}h {mm}m left"
+    return line
+
+
 def format_system_health() -> str:
     m = _system_metrics()
     lines: list[str] = []
@@ -728,6 +802,9 @@ def format_system_health() -> str:
             lines.append(f"Storage: {m['disk_percent']}% used ({m['disk_free_gb']} GB free)")
         else:
             lines.append(f"Storage: {m['disk_percent']}%")
+    batt_line = _fmt_battery_line(m)
+    if batt_line:
+        lines.append(batt_line)
     if not lines:
         return "I can't read your system stats right now."
     head = "Your system is under heavy load right now." if heavy else "Your system looks healthy."
@@ -768,7 +845,12 @@ def format_metric(name: str) -> str:
             return "Battery status isn't available on this system."
         if m.get("battery_charging"):
             return f"Battery is at {m['battery_percent']}% and charging."
-        return f"Battery is at {m['battery_percent']}%."
+        line = f"Battery is at {m['battery_percent']}% and the system is running on battery."
+        secs = m.get("battery_secsleft")
+        if isinstance(secs, int) and secs > 0:
+            mins = max(1, int(secs // 60))
+            line += f" About {mins} minutes left."
+        return line
     return "I can't read that right now."
 
 
@@ -972,6 +1054,7 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
     action = str(action or "status").lower().strip()
     formatters: dict[str, Any] = {
         "health": format_kio_health,
+        "health_detail": format_health_detail,
         "status": format_status,
         "uptime": format_uptime,
         "system": format_system_health,
@@ -990,6 +1073,8 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
         "resources_storage": format_storage_attribution,
         "diagnostic": format_diagnostic,
         "app_installed": lambda: _format_app_installed(target),
+        "app_inventory": _format_app_inventory,
+        "system_summary": _format_system_summary,
     }
     message = formatters.get(action, format_status)()
     return {"success": True, "message": message, "action": action, "target": target}
@@ -1007,3 +1092,53 @@ def _format_app_installed(target: str) -> str:
     if probe_app_existence(app):
         return f"Yes — {app} is installed."
     return f"I couldn't find {app} installed on your computer."
+
+
+def _format_app_inventory() -> str:
+    """Installed-app inventory from authoritative Windows sources.
+
+    Generic (no curated app list): Uninstall registry + Start Menu + AppX
+    aliases. A bounded sample is shown naturally; the count is real.
+    """
+    from mini_kio.core.app_operator import list_installed_apps
+    apps = list_installed_apps(60)
+    if not apps:
+        return "I can't read your installed apps right now."
+    shown = apps[:14]
+    sample = ", ".join(shown)
+    total = len(apps)
+    if total > len(shown):
+        return (
+            f"You've got quite a few apps installed. A sample: {sample}, "
+            f"and about {total - len(shown)} more."
+        )
+    return f"You've got these apps installed: {sample}."
+
+
+def _format_system_summary() -> str:
+    """'what's on my computer' — a broad, truthful system overview.
+
+    Distinct from the desktop-state family ("what's open"): this is the
+    machine-level summary (installed apps + drives + running state), composed
+    from authoritative local sources, never a fabricated dump.
+    """
+    from mini_kio.core.app_operator import list_installed_apps
+    parts: list[str] = []
+    apps = list_installed_apps(80)
+    if apps:
+        parts.append(f"{len(apps)}+ apps installed")
+    vols = _storage_volumes()
+    if vols:
+        labels = ", ".join(v["label"] for v in vols[:4])
+        parts.append(f"{len(vols)} drives ({labels})")
+    m = _system_metrics()
+    if m.get("cpu") is not None:
+        parts.append(f"CPU at {m['cpu']}%")
+    if m.get("ram_percent") is not None:
+        parts.append(f"RAM at {m['ram_percent']}%")
+    batt_line = _fmt_battery_line(m)
+    if batt_line:
+        parts.append(batt_line.lower())
+    if not parts:
+        return "I can't put together a full picture of your computer right now."
+    return "Here's a quick look at your computer: " + ". ".join(parts) + "."

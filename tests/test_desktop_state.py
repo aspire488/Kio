@@ -205,7 +205,7 @@ def test_browser_tabs_grouped_under_host():
         _tab("https://web.telegram.org/a", "KIO Assistant"),
     ]
     msg = _compose(tabs)["message"]
-    assert "Open right now:" in msg
+    assert "Right now you've got:" in msg
     assert "• Chrome — ChatGPT — KIO Commit Review Prompt" in msg
     assert "• Chrome — Telegram — KIO Assistant" in msg
 
@@ -296,7 +296,7 @@ def test_empty_desktop_known_empty(monkeypatch):
 def test_partial_state_tabs_unreadable_native_visible():
     native = [_win(app="OpenCode", base="opencode", title="kio_final")]
     msg = _compose([], connected=True, error=True, native=native)["message"]
-    assert "Open right now:" in msg
+    assert "Right now you've got:" in msg
     assert "• OpenCode — kio_final" in msg
 
 

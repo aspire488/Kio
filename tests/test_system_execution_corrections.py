@@ -356,32 +356,38 @@ class ResponseSafetyTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# T. FUNDAMENTAL INVARIANT — disclosed web fallback (never hide a modality
-#    fallback; useful != misleading). Generic, not per-application.
+# T. Web-fallback UX (2026-08-10 directive): SUCCESSFUL opens get short
+#    natural confirmations ("Opened Stack Overflow.") — internal native-vs-web
+#    modality stays structured so "close it" resolves to the correct target.
+#    Fallback reasoning is exposed only when it explains a FAILURE
+#    (launch_failed). Truthful failures remain truthful.
 # ---------------------------------------------------------------------------
-class DisclosedWebFallbackTest(unittest.TestCase):
-    def test_launch_single_word_missing_discloses_fallback(self):
-        """B: app not installed + legitimate web version -> open web WITH disclosure."""
+class WebFallbackUXTest(unittest.TestCase):
+    def test_launch_single_word_missing_short_confirmation(self):
+        """B: app not installed + legitimate web version -> open web with a SHORT
+        confirmation ("Opened Winrar."), modality kept internally."""
         with mock.patch("mini_kio.core.app_operator._find_installed_app", return_value=None):
             r = launch_app("winrar")
         self.assertTrue(r["success"])
         self.assertEqual(r.get("modality"), "web_fallback")
-        self.assertIn("couldn't find", r["message"].lower())
-        self.assertIn("web version", r["message"].lower())
-        self.assertNotIn("opened winrar.", r["message"].lower())
+        self.assertEqual(r["message"], "Opened Winrar.")
+        self.assertNotIn("couldn't find", r["message"].lower())
+        self.assertNotIn("web version", r["message"].lower())
 
-    def test_launch_dual_modality_missing_discloses_fallback(self):
-        """B: native identity registered (Telegram) but not installed -> disclosed web."""
+    def test_launch_dual_modality_missing_short_confirmation(self):
+        """B: native identity registered (Telegram) but not installed -> short
+        "Opened Telegram." with modality web_fallback retained."""
         with mock.patch("mini_kio.core.app_operator._resolve_path", return_value=None), \
              mock.patch("mini_kio.core.app_operator._find_installed_app", return_value=None):
             r = launch_app("telegram")
         self.assertTrue(r["success"])
         self.assertEqual(r.get("modality"), "web_fallback")
-        self.assertIn("couldn't find", r["message"].lower())
-        self.assertIn("web version", r["message"].lower())
+        self.assertEqual(r["message"], "Opened Telegram.")
+        self.assertNotIn("couldn't find", r["message"].lower())
 
     def test_launch_multiword_missing_no_fabricated_fallback(self):
-        """F: no native + no valid web target -> truthful failure (never fabricate)."""
+        """F: no native + no verified web target -> truthful failure (never
+        fabricate a parked-domain URL)."""
         with mock.patch("mini_kio.core.app_operator._find_installed_app", return_value=None):
             r = launch_app("da vinci resolve")
         self.assertFalse(r["success"])
@@ -397,8 +403,54 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         self.assertIn("usable web version", r["message"].lower())
         self.assertNotIn("http", r["message"].lower())
 
+    def test_verified_multiword_brand_domain_accepts_real_site(self):
+        """G: "stack overflow" -> https://stackoverflow.com when DNS + title
+        verification confirm a real brand site."""
+        from mini_kio.core import app_operator as ao
+        with mock.patch.object(ao, "os") as mock_os:
+            mock_os.environ.get.return_value = ""  # NOT test mode
+            with mock.patch.object(ao, "_brand_domain_resolves", return_value=True), \
+                 mock.patch.object(ao, "_brand_page_title",
+                                   return_value="Stack Overflow - Where Developers Learn"):
+                self.assertEqual(
+                    ao._verified_brand_domain("stack overflow"),
+                    "https://stackoverflow.com",
+                )
+
+    def test_verified_multiword_brand_domain_rejects_parked(self):
+        """G: a parked/for-sale domain must be rejected even when it resolves."""
+        from mini_kio.core import app_operator as ao
+        with mock.patch.object(ao, "os") as mock_os:
+            mock_os.environ.get.return_value = ""
+            with mock.patch.object(ao, "_brand_domain_resolves", return_value=True), \
+                 mock.patch.object(ao, "_brand_page_title",
+                                   return_value="visualstudiocode.com for sale | Spaceship.com"):
+                self.assertIsNone(ao._verified_brand_domain("visual studio code"))
+
+    def test_verified_multiword_brand_domain_rejects_echo(self):
+        """G: a domain-echo title (davinciresolve.com) is a parked signature."""
+        from mini_kio.core import app_operator as ao
+        with mock.patch.object(ao, "os") as mock_os:
+            mock_os.environ.get.return_value = ""
+            with mock.patch.object(ao, "_brand_domain_resolves", return_value=True), \
+                 mock.patch.object(ao, "_brand_page_title", return_value="davinciresolve.com"):
+                self.assertIsNone(ao._verified_brand_domain("da vinci resolve"))
+
+    def test_launch_multiword_verified_web_target_short(self):
+        """G: "open stack overflow" -> verified web target with SHORT confirmation
+        and modality web_fallback (close still resolves to the web target)."""
+        from mini_kio.core import app_operator as ao
+        with mock.patch.object(ao, "_find_installed_app", return_value=None), \
+             mock.patch.object(ao, "_verified_brand_domain",
+                               return_value="https://stackoverflow.com"):
+            r = ao.launch_app("stack overflow")
+        self.assertTrue(r["success"])
+        self.assertEqual(r.get("modality"), "web_fallback")
+        self.assertEqual(r["message"], "Opened Stack Overflow.")
+
     def test_native_launch_failure_discloses_fallback(self):
-        """E: native installed but launch failed -> disclosed web fallback."""
+        """E: native installed but launch failed -> the failure is explained
+        ("couldn't launch... opened its web version")."""
         with mock.patch("mini_kio.core.app_operator._resolve_path",
                         return_value="C:/fake/Telegram.exe"), \
              mock.patch("mini_kio.core.app_operator._launch_from_info",
@@ -411,7 +463,7 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         self.assertIn("web version", r["message"].lower())
 
     def test_close_after_web_fallback_resolves_web_target(self):
-        """J: after a disclosed fallback, 'close it' resolves to the web target."""
+        """J: after a web fallback, 'close it' resolves to the web target."""
         from mini_kio.core.app_operator import _close_web_target
         with mock.patch("mini_kio.core.app_operator._find_installed_app", return_value=None), \
              mock.patch("mini_kio.core.app_operator._close_web_target",
@@ -436,8 +488,7 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         native scope. When the native process is running it closes natively;
         when it is not running it reports 'wasn't running' — it must NEVER fall
         through to a synthesized <name>.com web scope, because the native app
-        IS installed (a disclosed web fallback only opens when native is
-        absent)."""
+        IS installed (a web fallback only opens when native is absent)."""
         from mini_kio.core.app_operator import _close_web_target
         discovered = {"kind": "shortcut", "target": "C:/Users/x/Start Menu/Programs/Cursor.lnk"}
         with mock.patch("mini_kio.core.app_operator._find_installed_app",
@@ -472,7 +523,7 @@ class DisclosedWebFallbackTest(unittest.TestCase):
 
     def test_routing_dual_modality_routes_through_executor(self):
         """Classifier consistency: dual-modality name missing -> executor path
-        (disclosed fallback), never a silent browser_fallback."""
+        (web fallback), never a silent browser_fallback."""
         with mock.patch("mini_kio.core.routing_utils._resolve_path", return_value=None), \
              mock.patch("mini_kio.core.routing_utils._find_installed_app", return_value=None):
             r = get_browser_routing("telegram")
@@ -480,29 +531,29 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         self.assertEqual(r["action"], "open_app")
 
     def test_routing_pure_web_app_stays_browser(self):
-        """Pure web app (no native identity) stays browser_fallback — no disclosure needed."""
+        """Pure web app (no native identity) stays browser_fallback."""
         r = get_browser_routing("chatgpt")
         self.assertEqual(r["route_type"], "browser_fallback")
 
-    def test_formatter_preserves_fallback_disclosure(self):
-        """H: formatter must never collapse a disclosed fallback into 'Opened X.'"""
+    def test_formatter_keeps_short_confirmation(self):
+        """H: formatter must keep the short success confirmation verbatim."""
         from mini_kio.core.runtime_response_formatter import format_result
         details = {
             "success": True,
             "modality": "web_fallback",
-            "message": "I couldn't find winrar installed on your computer, so I opened its web version in your browser.",
+            "message": "Opened Winrar.",
         }
         out = format_result("open_app", "winrar", True, details)
-        self.assertIn("couldn't find", out.lower())
-        self.assertIn("web version", out.lower())
-        self.assertNotEqual(out, "Opened Winrar.")
+        self.assertEqual(out, "Opened Winrar.")
+        self.assertNotIn("couldn't find", out.lower())
+        self.assertNotIn("web version", out.lower())
 
-    def test_formatter_fallback_no_message_composes_disclosure(self):
+    def test_formatter_composes_short_when_message_missing(self):
         from mini_kio.core.runtime_response_formatter import format_result
         out = format_result("open_app", "winrar", True,
                             {"success": True, "modality": "web_fallback", "message": ""})
-        self.assertIn("web version", out.lower())
-        self.assertNotEqual(out, "Opened Winrar.")
+        self.assertEqual(out, "Opened Winrar.")
+        self.assertNotIn("web version", out.lower())
 
     def test_web_fallback_url_blocks_internal_reserved(self):
         from mini_kio.core.app_operator import _web_fallback_url
@@ -528,20 +579,19 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         self.assertNotIn("not installed", r["message"].lower())
         self.assertNotIn("http", r["message"].lower())
 
-    def test_formatter_fallback_message_never_opened(self):
+    def test_formatter_fallback_message_short(self):
         from mini_kio.core.runtime_response_formatter import format_open_app
         out = format_open_app(
             "winrar", True,
-            "I couldn't find winrar installed on your computer, so I opened its web version in your browser.",
+            "Opened Winrar.",
             {"modality": "web_fallback"},
         )
-        self.assertNotEqual(out, "Opened Winrar.")
-        self.assertIn("web version", out.lower())
+        self.assertEqual(out, "Opened Winrar.")
+        self.assertNotIn("web version", out.lower())
 
     def test_dual_modality_open_failure_never_claims_opened(self):
         """Step-2 false-success guard: when the web open FAILS for a dual-modality
-        name, the result must keep the truthful failure message — never
-        "so I opened its web version" attached to success=False."""
+        name, the result must keep the truthful failure message."""
         with mock.patch("mini_kio.core.app_operator._resolve_path", return_value=None), \
              mock.patch("mini_kio.core.app_operator._find_installed_app", return_value=None), \
              mock.patch("mini_kio.core.app_operator._open_url",
@@ -553,8 +603,8 @@ class DisclosedWebFallbackTest(unittest.TestCase):
         self.assertNotIn("so I opened its web version", r["message"])
 
     def test_web_fallback_survives_execution_boundary(self):
-        """Boundary survival: a disclosed web-fallback launch result (no PID)
-        must pass through execute_action with modality + disclosure intact.
+        """Boundary survival: a web-fallback launch result (no PID) must pass
+        through execute_action with modality + short message intact.
 
         _open_url sets verification_mode="noop", so the boundary selects
         noop_probe instead of process_liveness_probe — a pid-less web open is
@@ -567,8 +617,7 @@ class DisclosedWebFallbackTest(unittest.TestCase):
             r = eb.execute_action("open_app", "winrar")
         self.assertTrue(r["success"])
         self.assertEqual(r.get("modality"), "web_fallback")
-        self.assertIn("couldn't find", r["message"].lower())
-        self.assertIn("web version", r["message"].lower())
+        self.assertEqual(r["message"], "Opened Winrar.")
         self.assertEqual(r.get("verification_status"), "passed")
         self.assertEqual(r.get("outcome_class"), "SUCCESS")
 

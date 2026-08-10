@@ -190,6 +190,10 @@ def display_target_name(raw: str) -> str:
         return _BRAND_NAMES[low]
     if not low:
         return "it"
+    # Multi-word display names get title casing ("stack overflow" ->
+    # "Stack Overflow") — generic, not a per-app special case.
+    if len(low.split()) > 1:
+        return " ".join(w[0].upper() + w[1:] for w in low.split())
     return low[0].upper() + low[1:]
 
 

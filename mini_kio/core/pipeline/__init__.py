@@ -883,11 +883,32 @@ class _IntentClassifier:
         (re.compile(r"^how\s+is\s+your\s+health\b"), "health", ""),
         (re.compile(r"^everything\s+ok(?:ay)?\b"), "health", ""),
         (re.compile(r"^all\s+good\b"), "health", ""),
+        # --- installed-app inventory ("what apps do I have" family) ---
+        # Deterministic, real OS scan — never an LLM guess. Runs before the
+        # desktop-state family so "what's running" stays list_tabs while
+        # "what apps do I have" / "what's installed" answer the inventory.
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:my\s+|the\s+)?(?:apps?|applications|software|programs?)\s+(?:do\s+i\s+have|are\s+installed|have\s+i\s+got)\b"), "app_inventory", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+installed\b"), "app_inventory", ""),
+        (re.compile(r"^list\s+(?:my\s+)?(?:installed\s+)?(?:apps?|applications|software|programs?)\b"), "app_inventory", ""),
+        (re.compile(r"^show\s+(?:me\s+)?(?:my\s+)?(?:installed\s+)?(?:apps?|applications|software|programs?)\b"), "app_inventory", ""),
+        (re.compile(r"^which\s+(?:apps?|applications|software|programs?)\s+are\s+installed\b"), "app_inventory", ""),
+        # --- broad system summary ("what's on my computer" family) ---
+        # Distinct from desktop state ("what's open"): machine-level overview.
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:on|in)\s+(?:my|this)\s+(?:computer|pc|laptop|machine)\b"), "system_summary", ""),
+        (re.compile(r"^what\s+do\s+i\s+have\s+on\s+(?:my|this)\s+(?:computer|pc|laptop|machine)\b"), "system_summary", ""),
     )
 
     # Credential management family (Slice 9): deterministic, secret-free.
     # Knowledge questions that merely mention a provider ("what is github",
     # "what is an oauth credential") stay on the knowledge path.
+    # "Is GitHub connected?" resolves to CREDENTIAL state (never an LLM
+    # guess) but ONLY for known credential providers — "is the browser
+    # connected" stays a component query via the operational family above.
+    _CREDENTIAL_PROVIDER_WORDS = frozenset({
+        "github", "google", "gmail", "telegram", "discord", "openai",
+        "microsoft", "outlook", "spotify", "youtube", "notion", "slack",
+        "whatsapp", "dropbox", "canva", "gitlab", "bitbucket",
+    })
     _CREDENTIAL_ROUTES: tuple[tuple[object, str, str], ...] = (
         (re.compile(r"^what\s+credentials\s+do\s+i\s+have\b"), "list", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:my\s+)?(?:connected\s+)?(?:accounts|credentials)\b"), "list", ""),
@@ -909,6 +930,22 @@ class _IntentClassifier:
             return RoutingDecision(
                 IntentType.CREDENTIAL, action, target, text, lower, confidence=1.0,
             )
+        # "Is GitHub connected?" -> credential status for KNOWN providers only.
+        # This runs AFTER the operational family (browser/telegram component
+        # queries already claimed), so "is the browser connected" is never
+        # hijacked. Knowledge-vs-state boundary: "what is github" stays
+        # knowledge because it never reaches this anchored "connected" scan.
+        conn = re.match(
+            r"^is\s+(?:my\s+|the\s+)?([a-z0-9 ._-]+?)\s+connected\??\s*$", norm
+        )
+        if conn:
+            candidate = conn.group(1).strip().lower()
+            first = candidate.split()[0] if candidate.split() else candidate
+            if first in self._CREDENTIAL_PROVIDER_WORDS:
+                return RoutingDecision(
+                    IntentType.CREDENTIAL, "status", candidate,
+                    text, lower, confidence=1.0,
+                )
         if norm in ("credentials",):
             return RoutingDecision(IntentType.CREDENTIAL, "list", "", text, lower, confidence=1.0)
         return None
@@ -929,6 +966,16 @@ class _IntentClassifier:
         # typo-correction ("heath" -> "health") is applied to the scan text
         # only; the decision keeps the user's original text.
         norm = self._typo_fix_operational(lower.lstrip("/"))
+        # Explicit slash-command = the user asked for the full command detail
+        # ("/health" -> per-component report), whereas natural "KIO health"
+        # gets the short prose. Same deterministic family, same state owner.
+        if lower.startswith("/"):
+            cmd = norm.split()[0].split("@")[0]
+            if cmd == "health":
+                return RoutingDecision(
+                    IntentType.OPERATIONAL, "health_detail", "",
+                    text, lower, confidence=1.0,
+                )
         installed_match = self._INSTALLED_QUERY_RE.match(norm)
         if installed_match:
             app = installed_match.group(1).strip()

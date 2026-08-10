@@ -152,15 +152,24 @@ def _safe_display_target(target: str) -> str:
 def format_open_app(target: str, success: bool, message: str, details: Optional[Dict[str, Any]] = None) -> str:
     if not success:
         return _format_error(_ensure_str(message))
-    # FUNDAMENTAL INVARIANT: a disclosed web fallback must never collapse into
-    # "Opened X." — the user must always know the native app was not used and
-    # the web version was opened instead. Preserve the operator's disclosure
-    # message verbatim, or compose one when it is missing.
-    if details and details.get("modality") == "web_fallback":
-        return _ensure_str(message).strip() or (
-            f"I couldn't find {_safe_display_target(target)} installed on your computer, "
-            f"so I opened its web version in your browser."
-        )
+    # UX RULE (2026-08-10 directive): a successful open gets a short natural
+    # confirmation ("Opened Stack Overflow.") — including a web fallback.
+    # Internal native-vs-web modality stays in the structured details so
+    # "close it" still resolves to the correct web target; the user is not
+    # burdened with resolver mechanics on success. Failure messages keep their
+    # truthful explanation.
+    msg = _ensure_str(message).strip()
+    # Keep a real natural confirmation ("Opened Stack Overflow.",
+    # "Telegram is already open.") verbatim — but never a trivial filler
+    # ("ok", "done") that would hide the resolved target name.
+    if (
+        msg
+        and len(msg) > 2
+        and msg.lower() not in _TRIVIAL_FILLERS
+        and _is_natural(msg)
+        and not _contains_dev_terms(msg)
+    ):
+        return msg
     display = _safe_display_target(target)
     return f"Opened {display}."
 
@@ -291,15 +300,17 @@ def format_result(
         action in ("close_app", "close")
         and str(details.get("outcome_class") or "").upper() == "SUCCESS_WITH_RESIDUALS"
     )
-    # FUNDAMENTAL INVARIANT: a web-fallback result must NEVER be returned as
-    # an empty or generic message — the disclosed fallback must surface (or be
-    # composed by the structured formatter). Route it through the formatter.
-    _is_fallback = details.get("modality") == "web_fallback"
+    # UX RULE (2026-08-10 directive): a successful web-fallback result now
+    # carries a short natural message ("Opened Stack Overflow."), so it is
+    # treated like any other natural success. Modality stays structured; only
+    # failures (or partial closes) route through the structured formatter.
+    # An EMPTY message never counts as natural — route it to the formatter
+    # which composes a truthful short confirmation.
     if (
-        _is_natural(message)
+        message.strip()
+        and _is_natural(message)
         and not _contains_dev_terms(message)
         and not _needs_structured
-        and not _is_fallback
     ):
         _DIAG["response_already_natural"] += 1
         return message
@@ -331,6 +342,10 @@ def _format_error(message: str) -> str:
     if not clean:
         return "Something went wrong."
     return clean + "."
+
+
+_TRIVIAL_FILLERS = frozenset({"ok", "ok.", "done", "done.", "yes", "yes.",
+                               "sure", "sure.", "opened", "closed"})
 
 
 def _is_natural(message: str) -> bool:

@@ -525,6 +525,114 @@ def _find_installed_app(name: str) -> Optional[Dict]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Installed-application inventory (generic, bounded, read-only)
+# ---------------------------------------------------------------------------
+# "What apps do I have?" must reflect the real machine — not a curated list.
+# Sources (all authoritative, all bounded):
+#   1. Uninstall registry (HKLM + HKCU, 32- and 64-bit views)
+#   2. Start Menu .lnk stems (user + common Programs)
+#   3. WindowsApps execution aliases
+# Result is a deduplicated, sorted list of display names, capped at `limit`.
+# Reading is side-effect free and fast (registry enumerations only; the
+# Start-Menu walk is depth-bounded exactly like _start_menu_discovery).
+
+
+_INSTALLED_APP_SKIP_SUFFIXES = (
+    ".lnk", ".txt", ".url", ".log", ".rtf", ".html", ".htm", ".pdf",
+)
+
+
+def _uninstall_registry_names() -> set[str]:
+    """DisplayName values from the Uninstall registry views (bounded)."""
+    if not _IS_WINDOWS:
+        return set()
+    names: set[str] = set()
+    try:
+        import winreg
+    except Exception:
+        return names
+    paths = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+    for hive, path in paths:
+        try:
+            with winreg.OpenKey(hive, path) as base:
+                i = 0
+                while True:
+                    try:
+                        sub = winreg.EnumKey(base, i)
+                    except OSError:
+                        break
+                    i += 1
+                    try:
+                        with winreg.OpenKey(base, sub) as key:
+                            val, _ = winreg.QueryValueEx(key, "DisplayName")
+                        val = (val or "").strip()
+                        if val and not val.lower().startswith(("kb", "update for ", "security update")):
+                            names.add(val)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return names
+
+
+def _start_menu_app_stems() -> set[str]:
+    """App names from Start Menu shortcut stems (user + common, bounded)."""
+    if not _IS_WINDOWS:
+        return set()
+    stems: set[str] = set()
+    roots = [
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+    ]
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                if dirpath[len(root):].count(os.sep) > 4:
+                    continue
+                for f in files:
+                    low = f.lower()
+                    if not low.endswith(".lnk"):
+                        continue
+                    stem = os.path.splitext(f)[0].strip()
+                    if stem and not stem.lower().startswith(("uninstall", "readme")):
+                        stems.add(stem)
+        except (PermissionError, OSError):
+            continue
+    return stems
+
+
+def list_installed_apps(limit: int = 40) -> list[str]:
+    """Generic installed-application inventory.
+
+    Merges authoritative Windows sources (Uninstall registry, Start Menu
+    shortcuts, WindowsApps aliases), deduplicates, sorts, and caps at
+    `limit`. No hard-coded application list — arbitrary installed apps
+    appear. Returns [] when discovery is unavailable (never fabricated).
+    """
+    names = _uninstall_registry_names()
+    names |= _start_menu_app_stems()
+    if _IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA", "")
+        base = os.path.join(local, "Microsoft", "WindowsApps")
+        if os.path.isdir(base):
+            try:
+                for f in os.listdir(base):
+                    low = f.lower()
+                    if low.endswith(".exe") and not low.startswith("desktopappinstaller"):
+                        names.add(os.path.splitext(f)[0])
+            except OSError:
+                pass
+    ordered = sorted(names, key=lambda s: s.lower())
+    return ordered[:max(1, int(limit))]
+
+
 def _launch_discovered(desc: Dict, name: str) -> dict:
     """Launch a generic discovered application (exe path or .lnk shortcut).
 
@@ -616,6 +724,157 @@ _RESERVED_SYNTHETIC_WEB_LABELS = {
     "terminal",
     "appdata",
 }
+
+# ---------------------------------------------------------------------------
+# Verified multi-word web-entity resolution (generic, bounded, cached)
+# ---------------------------------------------------------------------------
+# "Open Stack Overflow" (native absent) must resolve to stackoverflow.com —
+# its canonical web presence — WITHOUT opening parked/for-sale/domain-echo
+# squatter pages. DNS presence alone cannot distinguish (davinciresolve.com
+# resolves too), so the collapsed <brand>.com is accepted only when the
+# homepage verifies the brand: a readable title containing the natural phrase,
+# OR an anti-bot wall (Cloudflare challenge / 403 / timeout) in front of a
+# DNS-present host (the recognizable-web-entity case the directive requires).
+# Parked pages serve readable "for sale"/domain-echo pages and are rejected.
+# Every lookup is time-bounded and cached; multi-word names that fail stay a
+# truthful failure — never a fabricated URL.
+
+_WEB_DNS_CACHE: Dict[str, bool] = {}
+_WEB_TITLE_CACHE: Dict[str, Optional[str]] = {}
+
+_PARKED_TITLE_MARKERS = (
+    "for sale", "premium domain", "buy this domain", "domain is for sale",
+    "parked", "sedo", "afternic", "hugedomains", "this domain", "squat",
+    "domain marketplace",
+)
+_ANTIBOT_TITLE_MARKERS = (
+    "just a moment", "attention required", "checking your browser",
+    "verify you are human", "enable javascript", "captcha",
+    "access denied", "not available", "security check",
+)
+
+
+def _brand_domain_resolves(host: str) -> bool:
+    """Bounded DNS presence check for a candidate brand host (cached)."""
+    if host in _WEB_DNS_CACHE:
+        return _WEB_DNS_CACHE[host]
+    ok = False
+    try:
+        import socket
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ok = bool(infos)
+    except Exception:
+        ok = False
+    _WEB_DNS_CACHE[host] = ok
+    return ok
+
+
+def _brand_page_title(url: str) -> Optional[str]:
+    """Bounded homepage <title> fetch (4s hard timeout, cached).
+
+    None means the title could not be read (anti-bot wall, 403, timeout) —
+    the caller then falls back to the DNS-present recognizable-entity rule.
+    """
+    if url in _WEB_TITLE_CACHE:
+        return _WEB_TITLE_CACHE[url]
+    title = None
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            ),
+            "Accept": "text/html",
+        })
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            html = resp.read(150000).decode("utf-8", "ignore")
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        if m:
+            title = re.sub(r"\s+", " ", m.group(1)).strip()[:200]
+    except Exception:
+        title = None
+    _WEB_TITLE_CACHE[url] = title
+    return title
+
+
+def _phrase_in_title(words, title: str) -> bool:
+    """True when the title contains the natural phrase words as WHOLE tokens
+    in order. Token matching (not substring matching) so a parked domain echo
+    like "davinciresolve.com" can never satisfy "da vinci resolve" — the
+    title tokens are [davinciresolve, com], and "da"/"vinci" are not tokens.
+    """
+    tokens = re.sub(r"[^a-z0-9 ]+", " ", (title or "").lower()).split()
+    idx = 0
+    for w in words:
+        found = False
+        for i in range(idx, len(tokens)):
+            if tokens[i] == w:
+                idx = i + 1
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+_BRAND_SEARCH_INDICATORS = frozenset({
+    "best", "top", "latest", "near", "under", "cheap",
+    "who", "what", "where", "when", "why", "how",
+    "in", "on", "at", "for", "with", "by", "to", "of",
+    "some", "thing", "something", "anything", "about", "vs",
+})
+
+
+def _verified_brand_domain(name: str) -> Optional[str]:
+    """Resolve a recognizable multi-word web entity to its canonical web
+    presence (e.g. "stack overflow" -> https://stackoverflow.com) with
+    verification. Returns a URL or None (truthful failure).
+
+    Guards (deterministic): 2-3 ASCII alphanumeric words, no search-shaped
+    words, collapsed label is a safe single label, not reserved, not a
+    registry alias, not an internal host. Verification (bounded, cached):
+    DNS presence + homepage title check that rejects parked/for-sale pages
+    and accepts real sites (including Cloudflare-walled ones).
+    """
+    normalized = " ".join((name or "").lower().strip().split())
+    if not normalized or " " not in normalized:
+        return None
+    parts = normalized.split()
+    if not (2 <= len(parts) <= 3):
+        return None
+    if set(parts) & _BRAND_SEARCH_INDICATORS:
+        return None
+    if not all(p.isascii() and p.isalnum() for p in parts):
+        return None
+    collapsed = normalized.replace(" ", "")
+    if not _can_synthesize_single_label_domain(collapsed):
+        return None
+    # Deterministic in unit tests: no live DNS/HTTP (slow + flaky). Real
+    # synthesis is exercised in live validation and via the dedicated tests
+    # below that mock the network probes.
+    if os.environ.get("KIO_TEST_MODE") == "1":
+        return None
+    host = f"{collapsed}.com"
+    if not _brand_domain_resolves(host):
+        return None
+    url = f"https://{host}"
+    title = _brand_page_title(url)
+    if title is None:
+        # Unreadable but DNS-present: a live recognizable web entity behind an
+        # anti-bot wall (e.g. stackoverflow.com). Parked pages serve readable
+        # pages precisely so the domain can be sold, so this is a safe signal.
+        return url
+    low = title.lower()
+    if any(m in low for m in _PARKED_TITLE_MARKERS):
+        return None
+    if _phrase_in_title(parts, title):
+        return url
+    # Domain echo (title is basically the domain: "davinciresolve.com").
+    echo = re.sub(r"[^a-z0-9]+", "", low)
+    if echo == collapsed or (echo.startswith(collapsed) and len(echo) <= len(collapsed) + 4):
+        return None
+    return None
 
 # Dynamic resolvers map
 _DYNAMIC_RESOLVERS = {
@@ -737,16 +996,16 @@ def _web_url_for_open(name: str, *, allow_single_word_synthesis: bool = False) -
 
 
 def _web_fallback_url(name: str, *, allow_synthesis: bool = True) -> Optional[str]:
-    """Resolve the legitimate web version for a DISCLOSED fallback.
+    """Resolve the legitimate web version for a not-found / failed-launch fallback.
 
     Two distinct call sites:
 
     NOT-FOUND fallback (allow_synthesis=True, default): the native application
     was proved absent by OS discovery. Single-word .com synthesis is permitted
-    because the canonical <name>.com presence IS the standard web presence of
-    that product — and the user is ALWAYS told the native app was not found
-    and a web version was opened instead, so it is never a silent/fabricated
-    substitution (FUNDAMENTAL INVARIANT).
+    (canonical <name>.com IS the standard web presence of that product), and
+    multi-word recognizable web entities ("stack overflow" ->
+    stackoverflow.com) are resolved through VERIFIED brand-domain synthesis —
+    never a fabricated URL.
 
     LAUNCH-FAILED fallback (allow_synthesis=False): the native application
     EXISTS but could not be launched. Here a synthesized <name>.com is a
@@ -755,9 +1014,9 @@ def _web_fallback_url(name: str, *, allow_synthesis: bool = True) -> Optional[st
     qualify. The caller reports the truthful "found but couldn't launch"
     when no known web version exists.
 
-    Shared guards: multi-word names are never collapsed into domains
-    ("da vinci resolve" stays a truthful failure); reserved labels (explorer,
-    cmd, powershell, terminal, appdata, ...) and internal hosts stay blocked.
+    Shared guards: reserved labels (explorer, cmd, powershell, terminal,
+    appdata, ...) and internal hosts stay blocked; verification rejects
+    parked/for-sale/domain-echo pages.
     """
     normalized = " ".join((name or "").lower().strip().split())
     if not normalized:
@@ -773,27 +1032,40 @@ def _web_fallback_url(name: str, *, allow_synthesis: bool = True) -> Optional[st
         if len(parts) >= 2 and parts[-1] in _ALLOWED_WEB_TLDS:
             return f"https://{normalized}"
         return None
-    if _contains_forbidden_web_chars(normalized) or _is_internal_or_local_web_target(normalized):
+    # Injection/unsafe-char guard: spaces are a legitimate multi-word input for
+    # the verified synthesis path below, so only truly dangerous characters
+    # short-circuit here.
+    if _contains_dangerous_web_chars(normalized) or _is_internal_or_local_web_target(normalized):
         return None
-    if allow_synthesis and normalized.isascii() and normalized not in _RESERVED_SYNTHETIC_WEB_LABELS:
-        if _SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized):
-            return f"https://{normalized}.com"
+    if allow_synthesis:
+        if normalized.isascii() and normalized not in _RESERVED_SYNTHETIC_WEB_LABELS:
+            if _SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized):
+                return f"https://{normalized}.com"
+        # Verified multi-word web entity ("stack overflow" -> stackoverflow.com)
+        # only after the native app was proved absent; parked pages rejected.
+        verified = _verified_brand_domain(normalized)
+        if verified is not None:
+            return verified
     return None
 
 
 def _web_fallback_result(
     key: str, name: str, start_time: float, *, reason: str = "not_found"
 ) -> Optional[Dict]:
-    """Open the legitimate web version of an unavailable native application
-    WITH explicit disclosure (FUNDAMENTAL INVARIANT: never hide a modality
-    fallback).
+    """Open the legitimate web version of an unavailable native application.
+
+    UX RULE (2026-08-10 directive): a SUCCESSFUL open gets a short natural
+    confirmation ("Opened Stack Overflow.") — the user asked for the target
+    and got it; internal native-vs-web modality stays structured metadata so
+    a later "close it" still resolves to the correct web target. Fallback
+    reasoning is exposed only when it explains a FAILURE (launch_failed).
 
     reason="not_found":    the native app is not installed / not discoverable.
     reason="launch_failed": the native app exists but could not be launched.
 
-    Returns a normalized public launch result (success) whose message states
-    exactly what happened, or None when no legitimate web target exists (the
-    caller then reports the truthful native-only failure).
+    Returns a normalized public launch result (success) with modality
+    "web_fallback", or None when no legitimate web target exists (the caller
+    then reports the truthful native-only failure).
 
     allow_synthesis is disabled for launch_failed so a native app that EXISTS
     but failed to launch only falls back to a KNOWN web version — never a
@@ -806,16 +1078,18 @@ def _web_fallback_result(
     if not result.get("success"):
         return None
     result["modality"] = "web_fallback"
+    try:
+        from mini_kio.core.target_ref import display_target_name
+        display = display_target_name(key)
+    except Exception:
+        display = name.strip() or key
     if reason == "launch_failed":
         result["message"] = (
             f"I couldn't launch the installed {name} app, "
             f"so I opened its web version in your browser."
         )
     else:
-        result["message"] = (
-            f"I couldn't find {name} installed on your computer, "
-            f"so I opened its web version in your browser."
-        )
+        result["message"] = f"Opened {display}."
     return _normalize_public_result("launch", key, result, start_time)
 
 
@@ -879,15 +1153,18 @@ def launch_app(name: str) -> dict:
     normalized_url = _web_url_for_open(key, allow_single_word_synthesis=False)
     if normalized_url is not None:
         result = _open_url(normalized_url, key)
-        # Dual-modality disclosure only when the web open actually succeeded.
-        # A failed _open_url must keep its truthful failure message — never
-        # "so I opened its web version" attached to success=False.
+        # Dual-modality: registered native identity also exists (e.g. telegram)
+        # but is unavailable, so this web open is a modality fallback. The
+        # short "Opened X." confirmation stays (UX rule) while modality is
+        # recorded so "close it" resolves to the correct web target. A failed
+        # _open_url keeps its truthful failure message.
         if _find_in_registry(key) is not None and result.get("success"):
             result["modality"] = "web_fallback"
-            result["message"] = (
-                f"I couldn't find {name} installed on your computer, "
-                f"so I opened its web version in your browser."
-            )
+            try:
+                from mini_kio.core.target_ref import display_target_name
+                result["message"] = f"Opened {display_target_name(key)}."
+            except Exception:
+                result["message"] = f"Opened {name.strip()}."
         return _normalize_public_result("launch", key, result, start_time)
 
     # 3. Generic installed-application discovery (arbitrary apps, no registry).
@@ -1336,6 +1613,13 @@ def _open_url(url: str, label: str) -> dict:
 
 def _contains_forbidden_web_chars(value: str) -> bool:
     return any(c in value for c in [' ', '&', '|', ';', '$', '(', ')', '`', '\\', '\0', '\n', '\r', '\t'])
+
+
+def _contains_dangerous_web_chars(value: str) -> bool:
+    """True for shell/URL-injection characters but NOT spaces — spaces are a
+    legitimate multi-word input for verified brand-domain synthesis
+    ("stack overflow" -> stackoverflow.com)."""
+    return any(c in value for c in ['&', '|', ';', '$', '(', ')', '`', '\\', '\0', '\n', '\r', '\t'])
 
 
 def _is_registry_alias(key: str) -> bool:

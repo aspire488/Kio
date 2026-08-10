@@ -46,6 +46,19 @@ _SKIP_WRAPPER_EXES = frozenset({
     "conhost.exe", "shellexperiencehost.exe", "textinputhost.exe",
 })
 
+# Additional system/shell binaries that may own VISIBLE windows but never
+# represent a user application — used to filter EMPTY-TITLE windows only
+# (an elevated real app like Resolve has an unreadable title, so it must be
+# kept and identified by executable; these shell binaries are OS chrome).
+_SYSTEM_SHELL_EXES = frozenset({
+    "explorer.exe", "dwm.exe", "taskhostw.exe", "taskhostex.exe",
+    "SearchHost.exe", "ShellExperienceHost.exe", "StartMenuExperienceHost.exe",
+    "RuntimeBroker.exe", "backgroundTaskHost.exe", "sihost.exe",
+    "SecurityHealthSystray.exe", "ctfmon.exe", "cmd.exe", "powershell.exe",
+    "pwsh.exe", "WindowsTerminal.exe", "wt.exe",
+    "LockApp.exe", "SystemSettings.exe",
+})
+
 # UWP broker: owns the visible window on behalf of the packaged app, so the
 # window title carries the real app identity. Compared against the stripped
 # process base (no .exe), like _BROWSER_PROC_NAMES.
@@ -206,6 +219,12 @@ def observe_native_windows() -> tuple[list[dict], bool]:
             continue
         base = exe[:-4] if exe.endswith(".exe") else exe
         raw_title = _clean_title(w.get("title", "") or "")
+        # Empty-title windows: an elevated real application (title unreadable
+        # cross-integrity, e.g. DaVinci Resolve) is kept and identified by its
+        # executable; system-shell windows with unreadable titles are skipped.
+        if not raw_title:
+            if not exe or exe.lower() in _SYSTEM_SHELL_EXES or exe in _SKIP_WRAPPER_EXES:
+                continue
         if base in _BROWSER_PROC_NAMES:
             # Browser window titles carry the active tab title + brand suffix.
             raw_title = _clean_title(_strip_browser_title_suffix(raw_title))
@@ -228,6 +247,8 @@ def observe_native_windows() -> tuple[list[dict], bool]:
         })
     # UWP broker windows may duplicate the packaged app's own window; collapse
     # identical app+title entries so the broker never doubles the listing.
+    # NOTE: an empty-title real app (elevated, e.g. Resolve) has key
+    # ("Resolve", "") and is NOT collapsed away — it genuinely appears once.
     seen: set[tuple[str, str]] = set()
     deduped: list[dict] = []
     for w in out:
@@ -407,7 +428,7 @@ def compose_desktop_state(
 
     # --- Truthful short forms ---
     if tabs_ok and items:
-        message = "Open right now:\n" + "\n".join("• " + n for n in items)
+        message = "Right now you've got:\n" + "\n".join("• " + n for n in items)
     elif tabs_ok and not items:
         if browser_visible:
             message = f"{browser_host or 'Chrome'} is open."
@@ -417,7 +438,7 @@ def compose_desktop_state(
             message = "I can't read your current desktop state right now."
     elif items:
         # Tabs unreadable but native state visible — report what we know.
-        message = "Open right now:\n" + "\n".join("• " + n for n in items)
+        message = "Right now you've got:\n" + "\n".join("• " + n for n in items)
     elif browser_visible:
         message = f"{browser_host or 'Chrome'} is open, but I couldn't read its tabs."
     elif conn_configured:

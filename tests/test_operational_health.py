@@ -39,7 +39,8 @@ def _op(text: str):
 
 def test_kio_health_variants():
     assert _op("health")[0] == "health"
-    assert _op("/health")[0] == "health"
+    # Explicit slash command requests the full per-component report.
+    assert _op("/health")[0] == "health_detail"
     assert _op("KIO health")[0] == "health"
     assert _op("kio, health")[0] == "health"
     assert _op("kio's health")[0] == "health"
@@ -196,18 +197,21 @@ def test_kio_health_healthy(monkeypatch):
     _patch_snap(monkeypatch)
     _patch_comps(monkeypatch)
     msg = ops.format_kio_health()
-    assert msg == (
-        "KIO is healthy.\nUptime: 3h 36m\nBrowser: connected\n"
-        "Telegram: connected\nMedia: ready\nServices: healthy\nTools: connected"
-    )
+    # 2026-08-10 response policy: natural short prose by default.
+    assert msg == "KIO's healthy and running normally."
+    # The explicit /health command still gets the full per-component detail.
+    detail = ops.format_health_detail()
+    assert detail.startswith("KIO is healthy.")
+    assert "Browser: connected" in detail
+    assert "Uptime: 3h 36m" in detail
 
 
 def test_kio_health_degraded(monkeypatch):
     _patch_snap(monkeypatch, integrity_status="degraded", health_score=40)
     _patch_comps(monkeypatch, browser="disconnected")
     msg = ops.format_kio_health()
-    assert msg.startswith("KIO is running, but degraded.")
-    assert "Browser: unavailable" in msg
+    assert msg.startswith("KIO's running, but some things need attention.")
+    assert "The browser connection is down." in msg
 
 
 def test_kio_health_not_running(monkeypatch):
@@ -335,7 +339,7 @@ def test_pipeline_end_to_end(monkeypatch):
     result = p.run("KIO health", session_id="ops_test")
     assert result.get("success") is True
     msg = result.get("message", "")
-    assert "KIO is healthy." in msg
+    assert "KIO's healthy and running normally." in msg
     _assert_clean(msg)
     # Slash-command form routes identically.
     result = p.run("/status", session_id="ops_test")

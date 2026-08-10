@@ -131,7 +131,7 @@ def test_identity_and_detail_combined():
         _tab("https://www.youtube.com/watch?v=abc", "(17) Dangal | Official Trailer"),
     ]
     msg = _compose(tabs)["message"]
-    assert "Open right now:" in msg
+    assert "Right now you've got:" in msg
     assert "• Chrome — ChatGPT — KIO Commit Review Prompt" in msg
     assert "• Chrome — Telegram — KIO Assistant" in msg
     assert "• Chrome — YouTube — (17) Dangal | Official Trailer" in msg
@@ -205,7 +205,7 @@ def test_native_and_browser_composed_together():
 def test_native_only_desktop():
     native = [_win(app="OpenCode", base="opencode", title="kio_final")]
     msg = _compose([], native=native)["message"]
-    assert "Open right now:" in msg
+    assert "Right now you've got:" in msg
     assert "• OpenCode — kio_final" in msg
 
 
@@ -345,7 +345,7 @@ def test_browser_line_survives_composer_strip_leaks():
         _tab("https://web.telegram.org/a", "Telegram"),
     ])["message"]
     stripped = _ResponseComposer()._strip_leaks(msg)
-    assert stripped == "Open right now:\n• Chrome — ChatGPT\n• Chrome — Telegram"
+    assert stripped == "Right now you've got:\n• Chrome — ChatGPT\n• Chrome — Telegram"
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def test_browser_line_survives_composer_strip_leaks():
     "show tabs", "what do i have open", "what do i currently have open",
     "what are you using", "what are you currently controlling",
     "what is kio controlling", "what's open in chrome",
-    "what's open on my computer", "what is on my computer",
+    "what's open on my computer",
     "tell me what's open", "list tabs", "list open apps",
     "what windows are open",
     "what am i controlling", "show me my desktop", "show my desktop",

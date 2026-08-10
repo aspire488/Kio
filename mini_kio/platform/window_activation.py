@@ -118,8 +118,6 @@ def list_visible_windows() -> list[dict]:
     def callback(hwnd: int, _param) -> bool:
         if not _IsWindowVisible(hwnd):
             return True
-        if _GetWindowTextLengthW(hwnd) <= 0:
-            return True
         try:
             style = _GetWindowLongW(hwnd, _GWL_EXSTYLE)
         except Exception:
@@ -130,12 +128,19 @@ def list_visible_windows() -> list[dict]:
         _GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == self_pid:
             return True
+        # Elevated applications (e.g. DaVinci Resolve running as admin) cannot
+        # have their window titles read cross-integrity: GetWindowTextLengthW
+        # returns 0 even though the window is a real visible application.
+        # Dropping them here is exactly why "Resolve was open but not listed".
+        # Return the window with an empty title and let the desktop-state layer
+        # decide by resolving the owning executable (system shells are skipped
+        # there; real apps are kept and shown by application name).
         length = _GetWindowTextLengthW(hwnd)
-        buff = ctypes.create_unicode_buffer(length + 1)
-        _GetWindowTextW(hwnd, buff, length + 1)
-        title = (buff.value or "").strip()
-        if not title:
-            return True
+        title = ""
+        if length > 0:
+            buff = ctypes.create_unicode_buffer(length + 1)
+            _GetWindowTextW(hwnd, buff, length + 1)
+            title = (buff.value or "").strip()
         results.append({
             "pid": int(pid.value),
             "title": title,
