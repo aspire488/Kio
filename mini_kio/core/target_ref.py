@@ -169,6 +169,7 @@ _BRAND_NAMES = {
     "notepad": "Notepad",
     "calculator": "Calculator",
     "chrome": "Chrome",
+    "vlc": "VLC",
     "edge": "Edge",
     "firefox": "Firefox",
     "brave": "Brave",

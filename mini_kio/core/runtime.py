@@ -436,6 +436,20 @@ def setup_startup_logging() -> None:
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
 
+    # Windows console safety: the default stream encoding is cp1252, so a log
+    # line containing non-BMP characters (emoji in knowledge replies, etc.)
+    # would raise UnicodeEncodeError and take down console-attached runs.
+    # Reconfigure stdout/stderr to UTF-8 with errors="replace" — semantic
+    # content is preserved in the UTF-8 file handler; only undecodable console
+    # output degrades to a replacement char instead of crashing the bot.
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(
         logging.Formatter("[%(asctime)s] %(name)s: %(message)s")

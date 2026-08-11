@@ -233,7 +233,11 @@ def _system_metrics() -> dict[str, Any]:
             # Estimated remaining time when Windows actually reports it
             # (POWER_TIME_UNLIMITED / UNKNOWN are -1 / -2 — never claim them).
             secs = getattr(batt, "secsleft", None)
-            if isinstance(secs, int) and secs > 0:
+            # POWER_TIME_UNKNOWN (-1 -> 0xFFFFFFFF) and POWER_TIME_UNLIMITED
+            # (-2 -> 0xFFFFFFFE) are NOT reliable remaining-time estimates —
+            # claiming them fabricates a battery life figure. Only bounded
+            # positive values are ever reported.
+            if isinstance(secs, int) and 0 < secs < 0xFFFFFFFE:
                 out["battery_secsleft"] = int(secs)
     except Exception:
         pass
@@ -766,7 +770,7 @@ def _fmt_battery_line(m: dict[str, Any]) -> str:
         return f"Battery: {batt}% and charging"
     line = f"Battery: {batt}% (on battery)"
     secs = m.get("battery_secsleft")
-    if isinstance(secs, int) and secs > 0:
+    if isinstance(secs, int) and 0 < secs < 0xFFFFFFFE:
         mins = max(1, int(secs // 60))
         if mins < 60:
             line += f", about {mins} min left"
@@ -847,11 +851,80 @@ def format_metric(name: str) -> str:
             return f"Battery is at {m['battery_percent']}% and charging."
         line = f"Battery is at {m['battery_percent']}% and the system is running on battery."
         secs = m.get("battery_secsleft")
-        if isinstance(secs, int) and secs > 0:
+        if isinstance(secs, int) and 0 < secs < 0xFFFFFFFE:
             mins = max(1, int(secs // 60))
             line += f" About {mins} minutes left."
         return line
     return "I can't read that right now."
+
+
+def format_battery_charging() -> str:
+    """'is it charging' / 'am I charging' — truthful AC/charging state."""
+    m = _system_metrics()
+    batt = m.get("battery_percent")
+    charging = m.get("battery_charging")
+    if batt is None:
+        return "Battery status isn't available on this system."
+    if charging:
+        return f"Yes — the battery's at {batt}% and charging."
+    return f"No — you're on battery at {batt}%."
+
+
+def format_battery_low() -> str:
+    """'am I low on battery' — honest answer from the real level."""
+    m = _system_metrics()
+    batt = m.get("battery_percent")
+    charging = m.get("battery_charging")
+    if batt is None:
+        return "Battery status isn't available on this system."
+    if charging:
+        return f"No — it's at {batt}% and charging."
+    if batt <= 20:
+        return f"Yeah, you're at {batt}% — worth plugging in."
+    return f"No, you've got plenty left — {batt}%."
+
+
+def _format_app_running(target: str) -> str:
+    """'is X open' / 'is X running' — deterministic answer from the real
+    desktop (visible native windows + process presence). Never an LLM guess;
+    installed-vs-running stays distinct (a running answer requires an actual
+    observed window/process, not installation metadata).
+    """
+    from mini_kio.core.desktop_state import observe_native_windows
+    from mini_kio.core.target_ref import display_target_name
+    app = (target or "").strip()
+    if not app:
+        return "What app would you like me to check?"
+    display = display_target_name(app)
+    app_lower = app.lower().strip()
+    browser_hosts = {"chrome", "msedge", "edge", "firefox", "brave", "comet", "opera"}
+    try:
+        windows, ok = observe_native_windows()
+        if ok:
+            if app_lower in browser_hosts or app_lower == "browser":
+                targets = {"chrome", "msedge", "firefox", "brave", "comet", "opera"} if app_lower == "browser" else {app_lower}
+                for w in windows:
+                    if str(w.get("base") or "").lower() in targets:
+                        return f"Yes, {display} is open."
+                return f"No, {display} isn't open right now."
+            for w in windows:
+                if w.get("is_browser_host") or not w.get("pid"):
+                    continue
+                base = str(w.get("base") or "").lower()
+                wapp = str(w.get("app") or "").lower()
+                if (base and len(app_lower) >= 3 and app_lower in base) or (wapp and len(app_lower) >= 3 and app_lower in wapp):
+                    return f"Yes, {display} is open."
+    except Exception:
+        pass
+    # Process-level fallback for apps running without a visible window.
+    try:
+        from mini_kio.core.app_operator import _find_in_registry, _find_matching_process_pid
+        info = _find_in_registry(app_lower)
+        if info and _find_matching_process_pid(app_lower, info):
+            return f"Yes, {display} is open."
+    except Exception:
+        pass
+    return f"No, {display} isn't open right now."
 
 
 _COMPONENT_FOCUS_MAP: dict[str, str] = {
@@ -1065,6 +1138,9 @@ def operational_result(action: str, target: str = "") -> dict[str, Any]:
         "gpu": lambda: format_metric("gpu"),
         "storage": lambda: format_metric("storage"),
         "battery": lambda: format_metric("battery"),
+        "battery_charging": format_battery_charging,
+        "battery_low": format_battery_low,
+        "app_running": lambda: _format_app_running(target),
         "components": lambda: format_components(target),
         "whats_wrong": format_whats_wrong,
         "resources": format_resources_all,

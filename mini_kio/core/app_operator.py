@@ -1142,14 +1142,32 @@ def launch_app(name: str) -> dict:
         result["canonical_name"] = canonical
         return _normalize_public_result("launch", canonical, result, start_time)
 
-    # 2. Explicit web target (KNOWN web apps / URL / dotted domain only).
-    #    Canonical web apps resolve BEFORE generic discovery so a containment
-    #    match against an installed app can never hijack a web-app open.
-    #
-    #    Dual-modality names (a registered native identity ALSO exists, e.g.
-    #    "telegram"): step 1 proved the native app is unavailable, so this web
-    #    open is a FALLBACK and must be disclosed — never presented as opening
-    #    the application.
+    # 2. GENERIC installed-application discovery (arbitrary apps, no registry).
+    #    NATIVE-FIRST: an installed desktop app wins over its website for a
+    #    default open ("open github" -> GitHub Desktop when installed). Web
+    #    remains the fallback, never the default. Runs before web-target
+    #    resolution so an installed single-word app (e.g. "winrar") is never
+    #    hijacked to its .com website.
+    discovered = _find_installed_app(key)
+    if discovered:
+        result = _launch_discovered(discovered, key)
+        if result.get("success"):
+            result["canonical_name"] = key
+            return _normalize_public_result("launch", key, result, start_time)
+        # E. Discovered app found but launch failed — disclosed web fallback;
+        #    otherwise report truthfully (found but couldn't launch).
+        fallback = _web_fallback_result(key, name, start_time, reason="launch_failed")
+        if fallback is not None:
+            return fallback
+        result = {"success": False, "message": f"I found {name} installed, but I couldn't launch it."}
+        result["canonical_name"] = key
+        return _normalize_public_result("launch", key, result, start_time)
+
+    # 3. Explicit web target (KNOWN web apps / URL / dotted domain only) — the
+    #    FALLBACK after both registry and generic native discovery proved no
+    #    installed app exists. Dual-modality names (a registered native
+    #    identity ALSO exists, e.g. "telegram"): this web open is a FALLBACK
+    #    and must be disclosed — never presented as opening the application.
     normalized_url = _web_url_for_open(key, allow_single_word_synthesis=False)
     if normalized_url is not None:
         result = _open_url(normalized_url, key)
@@ -1165,24 +1183,6 @@ def launch_app(name: str) -> dict:
                 result["message"] = f"Opened {display_target_name(key)}."
             except Exception:
                 result["message"] = f"Opened {name.strip()}."
-        return _normalize_public_result("launch", key, result, start_time)
-
-    # 3. Generic installed-application discovery (arbitrary apps, no registry).
-    #    Runs BEFORE single-word .com synthesis so an installed single-word app
-    #    (e.g. "winrar") is never hijacked to its website.
-    discovered = _find_installed_app(key)
-    if discovered:
-        result = _launch_discovered(discovered, key)
-        if result.get("success"):
-            result["canonical_name"] = key
-            return _normalize_public_result("launch", key, result, start_time)
-        # E. Discovered app found but launch failed — disclosed web fallback;
-        #    otherwise report truthfully (found but couldn't launch).
-        fallback = _web_fallback_result(key, name, start_time, reason="launch_failed")
-        if fallback is not None:
-            return fallback
-        result = {"success": False, "message": f"I found {name} installed, but I couldn't launch it."}
-        result["canonical_name"] = key
         return _normalize_public_result("launch", key, result, start_time)
 
     # 4. Native application unavailable → DISCLOSED web fallback (FUNDAMENTAL
@@ -1295,6 +1295,45 @@ def _close_web_target(name: str, key: str, start_time: float) -> dict:
          "failure_class": "not_running"},
         start_time,
     )
+
+
+def _find_existing_web_target(conn, url: str, friendly_name: str):
+    """Return a truthy marker when an existing usable web target satisfies the
+    same entity+modality request (duplicate prevention).
+
+    Checks (1) the capability registry for an ACTIVE session with the same
+    canonical target, then (2) live connector tabs whose URL or title matches.
+    Returns None when no existing target is found — the caller then opens a new
+    one. Identity is canonical (same entity + same web modality), never a raw
+    string match against "chrome".
+    """
+    try:
+        from mini_kio.core.capability_registry import get_capability_registry
+        entry = get_capability_registry().resolve_by_target(friendly_name)
+        if entry is not None and getattr(entry, "active", True):
+            return entry
+    except Exception:
+        pass
+    if conn is None:
+        return None
+    try:
+        from mini_kio.core.async_utils import safe_run_async
+        tabs_result = safe_run_async(conn.list_tabs())
+        if not getattr(tabs_result, "success", False):
+            return None
+        tabs = getattr(tabs_result, "tabs", None) or []
+        url_norm = (url or "").rstrip("/").lower()
+        fname = (friendly_name or "").lower()
+        for t in tabs:
+            t_url = ((getattr(t, "url", "") or "") or "").rstrip("/").lower()
+            t_title = (getattr(t, "title", "") or "").lower()
+            if url_norm and (url_norm in t_url or t_url in url_norm):
+                return t
+            if fname and len(fname) >= 3 and (fname in t_title or fname in t_url):
+                return t
+    except Exception:
+        pass
+    return None
 
 
 def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
@@ -1665,6 +1704,66 @@ def _can_synthesize_single_label_domain(label: str) -> bool:
     if _is_registry_alias(normalized) or _is_internal_or_local_web_target(normalized):
         return False
     return bool(_SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized))
+
+
+def _explicit_web_url_for_open(name: str) -> Optional[str]:
+    """Resolve the web target for an EXPLICIT web-intent open request.
+
+    "open X in Chrome" / "open X on the web" / "open X website" explicitly
+    ask for the web version of X. Unlike default opens (native-first), the
+    registry-alias guard must NOT block single-word <name>.com synthesis
+    here: the user explicitly requested the website even when a native app
+    exists. Known web aliases, explicit URLs, dotted domains and reserved/
+    internal-host guards still apply.
+    """
+    normalized = " ".join((name or "").lower().strip().split())
+    if not normalized:
+        return None
+    if normalized in WEB_URLS:
+        return WEB_URLS[normalized]
+    if normalized in WEB_DOMAIN_ALIASES:
+        return WEB_DOMAIN_ALIASES[normalized]
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    if _SAFE_EXPLICIT_DOMAIN_RE.fullmatch(normalized):
+        parts = normalized.split(".")
+        if len(parts) >= 2 and parts[-1] in _ALLOWED_WEB_TLDS:
+            return f"https://{normalized}"
+        return None
+    # Multi-word domain inference ("stack overflow" -> stackoverflow.com)
+    # only for 2-3 word site-like names, never search queries. Must run
+    # BEFORE the forbidden-char check (which rejects spaces).
+    if " " in normalized:
+        parts = normalized.split()
+        if 2 <= len(parts) <= 3:
+            _SEARCH_INDICATORS = {
+                "best", "top", "latest", "near", "under", "cheap",
+                "who", "what", "where", "when", "why", "how",
+                "in", "on", "at", "for", "with", "by", "to", "of",
+                "some", "thing", "something", "anything",
+            }
+            if not (set(parts) & _SEARCH_INDICATORS):
+                collapsed = normalized.replace(" ", "")
+                if _SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(collapsed) \
+                   and collapsed not in _RESERVED_SYNTHETIC_WEB_LABELS:
+                    return f"https://{collapsed}.com"
+        return None
+    if _contains_forbidden_web_chars(normalized) or _is_internal_or_local_web_target(normalized):
+        return None
+    if (
+        "://" in normalized
+        or ".." in normalized
+        or "//" in normalized
+        or normalized.startswith((".", "/"))
+    ):
+        return None
+    # Explicit web intent: single-word <name>.com synthesis is permitted even
+    # for registry aliases (installed native apps) — the user asked for the
+    # website. Reserved labels and internal hosts remain blocked above.
+    if _SAFE_SYNTHETIC_DOMAIN_LABEL_RE.fullmatch(normalized) \
+       and normalized not in _RESERVED_SYNTHETIC_WEB_LABELS:
+        return f"https://{normalized}.com"
+    return None
 
 
 def _normalize_web_target_to_url(target: str) -> Optional[str]:
@@ -2698,12 +2797,41 @@ def execute_capability(target: str) -> dict:
             else:
                 url = args if args.startswith("http") else "https://" + args
 
+            # Explicit additional-tab marker: the coordinator appends "::new"
+            # to the friendly name when the user asked for another/new tab —
+            # that request must skip duplicate prevention and really open.
+            force_new = False
+            if isinstance(friendly_name, str) and friendly_name.endswith("::new"):
+                force_new = True
+                friendly_name = friendly_name[:-5]
+
             # Prefer Browser Connector in production for user browser commands.
+            from mini_kio.core.async_utils import safe_run_async
             from mini_kio.core.command_router import _get_connector
             conn = _get_connector()
             if conn and conn.is_connected():
+                # Duplicate prevention (canonical): a default "open X" must not
+                # create another equivalent web target when one already exists
+                # (active capability session or live tab with the same URL /
+                # identity) — focus the existing one instead. Explicit
+                # "another/new tab" requests skip this.
+                existing = None if force_new else _find_existing_web_target(conn, url, friendly_name)
+                if existing:
+                    focused = False
+                    try:
+                        focus_res = safe_run_async(conn.focus_tab(friendly_name or url))
+                        focused = bool(getattr(focus_res, "success", False))
+                    except Exception:
+                        pass
+                    from mini_kio.core.target_ref import display_target_name
+                    display = display_target_name(friendly_name)
+                    msg = f"{display} is already open — I focused it." if focused else f"{display} is already open."
+                    return _normalize_public_result(
+                        "execute_capability", f"{app_name}::{friendly_name}",
+                        {"success": True, "message": msg,
+                         "capability_name": display, "browser": app_name},
+                        start_time)
                 try:
-                    from mini_kio.core.async_utils import safe_run_async
                     result = safe_run_async(conn.open_tab(url))
                     if result.success:
                         from mini_kio.core.routing_utils import register_browser_capability

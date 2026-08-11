@@ -378,7 +378,10 @@ class MediaManager:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            return loop.run_until_complete(ask_llm(prompt, timeout=10.0, max_tokens=200))
+                            # Bounded but generous enough to complete a 2-4
+                            # sentence answer; the composer rejects truncated
+                            # output and falls back to deterministic extract.
+                            return loop.run_until_complete(ask_llm(prompt, timeout=15.0, max_tokens=300))
                         finally:
                             loop.close()
                             asyncio.set_event_loop(None)

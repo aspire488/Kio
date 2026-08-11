@@ -208,22 +208,28 @@ def get_browser_routing(target: str, browser_name: Optional[str] = None) -> Dict
     """
     Canonical target-kind resolution for open/launch requests.
 
-    Decision order (Part II):
+    Decision order (Part II — NATIVE-FIRST):
       1. REGISTERED native application — explicit APP_REGISTRY entry that
          resolves (path / URI / system / UWP). Exact-identity only.
-      2. Explicit web target — known web app / explicit URL / dotted domain
-         only. NO single-word .com synthesis here: an installed single-word
-         app ("winrar") must never be hijacked to its website, and the
-         classifier must never turn an app-like name into a made-up domain.
-      3. Generic installed-app discovery — arbitrary installed applications
-         without a registry entry (Start Menu / App Paths / PATH).
+      2. GENERIC installed-app discovery — arbitrary installed applications
+         without a registry entry (Start Menu / App Paths / PATH /
+         WindowsApps). An installed desktop app wins over its website for a
+         default "open X" (GitHub Desktop over github.com, WhatsApp over
+         web.whatsapp.com). Generic containment matches are safe: the request
+         name is a substring of a real installed app's name, never a
+         synthesized domain.
+      3. Explicit web target — known web app / explicit URL / dotted domain
+         only, as the FALLBACK when no native app exists. NO single-word .com
+         synthesis here: the classifier must never turn an app-like name into
+         a made-up domain while an installed app might exist.
       4. not found — truthful "couldn't find X installed" (the execution path
          may still single-word-synthesize as a last resort AFTER its own
          discovery step, keeping classifier and executor consistent).
 
-    Known web apps (youtube, chatgpt, ...) resolve to the browser BEFORE
-    generic discovery so a containment match against an installed app's name
-    can never hijack a web-app open.
+    Web is a fallback, not the default: a default application request prefers
+    an installed/discoverable native application when one exists. Explicit web
+    intent ("open X in Chrome", "on the web") is handled upstream by the
+    classifier before this resolver runs.
     """
     browser = (browser_name or DEFAULT_BROWSER).lower()
     target_lower = target.lower().strip()
@@ -240,10 +246,23 @@ def get_browser_routing(target: str, browser_name: Optional[str] = None) -> Dict
             "target": canonical_target
         }
     
-    # 2. Web only for EXPLICIT web targets: known web app, explicit URL, or
+    # 2. GENERIC installed-app discovery — an installed desktop app wins over
+    #    its website for a default "open X". Runs BEFORE web-target resolution
+    #    so "Open GitHub" opens GitHub Desktop and "Open WhatsApp" opens the
+    #    WhatsApp app when installed, and only falls to the website when no
+    #    native app exists.
+    if _find_installed_app(canonical_target) is not None:
+        logger.info(f"[ROUTING] Generic discovery found for {canonical_target}, native route.")
+        return {
+            "route_type": "native",
+            "action": "open_app",
+            "target": canonical_target
+        }
+
+    # 3. Web only for EXPLICIT web targets: known web app, explicit URL, or
     #    dotted domain. Single-word .com synthesis is deliberately NOT applied
-    #    here (default flag) so generic discovery in step 3 can claim an
-    #    installed single-word app first. Multi-word names ("da vinci resolve",
+    #    here (default flag) — native discovery above already proved no
+    #    installed app exists. Multi-word names ("da vinci resolve",
     #    "microsoft store") are never synthesized into .com domains at all.
     #
     #    DUAL-MODALITY check: when a name has BOTH a registered native identity
@@ -271,15 +290,6 @@ def get_browser_routing(target: str, browser_name: Optional[str] = None) -> Dict
             "target": f"{browser}::open_url::{url}::{canonical_target}",
             "browser": browser,
             "canonical_target": canonical_target
-        }
-    
-    # 3. Generic installed-app discovery (arbitrary apps, no registry entry).
-    if _find_installed_app(canonical_target) is not None:
-        logger.info(f"[ROUTING] Generic discovery found for {canonical_target}, native route.")
-        return {
-            "route_type": "native",
-            "action": "open_app",
-            "target": canonical_target
         }
 
     # 4. Truthful not-found — the pipeline routes this to the native open path

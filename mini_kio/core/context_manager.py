@@ -155,6 +155,11 @@ class SessionContext:
         self.last_success: bool = False
         self.pending_action: Optional[PendingAction] = None
         self.timestamp: float = 0.0
+        # Canonical multi-target context: bounded collection of recent
+        # successful targets (each keeps its own identity) so referent-set
+        # commands ("close both", "close those apps", "the first and second")
+        # resolve to the actual targets, never to a single last-target.
+        self.recent_targets: list[dict] = []
 
         self._exchanges: list[tuple[str, str]] = []
         self._topic_stack: list[str] = []
@@ -556,6 +561,68 @@ class SessionContext:
                 return f"{self.pending_action.action_type} {self.pending_action.query}"
             return text
 
+        # Power-family passthrough: "is it charging" / "how's the battery" are
+        # deterministic battery queries — their referents must never be
+        # rewritten by generic pronoun resolution ("it" has no app antecedent).
+        if re.search(r"\b(battery|charge|charging|power|plugged)\b", lower):
+            return text
+
+        # Multi-referent close family: "close both", "shut these two",
+        # "close those apps", "close the first and second" resolve to the
+        # recent target collection and reuse the multi-step machinery so each
+        # target closes independently (one failure never corrupts the others).
+        _multi_ref = re.match(
+            r"^(?:close|shut|quit|kill|end)\s+"
+            r"(?:both|these\s+two|those\s+two|the\s+two|these|those|all\s+(?:of\s+)?(?:them|those|these))"
+            r"(?:\s+(?:apps?|applications|windows|tabs|ones?))?\s*$",
+            lower,
+        )
+        _ordinal_ref = re.match(
+            r"^(?:close|shut|quit|kill|end)\s+(?:the\s+)?(first|second|third|fourth|fifth)"
+            r"\s+and\s+(?:the\s+)?(first|second|third|fourth|fifth)\s*$",
+            lower,
+        )
+        # recent_targets only ever holds successful executions (update() is the
+        # sole writer and gates on result success), so a name presence check is
+        # the correct filter — failed executions never become context.
+        refs = [r for r in self.recent_targets if r.get("name")]
+        names = [str(r["name"]) for r in refs]
+        if _multi_ref and len(names) >= 2:
+            picks = names[-2:]
+            return f"close {picks[0]} and {picks[1]}"
+        if _ordinal_ref and len(names) >= 2:
+            order = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4}
+            i, j = order[_ordinal_ref.group(1)], order[_ordinal_ref.group(2)]
+            if i < len(names) and j < len(names) and i != j:
+                return f"close {names[i]} and {names[j]}"
+
+        # Referent phrases: "open the app" / "open the website" — a
+        # conversational modality correction must preserve entity identity
+        # while changing modality ("Open X. Actually open the app." -> native
+        # X; "...open the website." -> web X). Only fires when an active
+        # entity exists — "the app" without any antecedent stays untouched.
+        _referent_phrase = re.search(
+            r"\b(?:the\s+)?(?:desktop\s+)?(app|application|program|software|website|web\s+version|webpage|site)\b",
+            lower,
+        )
+        if _referent_phrase and self.active_entity:
+            # NEVER expand when the command already names the entity —
+            # "open the Spotify app" must stay "spotify", not become
+            # "open the Spotify the spotify app". The phrase is only a
+            # bare referent when no entity token is present at all.
+            if re.search(r"\b" + re.escape(self.active_entity.lower()) + r"\b", lower):
+                return text
+            phrase = _referent_phrase.group(1).lower()
+            if phrase in ("website", "web version", "webpage", "site"):
+                return re.sub(
+                    r"\b(?:the\s+)?(?:website|web\s+version|webpage|site)\b",
+                    f"{self.active_entity} on the web", text, flags=re.IGNORECASE, count=1,
+                )
+            return re.sub(
+                r"\b(?:the\s+)?(?:desktop\s+)?(?:app|application|program|software)\b",
+                f"the {self.active_entity} app", text, flags=re.IGNORECASE, count=1,
+            )
+
         # G5: pronoun → active_entity, then session last_target fallback
         if re.search(r"\b(it|that|this)\b", lower):
             if self.active_entity:
@@ -585,7 +652,13 @@ class SessionContext:
             self.active_domain = domain
 
         target = result.get("target") or result.get("subject") or ""
-        if target:
+        clean = None
+        # Failed executions MUST NOT become conversational context — only
+        # successful results may set the referent (a failed "open X" never
+        # makes a later "close it" target X). Exception: a failed PLAY keeps
+        # what the user asked for so a retry follow-up can re-attempt it —
+        # media has its own retry machinery and "play X, continue" must retry.
+        if result.get("success") and target:
             # BC-3: the stored conversational referent must be a user-safe name.
             # Raw serialized capability targets ("chrome::open_url::https://...")
             # and raw URLs must NEVER become the referent that a later
@@ -595,8 +668,8 @@ class SessionContext:
             if clean:
                 self.active_entity = clean
                 self.last_target = clean
-        elif command.lower().startswith("play ") and not target:
-            # Failed play: still remember what user tried to play
+        elif command.lower().startswith("play ") and not result.get("success"):
+            # Failed play: still remember what user tried to play (retry path)
             entity = command[5:].strip()
             if entity and len(entity) > 3:
                 self.active_entity = entity
@@ -608,6 +681,18 @@ class SessionContext:
 
         if result.get("success"):
             self.pending_action = None  # mark executed
+
+        # Multi-target context maintenance: only successful executions become
+        # referents (failed executions must NEVER become context). Consecutive
+        # duplicates merge — a repeated "open X" is the same target, not two.
+        if result.get("success") and clean:
+            entry = {"name": clean, "action": action, "ts": time.time()}
+            if self.recent_targets and self.recent_targets[-1].get("name") == clean:
+                self.recent_targets[-1] = entry
+            else:
+                self.recent_targets.append(entry)
+                if len(self.recent_targets) > 8:
+                    self.recent_targets.pop(0)
 
         logger.info(
             "[CONTEXT_UPDATE] domain=%s entity=%s action=%s success=%s",

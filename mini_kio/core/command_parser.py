@@ -41,15 +41,15 @@ _FOLDER_KEYWORDS = {
 }
 
 _VERBS = {
-    "open", "close", "search", "type", "launch", "folder", 
-    "play", "lock", "shutdown", "restart", "focus", "switch"
+    "open", "close", "shut", "quit", "kill", "end", "search", "type",
+    "launch", "folder", "play", "lock", "shutdown", "restart", "focus", "switch"
 }
 
 _PLATFORM_MARKERS = {"spotify", "youtube", "google", "edge", "chrome", "comet", "firefox", "brave"}
 
-_INHERITABLE_VERBS = {"play", "search", "open", "close", "launch", "focus"}
+_INHERITABLE_VERBS = {"play", "search", "open", "close", "launch", "focus", "shut", "quit", "kill", "end"}
 
-_BROWSER_ACTION_VERBS = {"open", "close", "focus", "launch", "switch"}
+_BROWSER_ACTION_VERBS = {"open", "close", "shut", "quit", "kill", "end", "focus", "launch", "switch"}
 
 _MAX_COMMAND_STEPS = 8
 _ALLOWED_WEB_TLDS = {"com", "ai", "org", "io", "dev", "app"}
@@ -228,6 +228,13 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
 
     action = words[0]
     target = " ".join(words[1:]).strip() if len(words) > 1 else ""
+
+    # ── CLOSE-VERB FAMILY: shut/quit/kill/end → close (canonical action) ────
+    # "shut chrome" -> close chrome; "shut down chrome" -> close chrome.
+    if action in ("shut", "quit", "kill", "end"):
+        if action == "shut" and len(words) >= 2 and words[1].lower() == "down":
+            target = " ".join(words[2:]).strip()
+        action = "close"
 
     # ── OPEN / LAUNCH ──────────────────────────────────────────────────────────
     if action in ("open", "launch"):

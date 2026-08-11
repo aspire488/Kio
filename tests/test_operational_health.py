@@ -101,7 +101,7 @@ def test_metric_variants():
     assert _op("is my gpu being used")[0] == "gpu"
     assert _op("storage")[0] == "storage"
     assert _op("how much storage do i have")[0] == "storage"
-    assert _op("is my battery charging")[0] == "battery"
+    assert _op("is my battery charging")[0] == "battery_charging"
     assert _op("battery status")[0] == "battery"
 
 

@@ -240,7 +240,11 @@ def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]])
         target = _display_step_target(step.get("target", ""))
         verb = _ACTION_VERBS.get(action, action)
         if result.get("blocked"):
-            blocked.append(f"{verb} {target}")
+            # Blocked steps read naturally under "I couldn't ..." so they need
+            # the BASE verb ("close Paint"), never the past-tense form
+            # ("closed Paint").
+            base_verb = action.replace("_tab", "").replace("_app", "").replace("_web", "")
+            blocked.append(f"{base_verb or action} {target}")
         elif result.get("success"):
             succeeded.setdefault(verb, [])
             succeeded[verb].append(target)
@@ -294,22 +298,26 @@ def _run_single_step(action: str, target: str) -> dict:
         if parse_target(target).kind == "browser":
             return execute_action("close_app", target)
         if _check_br_available():
-            return _br_close_tab(target)
+            result = _br_close_tab(target)
+            if result.get("success"):
+                return result
         if config.BROWSER_CONNECTOR_ENABLED:
             conn = _get_connector()
             if conn and conn.is_connected():
                 try:
                     close_result = safe_run_async(conn.close_tab(target))
-                    ok = bool(getattr(close_result, "success", False))
-                    return {
-                        "success": ok,
-                        "message": f"Closed {target.capitalize()} tab." if ok else f"Couldn't close {target}.",
-                        "action": action, "target": target,
-                    }
+                    if bool(getattr(close_result, "success", False)):
+                        return {
+                            "success": True,
+                            "message": f"Closed {target.capitalize()} tab.",
+                            "action": action, "target": target,
+                        }
                 except BaseException as exc:
                     logger.warning("[CONNECTOR] multi-step close_tab failed: %s", exc)
-                    return {"success": False, "message": f"Couldn't close {target}.", "action": action, "target": target}
-        # Web-aware close: never escalates to the host browser process.
+        # Web-aware close (capability registry / connector / truthful failure):
+        # mirrors the single-step path so "close X and Y" closes each target
+        # through the same canonical owner a single close uses. Never escalates
+        # to the host browser process.
         return execute_action("close_app", target)
 
     if action == "focus":
@@ -342,6 +350,10 @@ def _run_single_step(action: str, target: str) -> dict:
         from mini_kio.core.routing_utils import get_browser_routing
         route_info = get_browser_routing(target)
         if route_info["route_type"] == "native":
+            from mini_kio.core.pipeline import _ExecutionCoordinator
+            reused = _ExecutionCoordinator()._reuse_running_app(route_info["target"])
+            if reused:
+                return reused
             return execute_action("open_app", route_info["target"])
         if route_info["route_type"] == "browser_fallback":
             return execute_action("execute_capability", route_info["target"])

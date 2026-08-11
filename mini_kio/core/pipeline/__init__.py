@@ -134,9 +134,31 @@ class _NormalizationService:
         cmd = _normalize_connectors(cmd)
 
         # R1: strip politeness prefix but only when it clearly precedes a
-        # command verb; never strip from standalone social small-talk.
+        # command verb; never strip from standalone social small-talk, and
+        # never when the stripped remainder starts with a subject pronoun
+        # ("can i use the computer" -> lock state, NOT a stripped "i use...").
         stripped = self._POLITE_PREFIX_RE.sub("", cmd, count=1).strip()
         if stripped and cmd.lower() != stripped.lower():
+            _remainder_first = stripped.split()[0].lower() if stripped.split() else ""
+            if _remainder_first not in ("i", "we", "you", "they", "he", "she", "it"):
+                cmd = stripped
+
+        # Conversational-correction prefixes ("actually", "no, open it in
+        # chrome", "wait, open the app") must never block verb detection — the
+        # correction is the command. Bounded token list; requires a following
+        # word (a bare "no"/"yes" is not stripped).
+        _CORRECTION_PREFIX_RE = re.compile(
+            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on)\s*,\s+",
+            re.IGNORECASE,
+        )
+        _CORRECTION_PREFIX_RE2 = re.compile(
+            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on)\s+",
+            re.IGNORECASE,
+        )
+        stripped = _CORRECTION_PREFIX_RE.sub("", cmd, count=1).strip()
+        if not stripped or stripped.lower() == cmd.lower():
+            stripped = _CORRECTION_PREFIX_RE2.sub("", cmd, count=1).strip()
+        if stripped and stripped.lower() != cmd.lower():
             cmd = stripped
 
         cmd = re.sub(r"\bon\s+(chrome|edge|comet|firefox|brave)\b", r" in \1", cmd)
@@ -440,10 +462,14 @@ class _IntentClassifier:
         ... / please ...) so the classifier sees the clean command verb.
         Shared with _NormalizationService; applied here too because
         greeting/name recursion re-enters classify() after the normalizer ran.
+        Never strips when the remainder starts with a subject pronoun
+        ("can i use the computer" must stay a lock-state query, not "i use...").
         """
         stripped = _NormalizationService._POLITE_PREFIX_RE.sub("", text, count=1).strip()
         if stripped and text.lower() != stripped.lower():
-            return stripped
+            _remainder_first = stripped.split()[0].lower() if stripped.split() else ""
+            if _remainder_first not in ("i", "we", "you", "they", "he", "she", "it"):
+                return stripped
         return text
 
     def _strip_greeting(self, lower_clean, first_word, second_word, words, text="", raw_text=""):
@@ -495,6 +521,9 @@ class _IntentClassifier:
             "how are things", "what is up", "you there", "how have you been",
             "how are you today", "how is your day", "how was your day",
             "how is everything going", "how are you doing today",
+            "how is your day been", "how has your day been",
+            "how is your day going", "how is your day so far",
+            "how was your day today", "how did your day go",
         }):
             return RoutingDecision(
                 IntentType.GREETING, "", "", raw_text or text, text or raw_text, confidence=1.0,
@@ -547,7 +576,7 @@ class _IntentClassifier:
         return None
 
     def _has_trailing_conjunction(self, lower, first_word):
-        verbs = {"open", "close", "search", "play", "launch", "folder", "start", "run", "fire up"}
+        verbs = {"open", "close", "shut", "quit", "kill", "end", "search", "play", "launch", "folder", "start", "run", "fire up"}
         if first_word in verbs or any(lower.startswith(p) for p in self._OPEN_PHRASES[0]):
             return bool(re.search(r"\b(?:and|then|anf|andd|thenn|theen)\s*$", lower))
         return False
@@ -623,27 +652,63 @@ class _IntentClassifier:
             return RoutingDecision(IntentType.SEARCH, "search_web", query, text, lower, confidence=1.0)
         return None
 
+    # Referent pronouns that must never be synthesized into web domains
+    # ("open it in chrome" with no resolved context must not become
+    # https://it.com). They are routed to a truthful referent-required failure.
+    _WEBAPP_REFERENT_STOP = frozenset({
+        "it", "this", "that", "them", "those", "there", "here", "one",
+    })
+
     def _detect_browser_webapp(self, lower, text):
-        match = re.match(r"^open\s+(.+?)\s+in\s+(chrome|edge|comet|firefox|brave)$", lower)
-        if match:
-            webapp, browser = match.groups()
-            from mini_kio.core.app_operator import _normalize_web_target_to_url
-            url = _normalize_web_target_to_url(webapp)
-            if url:
-                return RoutingDecision(
-                    IntentType.BROWSER_NAVIGATE, "execute_capability",
-                    f"{browser}::open_url::{url}::{webapp}",
-                    text, lower, confidence=1.0,
-                )
-            # Explicit "open X in <browser>" with a target that is NOT a valid
-            # web destination (internal host, malformed, forbidden chars) is a
-            # routing-time rejection. It must NEVER fall through to native
-            # app-open, and must never open an internal host in a browser.
+        # Explicit new-tab family: "open another tab of X", "open X in a new
+        # tab" — the user explicitly asked for an ADDITIONAL target, so
+        # duplicate prevention must not reuse the existing one.
+        force_new = False
+        webapp = None
+        browser = None
+        m = re.match(r"^open\s+(?:another|a\s+new)\s+tab\s+(?:of\s+)?(.+?)\s*$", lower)
+        if m:
+            webapp, browser, force_new = m.group(1).strip(), "", True
+        else:
+            m = re.match(r"^open\s+(.+?)\s+in\s+(?:a\s+)?(?:new|fresh)\s+tab\s*$", lower)
+            if m:
+                webapp, browser, force_new = m.group(1).strip(), "", True
+            else:
+                m = re.match(r"^open\s+(.+?)\s+in\s+(chrome|edge|comet|firefox|brave|browser)$", lower)
+                if m:
+                    webapp, browser = m.groups()
+        if not webapp:
+            return None
+        if browser == "browser":
+            from mini_kio.core.config import DEFAULT_BROWSER
+            browser = DEFAULT_BROWSER.lower()
+        # A trailing app qualifier inside an explicit web request is noise
+        # ("open notepad app in chrome" -> "notepad"), never part of the URL.
+        webapp = re.sub(r"\s+(?:app|application|desktop)\s*$", "", webapp.strip(), flags=re.IGNORECASE).strip()
+        webapp_lower = webapp.lower().strip()
+        if webapp_lower in self._WEBAPP_REFERENT_STOP:
             return RoutingDecision(
                 IntentType.BROWSER_NAVIGATE, "invalid_web_target", webapp,
                 text, lower, confidence=1.0,
+                metadata={"referent_missing": True},
             )
-        return None
+        from mini_kio.core.app_operator import _explicit_web_url_for_open
+        url = _explicit_web_url_for_open(webapp)
+        if url:
+            return RoutingDecision(
+                IntentType.BROWSER_NAVIGATE, "execute_capability",
+                f"{browser}::open_url::{url}::{webapp}",
+                text, lower, confidence=1.0,
+                metadata={"explicit_new": force_new, "webapp": webapp_lower},
+            )
+        # Explicit "open X in <browser>" with a target that is NOT a valid
+        # web destination (internal host, malformed, forbidden chars) is a
+        # routing-time rejection. It must NEVER fall through to native
+        # app-open, and must never open an internal host in a browser.
+        return RoutingDecision(
+            IntentType.BROWSER_NAVIGATE, "invalid_web_target", webapp,
+            text, lower, confidence=1.0,
+        )
 
     # Open/launch verb family: "open vscode", "launch vscode", "start vscode",
     # "run vscode", "fire up vscode" all resolve to the same native-app target
@@ -684,6 +749,51 @@ class _IntentClassifier:
         target = self._open_verb_target(lower, text, first_word)
         if target is None:
             return None
+        # ── Semantic modifier extraction (before any cleanup) ──────────────
+        # Explicit modality / new-target markers are extracted from the raw
+        # target FIRST so they survive noun-phrase cleanup as structured
+        # constraints, never as part of the entity name. Generic family rules,
+        # not per-app phrasing.
+        raw_target = target.strip()
+        explicit_web = False
+        explicit_native = False
+        explicit_new = False
+
+        # Explicit web-intent tail: "X on the web", "X in the browser",
+        # "X web version", "X on the internet".
+        m = re.search(
+            r"\s+(?:on\s+the\s+web|in\s+the\s+browser|web\s+version|on\s+the\s+internet|in\s+browser|in\s+the\s+web)\s*$",
+            raw_target, re.IGNORECASE,
+        )
+        if m:
+            explicit_web = True
+            raw_target = raw_target[: m.start()].strip()
+        # Explicit native-intent markers: "the X app", "X desktop app",
+        # "X application".
+        m = re.search(
+            r"\s+(?:desktop\s+)?(?:app|application|program|software)\s*$",
+            raw_target, re.IGNORECASE,
+        )
+        if m and not explicit_web:
+            explicit_native = True
+            raw_target = raw_target[: m.start()].strip()
+        # Explicit additional-target markers: "another X", "a new X",
+        # "a second X", "new X window".
+        m = re.match(r"^(?:another|a\s+second|a\s+new)\s+(.+)$", raw_target, re.IGNORECASE)
+        if m and m.group(1).strip().lower() not in ("tab", "window", "instance"):
+            explicit_new = True
+            raw_target = m.group(1).strip()
+        m = re.match(r"^new\s+(.+?)(?:\s+(?:window|instance))?$", raw_target, re.IGNORECASE)
+        if m and not explicit_new and m.group(1).strip().lower() not in ("tab", "window", "instance"):
+            explicit_new = True
+            raw_target = m.group(1).strip()
+        # Trailing politeness is never part of the target.
+        raw_target = re.sub(
+            r"\s+(?:for\s+me|for\s+us|please|pls)\s*$", "", raw_target,
+            flags=re.IGNORECASE,
+        ).strip()
+        target = raw_target
+
         # Generic noun-phrase cleanup for app-like targets: strip a leading
         # article and a trailing qualifier ("the winrar app" -> "winrar",
         # "open up the winrar app" -> "winrar"). This is a semantic family
@@ -694,6 +804,14 @@ class _IntentClassifier:
             return None
         target_lower = target.lower()
         words_set = set(target_lower.split())
+
+        # "open the browser" -> the default browser host.
+        if target_lower in ("browser", "web browser"):
+            from mini_kio.core.config import DEFAULT_BROWSER
+            return RoutingDecision(
+                IntentType.DESKTOP_OPEN, "open_app", DEFAULT_BROWSER.lower(),
+                text, lower, confidence=1.0,
+            )
 
         from mini_kio.media.intelligence.artifact_memory import parse_artifact_type
         artifact = parse_artifact_type(target_lower)
@@ -709,20 +827,57 @@ class _IntentClassifier:
             folder = " ".join(folder.split()) or target_lower
             return RoutingDecision(IntentType.FILE, "open_folder", folder, text, lower, confidence=1.0)
 
+        # EXPLICIT WEB MODALITY — overrides native even when the app is
+        # installed ("open X on the web" must open the website). Uses the
+        # explicit-web resolver so single-word entities with a native install
+        # ("spotify in Chrome") still resolve to their legitimate website.
+        if explicit_web:
+            from mini_kio.core.app_operator import _explicit_web_url_for_open
+            from mini_kio.core.config import DEFAULT_BROWSER
+            url = _explicit_web_url_for_open(target)
+            if url:
+                return RoutingDecision(
+                    IntentType.BROWSER_NAVIGATE, "execute_capability",
+                    f"{DEFAULT_BROWSER.lower()}::open_url::{url}::{target_lower}",
+                    text, lower, confidence=1.0,
+                    metadata={"explicit_web": True, "explicit_new": explicit_new},
+                )
+            return RoutingDecision(
+                IntentType.BROWSER_NAVIGATE, "invalid_web_target", target,
+                text, lower, confidence=1.0, metadata={"explicit_web": True},
+            )
+
+        # EXPLICIT NATIVE MODALITY — "open the X app" / "X desktop app" must
+        # resolve the native target, never the website.
+        if explicit_native:
+            return RoutingDecision(
+                IntentType.DESKTOP_OPEN, "open_app", target, text, lower,
+                confidence=1.0,
+                metadata={"explicit_native": True, "explicit_new": explicit_new},
+            )
+
         from mini_kio.core.routing_utils import get_browser_routing
         route_info = get_browser_routing(target)
         if route_info["route_type"] == "native":
-            return RoutingDecision(IntentType.DESKTOP_OPEN, route_info["action"], route_info["target"], text, lower, confidence=1.0)
+            return RoutingDecision(
+                IntentType.DESKTOP_OPEN, route_info["action"], route_info["target"],
+                text, lower, confidence=1.0,
+                metadata={"explicit_new": explicit_new},
+            )
         elif route_info["route_type"] == "browser_fallback":
             return RoutingDecision(
                 IntentType.BROWSER_NAVIGATE, route_info["action"], route_info["target"],
                 text, lower, confidence=1.0,
-                metadata={"canonical_target": route_info.get("canonical_target", ""), "browser": route_info.get("browser", "")},
+                metadata={"canonical_target": route_info.get("canonical_target", ""), "browser": route_info.get("browser", ""), "explicit_new": explicit_new},
             )
         else:
             # not_found -> truthful native-open failure ("couldn't find X
             # installed"), never a silent web substitution.
-            return RoutingDecision(IntentType.DESKTOP_OPEN, "open_app", route_info.get("target") or target, text, lower, confidence=1.0)
+            return RoutingDecision(
+                IntentType.DESKTOP_OPEN, "open_app", route_info.get("target") or target,
+                text, lower, confidence=1.0,
+                metadata={"explicit_new": explicit_new},
+            )
 
     def _detect_focus(self, lower, text, first_word, second_word):
         if first_word == "focus":
@@ -808,9 +963,17 @@ class _IntentClassifier:
         (re.compile(r"^is\s+my\s+(?:computer|pc|laptop)\s+(?:ok(?:ay)?|fine|healthy|good)\b"), "system", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:system|computer|pc)\s+(?:health|status)\b"), "system", ""),
         # --- lock state ---
-        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|screen|system)\s+locked\b"), "lock_state", ""),
-        (re.compile(r"^am\s+i\s+locked\b"), "lock_state", ""),
+        # Canonical family: every wording that asks for CURRENT session lock
+        # state routes to the authoritative Windows session owner — never web
+        # knowledge. Host nouns and both polarities (locked/unlocked) are
+        # generic; "can I use the computer" is lock-state, not knowledge.
+        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|screen|system|windows|machine|workstation)\s+locked\b"), "lock_state", ""),
+        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:computer|pc|laptop|screen|system|windows|machine|workstation)\s+unlocked\b"), "lock_state", ""),
+        (re.compile(r"^am\s+i\s+(?:locked|locked\s+out|locked\s+in)\b"), "lock_state", ""),
         (re.compile(r"^lock\s+(?:status|state)\b"), "lock_state", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:the\s+|my\s+|current\s+)?(?:current\s+)?lock\s+(?:status|state)\s*\??$"), "lock_state", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:the\s+|my\s+|current\s+)?(?:system|session|screen|windows)\s+lock\s+(?:status|state)\s*\??$"), "lock_state", ""),
+        (re.compile(r"^can\s+i\s+(?:use|access|get\s+into)\s+(?:the\s+|my\s+)?(?:computer|pc|laptop|machine|system|workstation)\s*\??$"), "lock_state", ""),
         # --- system uptime ---
         (re.compile(r"^(?:system|pc|computer)\s+uptime\b"), "system_uptime", ""),
         (re.compile(r"^how\s+long\s+has\s+(?:my\s+|the\s+)?(?:computer|pc|system|laptop)\s+been\s+(?:running|on|up)\b"), "system_uptime", ""),
@@ -831,13 +994,14 @@ class _IntentClassifier:
         (re.compile(r"^how\s+much\s+(?:free\s+)?(?:space|storage|disk\s+space)\s+(?:do\s+i\s+have|is\s+left|is\s+there\s+left)\b"), "storage", ""),
         # --- metrics ---
         (re.compile(r"^cpu\b"), "cpu", ""),
-        (re.compile(r"^what(?:'s|s| is)?\s+my\s+cpu\s+(?:usage|load)\b"), "cpu", ""),
-        (re.compile(r"^how\s+much\s+cpu\b"), "cpu", ""),
-        (re.compile(r"^how\s+busy\s+is\s+the\s+cpu\b"), "cpu", ""),
+        (re.compile(r"^processor\b"), "cpu", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+my\s+(?:cpu|processor)\s+(?:usage|load)\b"), "cpu", ""),
+        (re.compile(r"^how\s+much\s+(?:cpu|processor)\b"), "cpu", ""),
+        (re.compile(r"^how\s+busy\s+is\s+the\s+(?:cpu|processor)\b"), "cpu", ""),
         (re.compile(r"^ram\s*$"), "ram", ""),
         (re.compile(r"^memory\s*$"), "ram", ""),
         (re.compile(r"^(?:ram|memory)\s+usage\b"), "ram", ""),
-        (re.compile(r"^how\s+much\s+(?:ram|memory)\s+am\s+i\s+using\b"), "ram", ""),
+        (re.compile(r"^how\s+much\s+(?:ram|memory)\s+(?:am\s+i\s+using|are\s+you\s+using|is\s+being\s+used|is\s+in\s+use)\b"), "ram", ""),
         (re.compile(r"^how\s+much\s+memory\s+is\s+left\b"), "ram", ""),
         (re.compile(r"^gpu\b"), "gpu", ""),
         (re.compile(r"^gpu\s+(?:usage|load)\b"), "gpu", ""),
@@ -847,9 +1011,25 @@ class _IntentClassifier:
         (re.compile(r"^(?:storage|disk)\s+(?:usage|space)\b"), "storage", ""),
         (re.compile(r"^how\s+much\s+(?:storage|disk\s+space)\s+do\s+i\s+have\b"), "storage", ""),
         (re.compile(r"^how\s+much\s+disk\s+space\s+is\s+left\b"), "storage", ""),
-        (re.compile(r"^battery\s*$"), "battery", ""),
-        (re.compile(r"^battery\s+(?:status|level)\b"), "battery", ""),
-        (re.compile(r"^is\s+my\s+battery\s+charging\b"), "battery", ""),
+        # --- battery / power family (first-class deterministic capability) ---
+        # Short AND natural requests must land here — never general knowledge.
+        # Word order and phrasing do not matter; the semantic family owns the
+        # answer from real Windows power state.
+        (re.compile(r"^battery\s*%?\s*$"), "battery", ""),
+        (re.compile(r"^battery\s+(?:percentage|percent|level|status|state)\b"), "battery", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:the\s+)?(?:battery|charge|power)\s+(?:percentage|percent|level|status|state)\b"), "battery", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:my\s+|the\s+)?battery\b"), "battery", ""),
+        (re.compile(r"^how\s+much\s+(?:battery|charge|power)\s+(?:do\s+i\s+have|is\s+left|have\s+i\s+got|left|do\s+i\s+have\s+left)\b"), "battery", ""),
+        (re.compile(r"^how(?:'s|s| is)\s+(?:my\s+|the\s+)?(?:battery|power|charge)(?:\s+(?:looking|doing))?\??\s*$"), "battery", ""),
+        (re.compile(r"^charge\s+left\b"), "battery", ""),
+        (re.compile(r"^power\s+(?:status|state)\b"), "battery", ""),
+        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:battery|power)\s+(?:low|running\s+low|dying|about\s+to\s+die|going\s+to\s+die)\??\s*$"), "battery_low", ""),
+        (re.compile(r"^am\s+i\s+(?:low\s+on\s+battery|running\s+(?:low|out)\s+on\s+battery|about\s+to\s+run\s+out\s+of\s+battery|low\s+on\s+charge)\b"), "battery_low", ""),
+        (re.compile(r"^is\s+(?:my\s+|the\s+)?(?:laptop|computer|pc|system)\s+charging\b"), "battery_charging", ""),
+        (re.compile(r"^is\s+(?:it|the\s+battery)\s+charging\b"), "battery_charging", ""),
+        (re.compile(r"^am\s+i\s+charging\b"), "battery_charging", ""),
+        (re.compile(r"^(?:is\s+it\s+)?plugged\s+in\??\s*$"), "battery_charging", ""),
+        (re.compile(r"^is\s+my\s+battery\s+charging\b"), "battery_charging", ""),
         # --- components / services ---
         (re.compile(r"^is\s+(?:the\s+)?(?:browser|chrome|edge|firefox|brave)\s+(?:connected|working|ready|up|online|available|running)\b"), "components", "browser"),
         (re.compile(r"^is\s+(?:the\s+)?(?:telegram|bot|discord)\s+(?:connected|working|ready|up|online|available|running|alive)\b"), "components", "telegram"),
@@ -860,7 +1040,11 @@ class _IntentClassifier:
         (re.compile(r"^is\s+kio\s+(?:running|alive|up)\b"), "health", ""),
         (re.compile(r"^what\s+(?:services|components|systems|things)\s+are\s+(?:connected|working|running|active)\b"), "components", ""),
         # --- whats wrong / diagnose ---
+        # Canonical family: bare ("what's wrong") AND qualified
+        # ("what's wrong with my system") forms must route to the operational
+        # health correlation — never fall through to the knowledge LLM.
         (re.compile(r"^what(?:'s|s| is)?\s+wrong\s*$"), "whats_wrong", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+wrong\s+with\s+(?:my\s+|the\s+|this\s+|that\s+)?(?:pc|computer|laptop|system|machine|rig|device)\s*\??\s*$"), "whats_wrong", ""),
         (re.compile(r"^is\s+(?:there\s+)?(?:anything|something)\s+wrong\b"), "whats_wrong", ""),
         (re.compile(r"^(?:anything|something)\s+wrong(?:\s+with\s+(?:my\s+|the\s+)?(?:pc|computer|laptop|system))?\b"), "whats_wrong", ""),
         (re.compile(r"^why\s+(?:are\s+you|is\s+kio)\s+(?:unhealthy|degraded|not\s+working)\b"), "whats_wrong", ""),
@@ -911,10 +1095,18 @@ class _IntentClassifier:
     })
     _CREDENTIAL_ROUTES: tuple[tuple[object, str, str], ...] = (
         (re.compile(r"^what\s+credentials\s+do\s+i\s+have\b"), "list", ""),
+        (re.compile(r"^what\s+credentials\s+(?:are|get)\s+configured\b"), "list", ""),
+        (re.compile(r"^what\s+(?:credentials|integrations|accounts)\s+are\s+(?:set\s+up|configured|connected|active)\b"), "list", ""),
+        (re.compile(r"^which\s+(?:credentials|integrations|accounts|services)\s+are\s+(?:set\s+up|configured|connected|active)\b"), "list", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:my\s+)?(?:connected\s+)?(?:accounts|credentials)\b"), "list", ""),
         (re.compile(r"^list\s+(?:my\s+)?(?:credentials|connected\s+accounts)\b"), "list", ""),
         (re.compile(r"^which\s+credentials\s+need\s+attention\b"), "attention", ""),
         (re.compile(r"^do\s+i\s+need\s+to\s+reconnect\s+anything\b"), "attention", ""),
+        # Credential STATE family (Slice 9): "credential status", "status of
+        # my credentials" — deterministic vault state, never the knowledge LLM.
+        (re.compile(r"^credential(?:s)?\s+(?:status|state|health|situation)\b"), "status", ""),
+        (re.compile(r"^status\s+of\s+(?:my\s+|the\s+)?credential(?:s)?\b"), "status", ""),
+        (re.compile(r"^how\s+(?:are|is)\s+(?:my\s+)?credential(?:s)?\s+(?:doing|looking|looking\s+fine)\b"), "status", ""),
         (re.compile(r"^revoke\s+my\s+([a-z0-9 ._-]+?)\s+(?:credential|account|credentials)\b"), "revoke", ""),
         (re.compile(r"^is\s+my\s+([a-z0-9 ._-]+?)\s+(?:credential|account)\s+valid\b"), "status", ""),
         (re.compile(r"^refresh\s+(?:my\s+|the\s+)?([a-z0-9 ._-]+?)\s+(?:credential|account)\b"), "refresh", ""),
@@ -950,6 +1142,8 @@ class _IntentClassifier:
             return RoutingDecision(IntentType.CREDENTIAL, "list", "", text, lower, confidence=1.0)
         return None
 
+
+
     # Deterministic installed-app existence query: "is winrar installed",
     # "is vscode installed". Routes to the operational family (app_installed)
     # which probes the real OS — never an LLM guess. Generic placeholders
@@ -958,6 +1152,21 @@ class _IntentClassifier:
     _INSTALLED_PLACEHOLDERS = frozenset({
         "everything", "anything", "something", "it", "this", "that",
         "my apps", "the apps", "apps", "software", "all", "everything else",
+    })
+
+    # Observed-state queries: "is X open" / "is X running" -> deterministic
+    # app_running family answered from the real desktop (visible windows +
+    # process presence), never an LLM guess. "Installed" stays the inventory
+    # family; "open/running" is the live-observation family — the two are
+    # never derived from each other.
+    _IS_OPEN_RE = re.compile(r"^is\s+(.+?)\s+open\??\s*$")
+    _IS_RUNNING_RE = re.compile(r"^is\s+(.+?)\s+running\??\s*$")
+    _IS_OPEN_PLACEHOLDERS = frozenset({
+        "everything", "anything", "something", "it", "this", "that", "them",
+        "those", "these", "all", "apps", "windows", "tabs", "software",
+        "my apps", "the apps", "the computer", "my computer", "the pc",
+        "my pc", "computer", "pc", "laptop", "the laptop", "my laptop",
+        "browser", "the browser", "everything else",
     })
 
     def _detect_operational(self, lower, text):
@@ -984,6 +1193,18 @@ class _IntentClassifier:
                     IntentType.OPERATIONAL, "app_installed", app,
                     text, lower, confidence=1.0,
                 )
+        # Observed-state family: "is VLC open" / "is notepad running" — answered
+        # from the real desktop, never from knowledge. Runs AFTER the tuple scan
+        # so browser/telegram component queries keep their own semantics.
+        for state_re in (self._IS_OPEN_RE, self._IS_RUNNING_RE):
+            state_match = state_re.match(norm)
+            if state_match:
+                app = state_match.group(1).strip()
+                if app and app.lower() not in self._IS_OPEN_PLACEHOLDERS:
+                    return RoutingDecision(
+                        IntentType.OPERATIONAL, "app_running", app,
+                        text, lower, confidence=1.0,
+                    )
         for pattern, action, target in self._OPERATIONAL_ROUTES:
             if pattern.match(norm):
                 return RoutingDecision(
@@ -992,21 +1213,28 @@ class _IntentClassifier:
         return None
 
     def _detect_close(self, lower, text, first_word):
-        # Close phrasal-verb family: "close X", "shut down X", "close down X".
-        # Semantic family, not per-app phrasing. System nouns ("shut down the
-        # computer") intentionally stay OUT of this family — "shut down" with
-        # no target is a system action handled elsewhere.
+        # Close verb family: "close X", "shut X", "quit X", "kill X",
+        # "end X" + phrasal "shut down X" / "close down X". Semantic family,
+        # not per-app phrasing. System nouns ("shut down the computer")
+        # intentionally stay OUT of this family — handled elsewhere.
+        _CLOSE_VERBS = {"close", "shut", "quit", "kill", "end"}
         _CLOSE_PHRASES = ("shut down ", "close down ")
         raw_target = None
-        if first_word == "close" and not lower.startswith("close down "):
-            raw_target = text[6:].strip()
-        else:
-            for phrase in _CLOSE_PHRASES:
-                if lower.startswith(phrase):
-                    raw_target = text[len(phrase):].strip()
-                    break
+        if first_word in _CLOSE_VERBS:
+            if any(lower.startswith(p) for p in _CLOSE_PHRASES):
+                for phrase in _CLOSE_PHRASES:
+                    if lower.startswith(phrase):
+                        raw_target = text[len(phrase):].strip()
+                        break
+            else:
+                raw_target = text[len(first_word):].strip()
         if raw_target is None:
             return None
+        # Trailing politeness is never part of the target.
+        raw_target = re.sub(
+            r"\s+(?:for\s+me|for\s+us|please|pls)\s*$", "", raw_target,
+            flags=re.IGNORECASE,
+        ).strip()
         # Generic noun-phrase cleanup: strip leading article and trailing
         # qualifiers ("the cursor thing" -> "cursor", "the chatgpt tab" ->
         # "chatgpt").
@@ -1187,6 +1415,13 @@ class _IntentClassifier:
             r"^recommend\b",
             r"should\s+i\s+(?:watch|play|see|read|listen\s+to|try)\b",
             r"is\s+[a-z0-9].*?\s+(?:good|great|worth|overrated|underrated|any\s+good)\b",
+            # Self-preference family: "what's your favorite X", "what do you
+            # like best" ask about KIO's own taste — a conversational question,
+            # never a web-knowledge query. The entity-query path must not
+            # capture these ("what's your favorite movie" is NOT knowledge
+            # about a movie).
+            r"what(?:'s|\s+is)\s+your\s+(?:favourite|favorite)\b",
+            r"what(?:'s|\s+is)\s+your\s+pick\b",
         )
         if any(re.search(p, lower) for p in _opinion):
             return RoutingDecision(IntentType.CONVERSATION, "converse", text, text, lower, confidence=0.8)
@@ -1313,7 +1548,7 @@ class _CapabilityResolver:
             IntentType.GREETING: ("conversation", {"template": "greeting"}),
             IntentType.SOCIAL: ("conversation", {"template": "social"}),
             IntentType.IDENTITY: ("conversation", {"template": "identity"}),
-            IntentType.DESKTOP_OPEN: ("desktop", {"action": decision.action, "target": decision.target}),
+            IntentType.DESKTOP_OPEN: ("desktop", {"action": decision.action, "target": decision.target, "metadata": decision.metadata}),
             IntentType.DESKTOP_CLOSE: ("desktop", {"action": decision.action, "target": decision.target}),
             IntentType.SEARCH: ("desktop", {"action": decision.action, "target": decision.target}),
             IntentType.MEDIA_PLAY: ("media", {"action": "play", "target": decision.target, "platform": decision.platform, "raw": decision.raw_text}),
@@ -1384,7 +1619,70 @@ class _ExecutionCoordinator:
 
     def _exec_desktop(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.execution_boundary import execute_action
-        return execute_action(params["action"], params["target"])
+        action = params["action"]
+        target = params["target"]
+        meta = params.get("metadata") or {}
+        explicit_new = bool(meta.get("explicit_new"))
+        # Duplicate prevention (canonical): a default "open X" must not create
+        # another equivalent target when X is already running/visible — focus
+        # the existing one instead. Explicit additional-instance requests
+        # ("another X", "a new X window") skip this and always launch.
+        if action == "open_app" and not explicit_new:
+            reused = self._reuse_running_app(target)
+            if reused:
+                return reused
+        return execute_action(action, target)
+
+    def _reuse_running_app(self, target: str) -> Optional[dict]:
+        """Duplicate prevention: if the requested native app is already running
+        (KIO-tracked, registry-matched, or a visible desktop window), focus the
+        existing instance and report it — never launch a second one.
+
+        Generic and app-agnostic; browser-host windows are only matched when the
+        requested target IS that browser (a tab mentioning an app never focuses
+        the whole browser process).
+        """
+        try:
+            from mini_kio.core.runtime import get_runtime
+            from mini_kio.core.app_operator import _find_in_registry, _find_matching_process_pid
+            from mini_kio.core.desktop_state import observe_native_windows
+            from mini_kio.platform.window_activation import try_activate_browser, activate_window
+            from mini_kio.core.target_ref import display_target_name
+
+            key = str(target or "").lower().strip()
+            if not key:
+                return None
+            rt = get_runtime()
+            if rt is not None:
+                rt.prune_tracked_processes()
+                for entry in rt.tracked_processes:
+                    if str(entry.get("name", "") or "").lower() == key:
+                        pid = int(entry.get("pid", 0) or 0)
+                        if pid > 0:
+                            try_activate_browser(pid)
+                            return {"success": True, "message": f"{display_target_name(key)} is already open.", "action": "open_app", "target": key}
+            info = _find_in_registry(key)
+            if info:
+                pid = _find_matching_process_pid(key, info)
+                if pid:
+                    try_activate_browser(pid)
+                    return {"success": True, "message": f"{display_target_name(key)} is already open.", "action": "open_app", "target": key}
+            windows, ok = observe_native_windows()
+            if ok:
+                browser_hosts = {"chrome", "edge", "firefox", "brave", "comet", "opera"}
+                for w in windows:
+                    if not w.get("pid"):
+                        continue
+                    if w.get("is_browser_host") and key not in browser_hosts:
+                        continue
+                    base = str(w.get("base") or "").lower()
+                    wapp = str(w.get("app") or "").lower()
+                    matched = (base and len(key) >= 3 and key in base) or (wapp and len(key) >= 3 and key in wapp)
+                    if matched and activate_window(int(w["pid"])):
+                        return {"success": True, "message": f"{display_target_name(key)} is already open.", "action": "open_app", "target": key}
+        except Exception as exc:
+            logger.warning("reuse check failed for %s: %s", target, exc)
+        return None
 
     def _exec_media(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.media.media_manager import MediaManager
@@ -1527,7 +1825,10 @@ class _ExecutionCoordinator:
             # Deterministic rejection of an explicit "open X in <browser>"
             # request whose target is not a valid web destination. Never
             # falls through to native execution; never opens internal hosts.
-            return {"success": False, "message": "Invalid browser web target."}
+            meta = params.get("metadata") or {}
+            if meta.get("referent_missing"):
+                return {"success": False, "message": "I need to know what that refers to before I can open it."}
+            return {"success": False, "message": "That isn't a valid web page to open."}
 
         if action == "browser_goto":
             from mini_kio.core.execution_boundary import execute_action
@@ -1539,6 +1840,11 @@ class _ExecutionCoordinator:
         if action == "execute_capability":
             from mini_kio.core.execution_boundary import execute_action
             target = params.get("target", "")
+            meta = params.get("metadata") or {}
+            # Explicit additional-tab request: tag the capability target so the
+            # executor skips duplicate prevention and really opens a new tab.
+            if meta.get("explicit_new") and "::open_url::" in target and not target.endswith("::new"):
+                target = target + "::new"
             return execute_action("execute_capability", target)
 
         # Browser Connector is the single source of truth for tab state.
@@ -1775,6 +2081,21 @@ class _ExecutionCoordinator:
             reply = None
         if reply:
             cleaned = reply.strip().strip('"').strip("'")
+            # Truncation guard: a provider stream cut produces a reply with no
+            # terminal punctuation ("As an AI, I don't have personal"). Retry
+            # once; if it still does not end like a complete sentence, treat it
+            # as failed rather than surfacing a broken half-reply. A minimum
+            # length keeps legitimate short replies ("Sure", "Okay", "Thanks")
+            # from paying for a second LLM call.
+            if not cleaned.endswith((".", "!", "?")) and 20 <= len(cleaned) < 150:
+                try:
+                    retry = ask_llm_sync(decision.normalized_text, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=300, task="conversation")
+                except Exception:
+                    retry = None
+                if retry and retry.strip().endswith((".", "!", "?")):
+                    cleaned = retry.strip().strip('"').strip("'")
+                else:
+                    return None
             # Anti-fabrication: the model must never address the user by an
             # invented name ("Hey, it sounds pretty serious. Peter").
             cleaned = _sanitize_llm_name_address(cleaned)
@@ -1940,9 +2261,14 @@ class _ExecutionCoordinator:
 
     def _exec_coordinator(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.command_parser import parse_command
-        steps = parse_command(decision.raw_text or decision.normalized_text)
+        # Parse the RESOLVED semantic text, never the raw utterance: referent
+        # expansion ("close both" -> "close paint and notepad", "close it" ->
+        # "close <entity>") lives in normalized_text. Using raw_text here would
+        # make execution try to close a literal "both"/"it". When no resolution
+        # occurred the two are identical, so preferring normalized_text is safe.
+        steps = parse_command(decision.normalized_text or decision.raw_text)
         if not steps:
-            return {"success": False, "message": f"Could not parse multi-step command: {decision.raw_text!r}"}
+            return {"success": False, "message": f"Could not parse multi-step command: {decision.normalized_text or decision.raw_text!r}"}
         from mini_kio.core.command_router import _execute_multi_step
         return _execute_multi_step(steps)
 
@@ -1961,6 +2287,10 @@ class _ResponseComposer:
         r"\b(?:browser\s+connector|connector|execution\s+boundary|capability|pipeline|runtime|cdp|mcp)\b",
         re.IGNORECASE,
     )
+    # Trailing markdown table / citation fragments ("| Windows Notepad | -",
+    # "| Title | Link") leaked from raw source content. Generic hygiene, never
+    # app-specific.
+    _LEAK_TABLE_ROW = re.compile(r"\s*\|.*\|.*", re.IGNORECASE)
 
     def _strip_leaks(self, message: str) -> str:
         """Remove implementation verbosity from any message at a central point."""
@@ -1972,6 +2302,8 @@ class _ResponseComposer:
         stripped = re.sub(r"\s{2,}", " ", stripped).strip()
         stripped = self._LEAK_WORDS.sub("", stripped)
         stripped = re.sub(r"\s{2,}", " ", stripped).strip(" ,;\n\t")
+        stripped = re.sub(r"(?m)^\s*\|.*\|.*$\n?", "", stripped).strip()
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
         # Preserve a legitimate sentence-final period ("Paused.", "Resumed.") —
         # punctuation-stripping exists to clean leak-removal residue, not to
         # eat the composer's own terminal punctuation. The EXACT terminal

@@ -1474,16 +1474,21 @@ class MediaIntelligenceAdapter:
         self._llm_fn = fn
         self._composer._llm_fn = fn
 
-    def _compose_answer(self, result: RetrievalResult, query: str) -> str:
-        """Use AnswerComposer to build a structured, topic-appropriate answer."""
+    def _compose_answer(self, result: RetrievalResult, query: str,
+                        subject: Optional[str] = None) -> str:
+        """Use AnswerComposer to build a structured, topic-appropriate answer.
+
+        `subject` overrides the retrieval provider's entity field, which is
+        frequently the raw query ("What is Notepad?") and must never become
+        the displayed subject."""
         import logging
         logger = logging.getLogger(__name__)
         
-        formatted = self._composer.compose(result, query)
+        formatted = self._composer.compose(result, query, subject=subject or None)
         
         # Store offers for acceptance resolution
         offers_info = self._composer.get_last_offers()
-        subject = result.entity or result.title
+        subject = subject or result.entity or result.title
         topic = result.topic
         
         if offers_info.get("offers"):
@@ -1843,7 +1848,10 @@ class MediaIntelligenceAdapter:
         
         if res:
             self._discover_artifacts(res, topic, subject)
-            return self._compose_answer(res, query), res
+            # Pass the EXTRACTED subject explicitly: the retrieval provider's
+            # entity field is often the raw query ("What is Notepad?"), which
+            # must never become the displayed subject.
+            return self._compose_answer(res, query, subject=subject), res
         
         return f"I don't have information on {subject} yet.", None
 
