@@ -43,7 +43,7 @@ from mini_kio.core.operator_protocol import (
     FAILURE_VERIFICATION_FAILED,
 )
 from mini_kio.core.app_operator import (
-    launch_app, close_app, search_web, execute_capability,
+    launch_app, close_app, close_all_user_apps, search_web, execute_capability,
     APP_OPERATOR_DESCRIPTOR, APP_REGISTRY, _RESTRICTED_CANONICAL_TARGETS,
 )
 from mini_kio.core.browser_operator import (
@@ -210,6 +210,12 @@ STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
         "category": "external_control",
         "descriptor": APP_OPERATOR_DESCRIPTOR
     },
+    "close_all_apps": {
+        "handler": close_all_user_apps,
+        "canonical_name": "close_all_apps",
+        "category": "external_control",
+        "descriptor": APP_OPERATOR_DESCRIPTOR
+    },
     "search_web": {
         "handler": search_web,
         "canonical_name": "search_web",
@@ -293,6 +299,7 @@ _ACTION_MAP: dict[str, str] = {
     "open_app": "open_app",
     "close": "close_app",
     "close_app": "close_app",
+    "close_all_apps": "close_all_apps",
     "search": "search_web",
     "search_web": "search_web",
     "folder": "open_folder",

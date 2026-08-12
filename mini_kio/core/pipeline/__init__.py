@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import re
+import time
 from typing import Any, Optional
 
 from mini_kio.core.pipeline.types import IntentType, RoutingDecision
@@ -96,20 +97,47 @@ class Pipeline:
         user_id: int = 0,
     ) -> dict[str, Any]:
         try:
+            t0 = time.monotonic()
             ctx = get_session_context(session_id)
             raw = text.strip()
             if not raw:
                 return {"success": True, "message": ""}
 
             normalized = self._normalizer.run(raw, ctx)
+            t1 = time.monotonic()
             decision = self._classifier.classify(normalized, raw)
+            t2 = time.monotonic()
             decision.session_id = session_id
             decision.channel = channel
             decision.user_id = user_id
 
             capability, params = self._resolver.resolve(decision)
+            t3 = time.monotonic()
             result = self._coordinator.execute(capability, params, decision)
-            return self._composer.compose(result, decision, ctx)
+            t4 = time.monotonic()
+            composed = self._composer.compose(result, decision, ctx)
+            t5 = time.monotonic()
+
+            # Stage-latency instrumentation (Section 10/23): per-command
+            # timings land in the runtime trace so local-action latency is
+            # measurable before/after a change, never guessed.
+            try:
+                from mini_kio.core.runtime import emit_runtime_trace
+                emit_runtime_trace(
+                    "pipeline_profile",
+                    normalize_ms=round((t1 - t0) * 1000),
+                    classify_ms=round((t2 - t1) * 1000),
+                    resolve_ms=round((t3 - t2) * 1000),
+                    exec_ms=round((t4 - t3) * 1000),
+                    compose_ms=round((t5 - t4) * 1000),
+                    total_ms=round((t5 - t0) * 1000),
+                    intent=str(decision.intent_type.value) if decision.intent_type else "",
+                    action=decision.action,
+                    channel=channel,
+                )
+            except Exception:
+                pass
+            return composed
         except Exception as exc:
             logger.exception("Pipeline.run failed for %r", text)
             return {"success": False, "message": f"Error: {str(exc)[:200]}"}
@@ -607,6 +635,10 @@ class _IntentClassifier:
         if focus_routing:
             return focus_routing
 
+        desktop_routing = self._detect_desktop_action(lower, text)
+        if desktop_routing:
+            return desktop_routing
+
         operational_routing = self._detect_operational(lower, text)
         if operational_routing:
             return operational_routing
@@ -886,7 +918,179 @@ class _IntentClassifier:
             return RoutingDecision(IntentType.BROWSER_FOCUS, "focus", text[10:].strip(), text, lower, confidence=1.0)
         if first_word == "switch":
             return RoutingDecision(IntentType.BROWSER_FOCUS, "focus", text[7:].strip(), text, lower, confidence=1.0)
+        # FOCUS extension family: "bring Discord up / forward / to the front",
+        # "go back to Notepad". Generic phrasing → same canonical focus owner.
+        m = re.match(r"^bring\s+(.+?)\s+(?:up|forward|to\s+the\s+front|into\s+focus)\s*$", lower)
+        if m:
+            return RoutingDecision(IntentType.BROWSER_FOCUS, "focus", m.group(1).strip(), text, lower, confidence=1.0)
+        m = re.match(r"^go\s+back\s+to\s+(.+)$", lower)
+        if m:
+            return RoutingDecision(IntentType.BROWSER_FOCUS, "focus", m.group(1).strip(), text, lower, confidence=1.0)
         return None
+
+    # ── DESKTOP-ACTION semantic families ────────────────────────────────────
+    # Generic capability classes, NOT phrase lists: TYPE (text entry), KEY_PRESS
+    # (keyboard), SCROLL / CLICK (bounded GUI), SAVE/COPY/PASTE/SELECT/UNDO/REDO
+    # (hotkey shortcuts). Each family normalizes arbitrary wording onto a
+    # canonical action + payload, then the same canonical executor runs it.
+    # Programming-language names are excluded from TYPE targets so "put this
+    # code in Python" stays a code request, never a desktop-typing action.
+    _TYPE_TARGET_LANGUAGES = frozenset({
+        "python", "javascript", "typescript", "java", "c++", "c#", "go",
+        "rust", "ruby", "php", "kotlin", "swift", "sql", "html", "css",
+        "bash", "powershell", "json", "yaml", "markdown", "shell",
+    })
+    # Knowledge-shape guard for the BARE "type X" family: single-noun
+    # concepts that are almost always information questions ("type coercion",
+    # "type safety", "type system") must never become desktop typing. Multi-
+    # word payloads ("type hello world this is a kio test") are typing unless
+    # they match a knowledge shape (leading digit, "of ", blood-type grammar).
+    _TYPE_KNOWLEDGE_NOUNS = frozenset({
+        "coercion", "safety", "system", "systems", "hierarchy", "theory",
+        "casting", "error", "errors", "blood", "diabetes", "cancer",
+    })
+
+    def _detect_desktop_action(self, lower, text):
+        # ── TYPE family: "type hello into Notepad", "write this in Notepad",
+        #    "put hello into the current field", "enter my name" ─────────────
+        m = re.match(
+            r"^(?:type|write|put|enter)\s+(.+?)\s+(?:into|in)\s+(.+)$",
+            lower,
+        )
+        if m:
+            payload, app = m.group(1).strip(), m.group(2).strip()
+            app_lower = app.lower().rstrip(".")
+            if app_lower not in self._TYPE_TARGET_LANGUAGES:
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "type", app, text, lower,
+                    confidence=1.0, metadata={"payload": payload},
+                )
+            return None
+        # Bare TYPE into the current focus — knowledge-shape guarded, so
+        # "type 2 diabetes", "type of cancer", "type b blood" and single-noun
+        # concepts ("type coercion") stay on the knowledge path, while any
+        # multi-word typing payload ("type hello world this is a kio test")
+        # becomes a real TYPE action. "write" is deliberately excluded from
+        # the bare form ("write a poem" is a creative request, not a
+        # keystroke command) but still works in the into-target form.
+        m = re.match(r"^type\s+(.+)$", lower)
+        if m:
+            payload = m.group(1).strip().rstrip(".!?")
+            p = payload.lower()
+            # Knowledge shapes: leading digit ("2 diabetes"), "of " ("of
+            # cancer"), single-noun concepts, blood-type grammar.
+            if re.match(r"^\d+\s+[a-z]", p) or p.startswith("of "):
+                return None
+            words = payload.split()
+            if len(words) == 1 and words[0].lower() in self._TYPE_KNOWLEDGE_NOUNS:
+                return None
+            if re.match(r"^(?:ab?|o|b)\s+(?:positive|negative)?\s*blood(?:\s+type)?", p):
+                return None
+            # No word-count bound: "type <sentence>" is a typing command
+            # however long the payload (a long typing payload must NEVER leak
+            # to the conversation path where the LLM could fabricate success).
+            # The executor truthfully reports if the payload is beyond what it
+            # can type in one command.
+            if len(payload) <= 2000:
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "type", "", text, lower,
+                    confidence=1.0, metadata={"payload": payload},
+                )
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "type", "", text, lower,
+                confidence=1.0, metadata={"payload": payload[:2000], "truncated": True},
+            )
+
+        # ── KEY_PRESS family: "press Enter", "hit Escape", "press Ctrl+S",
+        #    "hit Ctrl+A" — BOUNDED to a key/combo grammar so conversational
+        #    phrases that merely begin with "hit"/"tap" ("hit me with your
+        #    best shot", "tap dance history") never become desktop actions.
+        m = re.match(r"^(?:press|hit|tap)\s+(.+)$", lower)
+        if m and self._looks_like_key_combo(m.group(1).strip()):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", m.group(1).strip(),
+                text, lower, confidence=1.0,
+            )
+
+        # ── Shortcut family: normalize wording → canonical key combos ───────
+        # "save this"/"save the file" → ctrl+s; "copy that" → ctrl+c;
+        # "paste it here" → ctrl+v; "select all" → ctrl+a; undo/redo.
+        if re.fullmatch(r"save(?:\s+(?:this|the\s+file|it|that|file|document))?", lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+s", text, lower,
+                confidence=1.0,
+            )
+        if re.fullmatch(r"copy(?:\s+(?:this|that|it|the\s+selection|selection))?", lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+c", text, lower,
+                confidence=1.0,
+            )
+        if re.fullmatch(r"paste(?:\s+(?:it\s+here|it|here|this|that))?", lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+v", text, lower,
+                confidence=1.0,
+            )
+        if lower in ("select all", "select everything", "select the whole thing"):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+a", text, lower,
+                confidence=1.0,
+            )
+        if lower in ("undo", "undo that", "undo it"):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+z", text, lower,
+                confidence=1.0,
+            )
+        if lower in ("redo", "redo that", "redo it"):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "key_press", "ctrl+y", text, lower,
+                confidence=1.0,
+            )
+
+        # ── SCROLL family: "scroll down/up", "scroll to the bottom/top" ───
+        m = re.match(r"^scroll\s+(down|up)$", lower)
+        if m:
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "scroll", m.group(1), text, lower,
+                confidence=1.0,
+            )
+        m = re.match(r"^scroll\s+(?:down\s+)?to\s+the\s+(bottom|top)\s*$", lower)
+        if m:
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "scroll", m.group(1), text, lower,
+                confidence=1.0,
+            )
+
+        # ── CLICK family (bounded): only "click here/there" at the current
+        #    cursor position can be executed reliably without vision. A named
+        #    element ("click the search box") cannot be located deterministically
+        #    by this provider — truthful unsupported, never a fake click.
+        if re.fullmatch(r"click(?:\s+(?:here|there|now))?", lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "click", "", text, lower,
+                confidence=1.0,
+            )
+        return None
+
+    # Bounded key/combo grammar for the KEY_PRESS family: a single known key
+    # (enter/esc/f1-f12/letters/digits/navigation keys) or a modifier
+    # combination (ctrl+s, alt+tab, win+d, ...). Anything else ("release",
+    # "me with your best shot") is not a key combo and stays out of the
+    # desktop-action path.
+    _KEY_COMBO_RE = re.compile(
+        r"^(?:ctrl|control|alt|shift|win|windows|super)"
+        r"(?:\s*(?:\+|\s+and\s+|\s*\+\s*)\s*"
+        r"(?:ctrl|control|alt|shift|win|windows|super|[a-z0-9]|f[1-9]|f1[0-2]|"
+        r"enter|return|esc|escape|tab|space|backspace|delete|insert|home|end|"
+        r"pageup|pagedown|up|down|left|right))+"
+        r"|(?:[a-z0-9]|f[1-9]|f1[0-2]|enter|return|esc|escape|tab|space|backspace|"
+        r"delete|insert|home|end|pageup|pagedown|up|down|left|right)$"
+    )
+
+    def _looks_like_key_combo(self, combo: str) -> bool:
+        combo = (combo or "").strip().lower().rstrip(".")
+        if not combo:
+            return False
+        return bool(self._KEY_COMBO_RE.fullmatch(combo))
 
     # Semantic family for contextual desktop-state queries (Capability A).
     # Synonym/normalization-based (what/which/show/list/tell + state nouns),
@@ -1219,6 +1423,28 @@ class _IntentClassifier:
         # intentionally stay OUT of this family — handled elsewhere.
         _CLOSE_VERBS = {"close", "shut", "quit", "kill", "end"}
         _CLOSE_PHRASES = ("shut down ", "close down ")
+
+        # ── CLOSE-ALL semantic family (generic scope, NOT phrase handlers):
+        #    "close all apps", "close everything", "quit all applications",
+        #    "kill all programs", "close all open windows" all converge on the
+        #    one canonical representation CLOSE / SCOPE=ALL_APPLICATIONS. The
+        #    executor re-observes the desktop, closes user-session apps only,
+        #    and reports what actually closed vs what remains. "close all
+        #    tabs" is deliberately NOT this family — tabs are browser-scope.
+        _close_all_re = re.compile(
+            r"^(?:close|shut|quit|kill|end)\s+(?:down\s+)?"
+            r"(?:all|every)\s*(?:of\s+)?"
+            r"(?:(?:my|the|these|those|open|running)\s+)?"
+            r"(?:apps?|applications?|programs?|software|windows?)?\s*$",
+            re.IGNORECASE,
+        )
+        if _close_all_re.fullmatch(lower) \
+                or re.fullmatch(r"(?:close|shut|quit|kill|end)\s+(?:down\s+)?everything\s*", lower, re.IGNORECASE):
+            return RoutingDecision(
+                IntentType.DESKTOP_CLOSE, "close_all_apps", "", text, lower,
+                confidence=1.0,
+            )
+
         raw_target = None
         if first_word in _CLOSE_VERBS:
             if any(lower.startswith(p) for p in _CLOSE_PHRASES):
@@ -1235,21 +1461,55 @@ class _IntentClassifier:
             r"\s+(?:for\s+me|for\s+us|please|pls)\s*$", "", raw_target,
             flags=re.IGNORECASE,
         ).strip()
+        # "shut down the computer" / "shut down my pc" is a SYSTEM action
+        # (shutdown), never an application close. System nouns stay OUT of the
+        # close-verb family by design — this is the missing boundary.
+        _close_system_nouns = {"computer", "pc", "laptop", "machine", "system", "workstation"}
+        _raw_check = re.sub(
+            r"^(?:my|the|this|that)\s+", "", raw_target.lower().strip()
+        ).strip()
+        _first_noun = _raw_check.split()[0] if _raw_check else ""
+        if _first_noun in _close_system_nouns and any(
+            lower.startswith(p) for p in ("shut down ", "close down ")
+        ):
+            return RoutingDecision(
+                IntentType.SYSTEM, "shutdown_system", "", text, lower,
+                confidence=1.0,
+            )
         # Generic noun-phrase cleanup: strip leading article and trailing
         # qualifiers ("the cursor thing" -> "cursor", "the chatgpt tab" ->
         # "chatgpt").
         target = re.sub(r"^(?:the|a|an)\s+", "", raw_target.strip(), flags=re.IGNORECASE)
         target = re.sub(r"\s+(?:thing|app|application|program|software|tab)\s*$", "", target, flags=re.IGNORECASE).strip()
-        browser_names = {"chrome", "edge", "firefox", "brave", "comet", "browser"}
-        if target.lower() in browser_names or target.lower().endswith(" browser"):
-            return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", target.lower().replace(" browser", ""), text, lower, confidence=1.0)
-        # BC-2: tab-scoped close — strip "the X tab" phrasing so the target
-        # resolves to the web-app name ("close the chatgpt tab" -> close_tab
-        # chatgpt), never to the host browser process.
-        tab_target = re.sub(r"^(?:the\s+)?(.+?)(?:\s+tab)?$", r"\1", target.lower()).strip()
-        if tab_target in browser_names:
-            return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", tab_target, text, lower, confidence=1.0)
-        return RoutingDecision(IntentType.BROWSER_FOCUS, "close_tab", tab_target or target, text, lower, confidence=1.0)
+        browser_names = {"chrome", "edge", "firefox", "brave", "comet", "opera", "browser"}
+        target_lower = target.lower()
+        if target_lower in browser_names or target_lower.endswith(" browser"):
+            return RoutingDecision(IntentType.DESKTOP_CLOSE, "close_app", target_lower.replace(" browser", ""), text, lower, confidence=1.0)
+
+        # ── TARGET-KIND-AWARE CLOSE (APP vs WINDOW vs BROWSER vs TAB): a
+        #    request to close an APPLICATION must never silently become a
+        #    browser-tab operation, and a tab-scope request must never
+        #    escalate into the host browser process. Identity comes from the
+        #    canonical target-ref kind + the registry (registered native
+        #    identity wins over the web hint).
+        from mini_kio.core.target_ref import parse_target
+        from mini_kio.core.app_operator import _find_in_registry
+        ref = parse_target(target_lower)
+        if ref.kind == "webapp" and _find_in_registry(target_lower) is None:
+            # Known web app (chatgpt/telegram web/whatsapp web/...) with no
+            # registered native install -> TAB scope, never the browser
+            # process, never a fake native close.
+            return RoutingDecision(
+                IntentType.BROWSER_FOCUS, "close_tab", ref.name or target_lower,
+                text, lower, confidence=1.0,
+            )
+        # Default: APPLICATION scope (registered native identity, generic
+        # discovered app, or an ordinary app-like name). The close_app
+        # owner resolves native-vs-web truthfully and verifies real closure.
+        return RoutingDecision(
+            IntentType.DESKTOP_CLOSE, "close_app", target_lower,
+            text, lower, confidence=1.0,
+        )
 
     def _detect_system(self, lower, first_word):
         mapping = {
@@ -1564,6 +1824,7 @@ class _CapabilityResolver:
             IntentType.INFORMATION: ("media", {"action": "information_query", "query": decision.target}),
             IntentType.CONVERSATION: ("conversation", {"action": decision.action, "query": decision.target}),
             IntentType.FILE: ("desktop", {"action": decision.action, "target": decision.target}),
+            IntentType.DESKTOP_ACTION: ("desktop_action", {"action": decision.action, "target": decision.target, "metadata": decision.metadata}),
             IntentType.MEMORY: ("memory", {"action": decision.action, "query": decision.target}),
             IntentType.MCP: ("mcp", {"raw": decision.raw_text}),
             IntentType.CREDENTIAL: ("credential", {"action": decision.action, "target": decision.target}),
@@ -1604,6 +1865,7 @@ class _ExecutionCoordinator:
             "file": self._exec_desktop,
             "coordinator": self._exec_coordinator,
             "memory": self._exec_memory,
+            "desktop_action": self._exec_desktop_action,
             "mcp": self._exec_conversation,
             "credential": self._exec_credential,
         }
@@ -1632,6 +1894,103 @@ class _ExecutionCoordinator:
             if reused:
                 return reused
         return execute_action(action, target)
+
+    def _exec_desktop_action(self, params: dict, decision: RoutingDecision) -> dict:
+        """Canonical executor for the new desktop-action capability classes.
+
+        TYPE / KEY_PRESS / SCROLL / CLICK — all route through the one desktop
+        automation provider (mini_kio.desktop) that owns the low-level
+        pyautogui/ctypes primitives. TYPE into a named app focuses (or opens)
+        the app window first, then types the payload. Responses are short and
+        truthful; a click on a named element that cannot be located is a
+        truthful limitation, never a fake success.
+        """
+        from mini_kio.desktop import DesktopProvider
+        from mini_kio.core.execution_boundary import execute_action
+
+        action = params.get("action", "")
+        target = str(params.get("target", "") or "")
+        meta = params.get("metadata") or {}
+        dp = DesktopProvider()
+
+        if action == "type":
+            payload = str(meta.get("payload", "") or "")
+            if not payload:
+                return {"success": False, "message": "What should I type?"}
+            app = target.strip()
+            opened_now = False
+            if app:
+                # TYPE into a named app: focus it first (or open it if it is
+                # installed but not running), then type into its window.
+                focused = self._try_native_focus(app)
+                if not focused:
+                    from mini_kio.core.routing_utils import get_browser_routing
+                    route_info = get_browser_routing(app)
+                    if route_info["route_type"] == "native":
+                        execute_action("open_app", route_info["target"])
+                        import time
+                        time.sleep(0.8)
+                        focused = self._try_native_focus(route_info["target"])
+                        opened_now = True
+                    elif route_info["route_type"] == "browser_fallback":
+                        execute_action("execute_capability", route_info["target"])
+                        return {"success": True, "message": "Opened the web app — I can't type into a browser tab yet."}
+                if not focused:
+                    return {"success": False, "message": f"Couldn't focus {app} to type into it."}
+                if not opened_now:
+                    # The app was ALREADY running, possibly with an existing
+                    # file open. Open a NEW blank document (generic Ctrl+N
+                    # new-document shortcut across Notepad/editors) so typed
+                    # text never lands in existing content. Apps KIO just
+                    # launched are already a fresh blank document.
+                    import time
+                    time.sleep(0.2)
+                    new_doc = dp.execute("keyboard_hotkey", target="ctrl+n")
+                    time.sleep(0.4)
+                    if not new_doc.get("success"):
+                        # The new-document shortcut failed: abort truthfully
+                        # rather than typing into the existing file.
+                        return {"success": False, "message": f"Couldn't open a new {target.strip().capitalize()} document to type into."}
+            result = dp.execute("keyboard_type", target=payload)
+            if result.get("success"):
+                return {"success": True, "message": f"Typed it{(' into a new ' + target.strip().capitalize()) if target.strip() else ''}."}
+            return result
+
+        if action == "key_press":
+            combo = target.strip().lower()
+            if not combo:
+                return {"success": False, "message": "What key should I press?"}
+            if "+" in combo:
+                result = dp.execute("keyboard_hotkey", target=combo)
+            else:
+                result = dp.execute("keyboard_press", target=combo)
+            if result.get("success"):
+                return {"success": True, "message": f"Pressed {combo.upper()}."}
+            return result
+
+        if action == "scroll":
+            direction = target.strip().lower()
+            if direction in ("down", "bottom"):
+                result = dp.execute("mouse_scroll", target="", clicks=-30)
+                label = "down" if direction == "down" else "to the bottom"
+            elif direction in ("up", "top"):
+                result = dp.execute("mouse_scroll", target="", clicks=30)
+                label = "up" if direction == "up" else "to the top"
+            else:
+                return {"success": False, "message": "Scroll which way?"}
+            if result.get("success"):
+                return {"success": True, "message": f"Scrolled {label}."}
+            return result
+
+        if action == "click":
+            # Only a click at the current cursor position is executable without
+            # vision. Named-element clicks are a truthful limitation.
+            result = dp.execute("mouse_click")
+            if result.get("success"):
+                return {"success": True, "message": "Clicked."}
+            return result
+
+        return {"success": False, "message": f"Unhandled desktop action: {action}"}
 
     def _reuse_running_app(self, target: str) -> Optional[dict]:
         """Duplicate prevention: if the requested native app is already running

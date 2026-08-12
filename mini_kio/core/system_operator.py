@@ -37,22 +37,51 @@ SYSTEM_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
 
 def is_workstation_locked() -> Optional[bool]:
     """Truthful lock-state detection (Windows). Returns True/False or None when
-    the state cannot be determined. Never guesses."""
+    the state cannot be determined. Never guesses.
+
+    Detection is anchored on the INPUT DESKTOP, not on a single window
+    handle:
+      - While the workstation is locked, the session's input desktop is the
+        secure (Winlogon) desktop. A user-mode process cannot open it as the
+        interactive input desktop, so OpenInputDesktop fails.
+      - While unlocked, the input desktop is the interactive "Default"
+        desktop and OpenInputDesktop succeeds.
+
+    GetForegroundWindow()==0 is deliberately NOT the primary signal: an
+    elevated process or a disconnected RDP session can see a NULL foreground
+    window even when the session is unlocked, which previously made "unlock"
+    report "not locked" while the screen was still locked.
+    """
     if not _IS_WINDOWS:
         return None
     try:
         import ctypes
         user32 = ctypes.windll.user32
-        # When the workstation is locked, GetForegroundWindow returns NULL and
-        # the input desktop is the secure desktop.
-        if user32.GetForegroundWindow() == 0:
-            # Cross-check: OpenInputDesktop returns NULL while locked.
-            hdesk = user32.OpenInputDesktop(0, False, 0x0100)  # DESKTOP_SWITCHDESKTOP
-            if hdesk:
-                user32.CloseDesktop(hdesk)
+        # OpenInputDesktop requires DESKTOP_READOBJECTS (0x0001) and
+        # DESKTOP_SWITCHDESKTOP (0x0100). Passing only DESKTOP_SWITCHDESKTOP
+        # fails with ERROR_ACCESS_DENIED even when unlocked, which would
+        # misreport an unlocked machine as locked.
+        hdesk = user32.OpenInputDesktop(0, False, 0x0101)
+        if hdesk:
+            try:
+                # Cross-check: the input desktop must be the interactive
+                # desktop. A few configurations allow opening the secure
+                # desktop handle; a Winlogon/secure name still means locked.
+                name = ctypes.create_unicode_buffer(64)
+                needed = ctypes.c_ulong()
+                if user32.GetUserObjectInformationW(
+                    hdesk, 2, name, 128, ctypes.byref(needed)
+                ):
+                    dname = (name.value or "").lower()
+                    if "winlogon" in dname or "secure" in dname:
+                        return True
                 return False
-            return True
-        return False
+            finally:
+                user32.CloseDesktop(hdesk)
+        # OpenInputDesktop failed: the workstation is locked (secure desktop
+        # active) or the session has no interactive input desktop (locked /
+        # disconnected). Both mean the machine is not in interactive use.
+        return True
     except Exception:
         return None
 
@@ -60,9 +89,13 @@ def is_workstation_locked() -> Optional[bool]:
 def unlock_system() -> dict:
     """Unlock flow that NEVER bypasses Windows authentication.
 
-    KIO cannot (and must not) defeat a password/PIN/Windows Hello. It reports
-    the truthful lock state and brings the user to the OS unlock surface;
-    only real OS state changes are reported as unlocked.
+    Distinguishes "unlock requested" from "system actually unlocked": only
+    real Windows state (verified via is_workstation_locked) may produce an
+    UNLOCKED report. While the workstation is verified LOCKED, KIO cannot
+    (and must not) defeat a password/PIN/Windows Hello — the OS lock screen
+    is the only unlock surface, so the truthful state is
+    AUTHENTICATION_REQUIRED with an instruction to sign in. Wake-on-LAN is
+    not Windows authentication and is never claimed as an unlock.
     """
     guard = _windows_only("Unlock")
     if guard:
@@ -79,8 +112,11 @@ def unlock_system() -> dict:
         # OS requires authentication; the lock screen is the unlock surface.
         return {
             "success": True,
-            "message": "The screen is locked — sign in to continue.",
-            "lock_state": "locked",
+            "message": (
+                "The screen is locked and Windows requires you to sign in — "
+                "I can't unlock it from here. Use your PIN or password to continue."
+            ),
+            "lock_state": "authentication_required",
         }
     return {
         "success": True,
@@ -90,7 +126,12 @@ def unlock_system() -> dict:
 
 
 def lock_state() -> dict:
-    """Read-only lock-state query (no side effects)."""
+    """Read-only lock-state query (no side effects).
+
+    Required states: LOCKED / UNLOCKED / UNKNOWN (AUTHENTICATION_REQUIRED is
+    the unlock-request semantic; a read-only query reports LOCKED when the
+    secure desktop is active).
+    """
     guard = _windows_only("Lock state")
     if guard:
         return guard

@@ -95,8 +95,25 @@ class MCPClient:
         self._closed = False
 
     def start(self) -> None:
+        """Begin MCP server connections WITHOUT blocking the caller.
+
+        Each server handshake (subprocess spawn + JSON-RPC initialize +
+        tools/list) can take up to the discovery timeout, and a cold
+        Windows boot can stretch a serialized run of all servers well past
+        a minute. Every connect now runs on its own daemon thread so KIO's
+        bootstrap and the deterministic local command path are never
+        blocked waiting on optional MCP infrastructure. Connections are
+        recorded on success; tools resolve lazily as each server becomes
+        ready, and a tool call against a not-yet-connected server fails
+        truthfully (MCPConnectionError) instead of blocking or guessing.
+        """
         for info in self._registry.list_servers():
-            self._connect(info)
+            threading.Thread(
+                target=self._connect,
+                args=(info,),
+                daemon=True,
+                name=f"kio-mcp-connect-{info.server_type}",
+            ).start()
 
     def stop(self) -> None:
         with self._lock:

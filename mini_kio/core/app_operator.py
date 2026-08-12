@@ -1364,6 +1364,129 @@ def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
         return False
 
 
+# System/shell/security binaries that must NEVER be terminated by the
+# close-all-applications scope. Same filtering philosophy as the desktop
+# observation layer plus the restricted-target gate. Browsers ARE user
+# applications and are included in the close scope; system chrome is not.
+def _close_all_forbidden_exes() -> frozenset[str]:
+    from mini_kio.core.desktop_state import _SYSTEM_SHELL_EXES, _SKIP_WRAPPER_EXES
+    return _SYSTEM_SHELL_EXES | _SKIP_WRAPPER_EXES | frozenset({
+        "winlogon.exe", "csrss.exe", "lsass.exe", "services.exe", "smss.exe",
+        "svchost.exe", "fontdrvhost.exe", "dwm.exe", "wininit.exe",
+        "MsMpEng.exe", "NisSrv.exe", "SecurityHealthService.exe",
+        "WdNisSvc.exe", "MsSense.exe",
+    })
+
+
+def _fmt_close_all_names(names: list[str]) -> str:
+    """['A', 'B', 'C'] -> 'A, B, and C'; ['A', 'B'] -> 'A and B'."""
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+def close_all_user_apps() -> dict:
+    """Close every user-session application currently showing a window.
+
+    Semantic representation: CLOSE / SCOPE=ALL_APPLICATIONS (current user
+    session). Implemented generically on the existing desktop-observation
+    and application-control architecture — never routed through browser
+    discovery, never a blind system-wide process sweep.
+
+    Safety: Windows system processes, services, shell components, drivers,
+    security software and KIO itself (including KIO's own child processes)
+    are never terminated. After the close pass the desktop is re-observed
+    and the report is truthful: exactly what closed, what couldn't close,
+    and what remains open.
+    """
+    from mini_kio.core.desktop_state import observe_native_windows
+
+    # 1. Observe the desktop: visible user-app windows with owning pids.
+    windows, ok = observe_native_windows()
+    if not ok:
+        return {"success": False, "message": "I couldn't read the desktop to close applications."}
+    if not windows:
+        return {"success": True, "message": "Nothing was open to close.", "closed": [], "remaining": []}
+
+    forbidden = _close_all_forbidden_exes()
+    self_pid = os.getpid()
+    # KIO's own process family (the bot, MCP server children) must survive.
+    kio_family: set[int] = {self_pid}
+    try:
+        import psutil
+        proc = psutil.Process(self_pid)
+        kio_family |= {c.pid for c in proc.children(recursive=True)}
+    except Exception:
+        pass
+
+    targets: dict[int, str] = {}  # pid -> app display name (dedupe by pid)
+    for w in windows:
+        pid = int(w.get("pid", 0) or 0)
+        base = str(w.get("base") or "").lower()
+        if pid <= 0 or pid in kio_family:
+            continue
+        if base and (base + ".exe") in forbidden:
+            continue
+        if base and base in _RESTRICTED_CANONICAL_TARGETS:
+            continue
+        targets.setdefault(pid, str(w.get("app") or w.get("base") or "Application"))
+
+    if not targets:
+        return {"success": True, "message": "Nothing open that I should close.", "closed": [], "remaining": []}
+
+    # 2. Close each target at its own application scope (graceful-first,
+    #    verified — the same canonical owner a single close uses).
+    closed: list[str] = []
+    failed: list[str] = []
+    for pid, app in targets.items():
+        try:
+            result = close_app(app, pid=pid)
+            if result.get("success"):
+                closed.append(app)
+            else:
+                failed.append(app)
+        except Exception as exc:
+            logger.warning("[APP] close-all step failed for %s (%s): %s", app, pid, exc)
+            failed.append(app)
+
+    # 3. Re-observe and report truthfully: what actually closed vs remains.
+    remaining: list[str] = []
+    windows2, ok2 = observe_native_windows()
+    if ok2:
+        seen: set[int] = set()
+        for w in windows2:
+            pid = int(w.get("pid", 0) or 0)
+            if pid in seen or pid <= 0 or pid in kio_family:
+                continue
+            base = str(w.get("base") or "").lower()
+            if base and (base + ".exe") in forbidden:
+                continue
+            if base and base in _RESTRICTED_CANONICAL_TARGETS:
+                continue
+            seen.add(pid)
+            remaining.append(str(w.get("app") or w.get("base") or "Application"))
+
+    parts: list[str] = []
+    if closed:
+        parts.append("Closed " + _fmt_close_all_names(closed) + ".")
+    if failed:
+        parts.append("Couldn't close " + _fmt_close_all_names(failed) + ".")
+    if remaining:
+        parts.append("Still open: " + _fmt_close_all_names(remaining) + ".")
+    message = " ".join(parts) if parts else "Done."
+    return {
+        "success": not failed,
+        "message": message,
+        "closed": closed,
+        "failed": failed,
+        "remaining": remaining,
+    }
+
+
 def close_app(name: str, pid: Optional[int] = None) -> dict:
     """Kill an application.  Returns {"success": bool, "message": str}."""
     key = name.lower().strip()
@@ -1876,8 +1999,14 @@ def _find_matching_process_pid(key: str, info: Optional[Dict], *, exclude: set[i
     try:
         import psutil
 
+        # PERFORMANCE (system-level): the base scan must NOT fetch 'cmdline'
+        # for every process. psutil.process_iter with cmdline costs ~1s on a
+        # busy desktop vs ~0.01s without; cmdline is only needed for browser
+        # helper-root detection, which happens per-pid lazily below
+        # (_proc_is_browser_helper fetches it on demand). This single change
+        # removes the shared open/close/verify latency bottleneck.
         matches: list[tuple[float, int]] = []
-        for proc in psutil.process_iter(['pid', 'name', 'create_time', 'cmdline']):
+        for proc in psutil.process_iter(['pid', 'name', 'create_time']):
             try:
                 proc_name = (proc.info.get("name") or "").lower()
                 if proc.info['pid'] in exclude or proc_name not in names:

@@ -151,7 +151,24 @@ def _br_close_tab(target: str) -> dict:
 
 
 def _check_br_available() -> bool:
-    return _use_browser_runtime()
+    # PERFORMANCE (system-level): this probe gates browser-tab fallback paths
+    # in close/focus/open handling. It must be a FAST state check — returning
+    # True only when the BrowserRuntime is ALREADY started — and must NEVER
+    # trigger a multi-second Playwright start attempt. Real browser opens
+    # (browser_goto / execute_capability) start the runtime on demand through
+    # their own handler; availability probes in deterministic fallback chains
+    # must not pay that cost when the browser is simply down.
+    try:
+        from mini_kio.core.runtime import get_runtime
+        rt = get_runtime()
+        if rt is None:
+            return False
+        br = getattr(rt, "browser_runtime", None)
+        if br is None:
+            return False
+        return bool(getattr(br, "_started", False))
+    except Exception:
+        return False
 
 
 _CONNECTOR_MODULES_LOADED = False
@@ -280,12 +297,54 @@ def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]])
     return text
 
 
+# Desktop-action step family (multi-step chains like "open notepad and type
+# hello and save"). Each wording converges on the SAME canonical desktop
+# executor the single-step classifier uses (_exec_desktop_action) — never a
+# separate per-phrase handler. Shortcut words normalize to their canonical
+# key combos.
+_DESKTOP_STEP_SHORTCUT_COMBOS = {
+    "save": "ctrl+s", "copy": "ctrl+c", "paste": "ctrl+v",
+    "select": "ctrl+a", "undo": "ctrl+z", "redo": "ctrl+y",
+}
+
+
+def _run_desktop_action_step(action: str, target: str) -> dict:
+    """Run one desktop-action step through the canonical desktop executor."""
+    from mini_kio.core.pipeline import _ExecutionCoordinator
+
+    canonical = action
+    if action in ("press", "hit", "tap"):
+        canonical = "key_press"
+    elif action == "write":
+        canonical = "type"
+    elif action in _DESKTOP_STEP_SHORTCUT_COMBOS:
+        canonical = "key_press"
+
+    params: dict[str, Any] = {"action": canonical, "target": target, "metadata": {}}
+    if canonical == "type":
+        # "type hello" -> payload "hello" typed into the current focus
+        # (the previous step usually opened/focused the target window).
+        params["metadata"]["payload"] = target
+        params["target"] = ""
+    elif canonical == "key_press" and action in _DESKTOP_STEP_SHORTCUT_COMBOS:
+        # "save" -> ctrl+s, "copy" -> ctrl+c, ... unless the user gave an
+        # explicit combo ("press ctrl+s" carries its own target).
+        params["target"] = _DESKTOP_STEP_SHORTCUT_COMBOS[action]
+
+    try:
+        return _ExecutionCoordinator()._exec_desktop_action(params, None)
+    except Exception as exc:
+        logger.exception("[MULTI] desktop-action step %s crashed: %s", action, exc)
+        return {"success": False, "message": f"Couldn't {action}: {exc}"}
+
+
 def _run_single_step(action: str, target: str) -> dict:
     """Run ONE step of a multi-action request with per-step verification.
 
     Every step is executed independently through the same authoritative path a
     single command uses (open -> capability/native routing + verification,
-    close -> tab-aware close, play -> MediaManager, else execute_action).
+    close -> tab-aware close, play -> MediaManager, desktop actions -> the
+    canonical desktop executor, else execute_action).
     """
     from mini_kio.core.execution_boundary import execute_action
     from mini_kio.core.async_utils import safe_run_async
@@ -368,6 +427,17 @@ def _run_single_step(action: str, target: str) -> dict:
             return {"success": True, "message": str(play_result), "action": action, "target": target}
         except Exception as exc:
             return {"success": False, "message": f"Playback failed: {exc}", "action": action, "target": target}
+
+    # Desktop-action family: type / press / hit / tap / save / copy / paste /
+    # select / undo / redo / scroll / click (incl. "write" alias). These must
+    # reach the canonical desktop-action executor — never the execution
+    # boundary, whose "type"/"click"/"scroll" aliases mean BROWSER DOM
+    # operations.
+    if action in {
+        "type", "write", "press", "hit", "tap", "save", "copy", "paste",
+        "select", "undo", "redo", "scroll", "click",
+    }:
+        return _run_desktop_action_step(action, target)
 
     return execute_action(action, target)
 

@@ -42,7 +42,9 @@ _FOLDER_KEYWORDS = {
 
 _VERBS = {
     "open", "close", "shut", "quit", "kill", "end", "search", "type",
-    "launch", "folder", "play", "lock", "shutdown", "restart", "focus", "switch"
+    "launch", "folder", "play", "lock", "shutdown", "restart", "focus", "switch",
+    "press", "hit", "tap", "write", "put", "enter", "save", "copy", "paste",
+    "scroll", "select", "undo", "redo", "click", "bring", "go",
 }
 
 _PLATFORM_MARKERS = {"spotify", "youtube", "google", "edge", "chrome", "comet", "firefox", "brave"}
@@ -290,11 +292,30 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
             return {}
         return {"action": "close", "target": target}
 
-    # ── SWITCH / FOCUS ────────────────────────────────────────────────────────
+    # ── SWITCH / FOCUS / BRING / GO BACK ────────────────────────────────────
     if action == "switch":
         if target.startswith("to "):
             target = target[3:].strip()
         return {"action": "focus", "target": target}
+    if action == "bring":
+        # "bring discord up" / "bring notepad forward" -> focus
+        target = re.sub(r"\s+(?:up|forward|to\s+the\s+front)\s*$", "", target, flags=re.I).strip()
+        return {"action": "focus", "target": target}
+    if action == "go":
+        # "go back to notepad" -> focus notepad
+        m = re.match(r"^back\s+to\s+(.+)$", target, re.I)
+        if m:
+            return {"action": "focus", "target": m.group(1).strip()}
+        return {"action": action, "target": target}
+
+    # ── DESKTOP ACTIONS (multi-step chains: "open X and type hello and save")
+    #    Route to the canonical desktop-action owner; the target is the raw
+    #    payload the executor interprets (key combo / text / scroll dir).
+    if action in ("type", "write", "press", "hit", "tap", "save", "copy",
+                  "paste", "scroll", "select", "undo", "redo", "click"):
+        if action == "write":
+            action = "type"
+        return {"action": action, "target": target}
 
     # ── SEARCH ────────────────────────────────────────────────────────────────
     if action == "search":
@@ -352,8 +373,14 @@ def _parse_single_step(text: str) -> Dict[str, Any]:
             return {}
         return {"action": "folder", "target": target}
 
-    # Unknown action — pass through for AI fallback or policy handling
-    if not target and action not in {"shutdown", "restart", "lock"}:
+    # Unknown action — pass through for AI fallback or policy handling.
+    # Desktop-action verbs may legitimately have no target ("save", "copy",
+    # "paste", "undo", "redo", "select", "scroll", "click", bare "type").
+    if not target and action not in {
+        "shutdown", "restart", "lock", "save", "copy", "paste", "undo",
+        "redo", "select", "scroll", "click", "type", "press", "hit",
+        "tap", "write", "put", "enter",
+    }:
         return {}
     return {"action": action, "target": target}
 

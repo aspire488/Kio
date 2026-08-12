@@ -213,6 +213,20 @@ IDENTITY_ENTRIES: list[dict] = [
             "can you remember our chats",
         ],
     },
+    # ── Self-Evaluation (1) — bounded to memory/capability self-assessment
+    # (doctrine: honest self-assessment). NOT the bare "how good are you at X"
+    # which is an ability question (e.g. "how good are you at math") that the
+    # conversation/knowledge path answers, not a memory self-evaluation.
+    {
+        "id": "self_evaluation_abilities",
+        "triggers": [
+            "how good is your memory",
+            "how good are you at remembering",
+            "how well do you remember",
+            "how good are your listening skills",
+            "how good are your typing skills",
+        ],
+    },
     # ── Difference (2) ──────────────────────────────────────────────────
     {
         "id": "difference_what_makes",

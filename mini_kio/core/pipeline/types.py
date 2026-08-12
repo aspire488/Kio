@@ -29,6 +29,7 @@ class IntentType(enum.Enum):
     FILE = "file"
     MCP = "mcp"
     CREDENTIAL = "credential"
+    DESKTOP_ACTION = "desktop_action"
 
 
 @dataclass
