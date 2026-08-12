@@ -2518,17 +2518,16 @@ class _ExecutionCoordinator:
         # Doctrine Section 6/8: personality persists; modeled preferences are
         # stable character data (never random per-call), injected from the
         # canonical character authority so KIO's taste does not flip between
-        # conversations.
-        try:
-            from mini_kio.llm.KIO_character_knowledge import resolve_modeled_preferences
-            _prefs = resolve_modeled_preferences()
-            if _prefs:
-                parts.append(
-                    "KIO stable modeled preferences (keep these consistent, never random):\n"
-                    + "\n".join(f"- {p}" for p in _prefs)
-                )
-        except Exception:
-            pass
+        # conversations. The module is pure data (no deps), so the import is
+        # unconditional — the prompt must never promise content that can be
+        # absent.
+        from mini_kio.llm.KIO_character_knowledge import resolve_modeled_preferences
+        _prefs = resolve_modeled_preferences()
+        if _prefs:
+            parts.append(
+                "KIO stable modeled preferences (keep these consistent, never random):\n"
+                + "\n".join(f"- {p}" for p in _prefs)
+            )
 
         try:
             if ctx is not None:
