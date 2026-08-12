@@ -304,7 +304,8 @@ def _summarize_steps(steps: list[dict[str, Any]], results: list[dict[str, Any]])
 # key combos.
 _DESKTOP_STEP_SHORTCUT_COMBOS = {
     "save": "ctrl+s", "copy": "ctrl+c", "paste": "ctrl+v",
-    "select": "ctrl+a", "undo": "ctrl+z", "redo": "ctrl+y",
+    "select": "ctrl+a", "select_all": "ctrl+a",
+    "undo": "ctrl+z", "redo": "ctrl+y",
 }
 
 
@@ -317,8 +318,6 @@ def _run_desktop_action_step(action: str, target: str) -> dict:
         canonical = "key_press"
     elif action == "write":
         canonical = "type"
-    elif action in _DESKTOP_STEP_SHORTCUT_COMBOS:
-        canonical = "key_press"
 
     params: dict[str, Any] = {"action": canonical, "target": target, "metadata": {}}
     if canonical == "type":
@@ -326,10 +325,15 @@ def _run_desktop_action_step(action: str, target: str) -> dict:
         # (the previous step usually opened/focused the target window).
         params["metadata"]["payload"] = target
         params["target"] = ""
-    elif canonical == "key_press" and action in _DESKTOP_STEP_SHORTCUT_COMBOS:
-        # "save" -> ctrl+s, "copy" -> ctrl+c, ... unless the user gave an
-        # explicit combo ("press ctrl+s" carries its own target).
-        params["target"] = _DESKTOP_STEP_SHORTCUT_COMBOS[action]
+    elif action in _DESKTOP_STEP_SHORTCUT_COMBOS:
+        # Semantic edit actions ("save", "copy", "paste", "select all",
+        # "undo", "redo") keep their semantic name at the intent layer and
+        # carry the key combo in metadata — the executor resolves the
+        # contextual target and verifies the real result. Explicit "press
+        # ctrl+s" (action=key_press with its own target) stays literal.
+        params["action"] = action
+        params["metadata"]["combo"] = _DESKTOP_STEP_SHORTCUT_COMBOS[action]
+        params["target"] = ""
 
     try:
         return _ExecutionCoordinator()._exec_desktop_action(params, None)
@@ -435,7 +439,7 @@ def _run_single_step(action: str, target: str) -> dict:
     # operations.
     if action in {
         "type", "write", "press", "hit", "tap", "save", "copy", "paste",
-        "select", "undo", "redo", "scroll", "click",
+        "select", "select_all", "undo", "redo", "scroll", "click",
     }:
         return _run_desktop_action_step(action, target)
 

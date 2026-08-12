@@ -500,11 +500,83 @@ def _windows_apps_alias(name: str) -> Optional[str]:
     return None
 
 
+# Generic UWP (Store) app discovery via Get-StartApps — cached, bounded.
+# This is what makes "open camera" resolve the NATIVE Windows Camera app
+# (Microsoft.WindowsCamera) instead of synthesizing camera.com: UWP apps are
+# not registered in App Paths, have no Start-Menu .lnk, and their WindowsApps
+# aliases are not always materialized as files.
+_UWP_APPS_CACHE: dict = {"ts": 0.0, "apps": [], "failed_ts": 0.0}
+_UWP_APPS_CACHE_TTL = 120.0
+_UWP_APPS_FAIL_RETRY = 30.0
+
+
+def _uwp_start_apps() -> list[tuple[str, str]]:
+    """Installed Start-apps as (display_name, AUMID) pairs, cached 120s.
+
+    Failures are also cached (shorter retry window) so a single hung/failed
+    PowerShell call can never become a retry storm on the open-app hot path.
+    """
+    import time as _t
+    now = _t.time()
+    if now - _UWP_APPS_CACHE["ts"] < _UWP_APPS_CACHE_TTL and _UWP_APPS_CACHE["apps"]:
+        return list(_UWP_APPS_CACHE["apps"])
+    if _UWP_APPS_CACHE["failed_ts"] and now - _UWP_APPS_CACHE["failed_ts"] < _UWP_APPS_FAIL_RETRY:
+        return list(_UWP_APPS_CACHE["apps"])
+    apps: list[tuple[str, str]] = []
+    failed = False
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-StartApps | ForEach-Object { $_.Name + '|' + $_.AppID }"],
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
+        )
+        for line in (r.stdout or "").splitlines():
+            line = line.strip()
+            if "|" in line:
+                display, aumid = line.split("|", 1)
+                display, aumid = display.strip(), aumid.strip()
+                if display and aumid:
+                    apps.append((display, aumid))
+    except Exception:
+        apps = []
+        failed = True
+    _UWP_APPS_CACHE["ts"] = _t.time()
+    _UWP_APPS_CACHE["apps"] = apps
+    _UWP_APPS_CACHE["failed_ts"] = _t.time() if failed else 0.0
+    return list(apps)
+
+
+def _uwp_app_discovery(name: str) -> Optional[Dict]:
+    """Resolve a UWP/Store app by display-name match (generic, cached).
+
+    Returns {"kind": "uwp", "target": <AUMID>, "display": <display>} or None.
+    Containment matching reuses the same guarded identity matcher as the rest
+    of discovery (>=4 chars), so "camera" resolves Windows Camera but a short
+    fragment never over-matches. No application-specific branches.
+    """
+    if not _IS_WINDOWS or not name:
+        return None
+    norm = name.lower().strip()
+    if len(norm) < 3:
+        return None
+    best: Optional[tuple[int, str, str]] = None
+    for display, aumid in _uwp_start_apps():
+        if _discovery_match(norm, display):
+            score = -abs(len(display) - len(norm))  # closer length wins
+            if best is None or score > best[0]:
+                best = (score, display, aumid)
+    if best:
+        return {"kind": "uwp", "target": best[2], "display": best[1], "name": name.strip()}
+    return None
+
+
 def _find_installed_app(name: str) -> Optional[Dict]:
     """Generic Windows installed-application discovery (no hard-coded list).
 
     Returns a launch descriptor or None. Arbitrary installed GUI apps are
-    discoverable through the same mechanism.
+    discoverable through the same mechanism. UWP/Store apps resolve through
+    the Start-apps AUMID source, keeping native-first true for apps that have
+    no exe path, registry entry, or Start-Menu shortcut.
     """
     if not _IS_WINDOWS or not name:
         return None
@@ -522,6 +594,12 @@ def _find_installed_app(name: str) -> Optional[Dict]:
     alias = _windows_apps_alias(norm)
     if alias:
         return {"kind": "exe", "target": alias, "display": name.strip()}
+    # Native-first must stay true for UWP apps (Camera, Photos, Store...) that
+    # never materialize an exe/lnk/alias — resolve their AUMID and launch the
+    # native app instead of silently opening the website.
+    uwp = _uwp_app_discovery(norm)
+    if uwp:
+        return uwp
     return None
 
 
@@ -643,7 +721,17 @@ def _launch_discovered(desc: Dict, name: str) -> dict:
     kind = desc.get("kind")
     target = desc.get("target", "")
     result = None
-    if kind == "shortcut" and target:
+    if kind == "uwp" and target:
+        # Launch a UWP/Store app by AUMID (e.g. Windows Camera). explorer.exe
+        # shell:AppsFolder\<AUMID> is the canonical, dependency-free launch
+        # mechanism. The app runs under ApplicationFrameHost, so PID capture is
+        # not meaningful — verification_mode stays honest ("shell").
+        try:
+            subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{target}"])
+            result = {"success": True, "message": f"Opened {name}", "verification_mode": "shell"}
+        except Exception as exc:
+            return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
+    elif kind == "shortcut" and target:
         try:
             os.startfile(target)
             result = {"success": True, "message": f"Opened {name}", "verification_mode": "shell"}

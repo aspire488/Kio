@@ -322,10 +322,15 @@ class KnowledgeRouter:
                 "HIGHLIGHTS": ["Exa", "Tavily", "Wikipedia", "DuckDuckGo"],
                 "GENERAL": ["Exa", "Tavily", "Wikipedia", "DuckDuckGo"],
             }
-            order = _sports_mode_order.get(mode, ["DuckDuckGo"])
+            # Same fallback guarantee as the general path: Wikipedia is the
+            # evergreen safety net when the configured web providers fail.
+            order = _sports_mode_order.get(mode, ["DuckDuckGo", "Wikipedia"])
             logger.info("[SPORTS_SOURCE_USED] mode=%s provider_order=%s", mode, order)
         else:
-            order = _TOPIC_PROVIDER_ORDER.get(topic, ["DuckDuckGo"])
+            # General fallback: DuckDuckGo then Wikipedia, so a DDG failure
+            # (e.g. provider/network issue) still yields grounded material
+            # instead of returning nothing. Wikipedia is the evergreen source.
+            order = _TOPIC_PROVIDER_ORDER.get(topic, ["DuckDuckGo", "Wikipedia"])
 
         for name in order:
             fn = _PROVIDER_DISPATCH.get(name)
@@ -340,6 +345,18 @@ class KnowledgeRouter:
                     res = duckduckgo_provider.search(text, timelimit="m")
                 else:
                     res = fn(text)
+                # Wikipedia often needs a distilled topic: the raw query may
+                # be long/comparative ("KTU 2024 scheme vs KTU 2019 scheme")
+                # and fail topic search. Retry with the extracted topic so
+                # the evergreen fallback actually yields material.
+                if not res and name == "Wikipedia":
+                    try:
+                        from mini_kio.llm.conversation_context import ConversationContext
+                        topic_hint = ConversationContext._extract_topic(text)
+                        if topic_hint and topic_hint.lower() != text.lower():
+                            res = fetch_summary(topic_hint)
+                    except Exception:
+                        pass
                 if res:
                     logger.info("[RETRIEVAL_SOURCE] provider=%s topic=%s query=%s",
                                 name.lower(), topic, text)

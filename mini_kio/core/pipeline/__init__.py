@@ -32,6 +32,39 @@ def _bad_kio_reply(reply: str) -> bool:
 # invented address the model must never emit.
 _KNOWN_USER_NAMES = frozenset({"joel", "kio"})
 
+# Casual/greeting/social fragments that must NEVER be treated as proper-noun
+# entities. Message-initial capitalization is a writing convention, not
+# entity evidence — "Yoo!", "Lol", "Wow" typed with a capital initial used to
+# hit the ENTITY_QUERY capitalization heuristic and were sent to media/
+# retrieval (the live "Yoo" -> unrelated UFC biography bug). Derived from the
+# classifier's greeting/social vocabulary so future additions stay
+# consistent; the extra exclamations cover the observed leak family.
+_CASUAL_FRAGMENTS = frozenset(
+    {"yoo", "yooo", "yooooo", "yo", "hey", "heyy", "hi", "hii", "hello",
+     "sup", "wassup", "whassup", "lol", "lmao", "rofl", "haha", "hahaha",
+     "damn", "damm", "wow", "woww", "cool", "nice", "okay", "ok", "kk",
+     "alright", "aight", "thanks", "thank", "ty", "thx", "k", "bro", "broo",
+     "dude", "bruh", "omg", "hmm", "huh", "oh", "ah", "um", "uh",
+     "yeah", "yep", "yup", "nope", "nah", "good", "great", "fine", "sure",
+     "welp", "phew", "yikes", "ouch", "oops", "nicee", "awsome", "amazing"}
+)
+
+
+_REPEATED_CHAR_RE = re.compile(r"(.)\1+")
+
+
+def _casual_normalized(word: str) -> str:
+    """Fold casual repetition before membership testing.
+
+    "Yoooooo" -> "yo", "Heeeey" -> "hey", "Wooow" -> "wow", "Lool" ->
+    "lol": speakers stretch vowels/letters for emphasis; the entity heuristic
+    must not treat that as proper-noun evidence. The membership test only
+    fires when the COLLAPSED form is a known casual fragment — no genuine
+    entity collapses into a casual set member ("Messi"->"mesi" is not a
+    fragment, so "Messi" still routes to entity_query).
+    """
+    return _REPEATED_CHAR_RE.sub(r"\1", word)
+
 
 def _sanitize_llm_name_address(reply: str) -> str:
     """Generic anti-fabrication guard for LLM conversational output.
@@ -245,6 +278,10 @@ class _IntentClassifier:
         "what's": "what is", "whats": "what is",
         "you're": "you are", "youre": "you are",
         "i'm": "i am", "im": "i am",
+        # Informal KIO possessive ("kios status", "kios health", "kios
+        # uptime") canonicalizes to kio's so the KIO-self operational
+        # families match deterministically instead of leaking to identity.
+        "kios": "kio's",
     }
     _CASUAL_EXPANSIONS: dict[str, str] = {
         "u": "you", "ur": "your", "ya": "you", "yea": "yes",
@@ -484,6 +521,17 @@ class _IntentClassifier:
         cls = self._classify_context_followup(lower, text)
         if cls:
             return cls
+
+        # Camera capability (small, generic): "take a picture", "capture a
+        # photo", "open the camera and take a photo". Routes to the camera
+        # desktop capability whose executor resolves the NATIVE installed
+        # camera application (never a .com website) and — where the provider
+        # can genuinely trigger and verify a capture — does so truthfully.
+        # Detection runs after deterministic system/state families and before
+        # conversation so camera intent never leaks to the LLM or web.
+        camera_routing = self._detect_camera(lower, text)
+        if camera_routing:
+            return camera_routing
 
         cls = self._classify_entity_query(lower, text, raw_text)
         if cls:
@@ -881,7 +929,7 @@ class _IntentClassifier:
         # article and a trailing qualifier ("the winrar app" -> "winrar",
         # "open up the winrar app" -> "winrar"). This is a semantic family
         # rule, not per-app phrasing.
-        target = re.sub(r"^(?:the|a|an)\s+", "", target.strip(), flags=re.IGNORECASE)
+        target = re.sub(r"^(?:the|a|an|my|your)\s+", "", target.strip(), flags=re.IGNORECASE)
         target = re.sub(r"\s+(?:app|application|program|software)\s*$", "", target, flags=re.IGNORECASE).strip()
         if not target:
             return None
@@ -1001,22 +1049,147 @@ class _IntentClassifier:
         "casting", "error", "errors", "blood", "diabetes", "cancer",
     })
 
+    _CAMERA_CAPTURE_RE = re.compile(
+        r"^(?:open\s+(?:the\s+)?camera\s+(?:and\s+)?)?"
+        r"(?:take|shoot|snap|capture|get|click)\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:picture|photo|photograph|selfie|shot|image)\s*"
+        r"(?:with\s+(?:the\s+|my\s+)?camera)?\s*$",
+        re.IGNORECASE,
+    )
+    _CAMERA_OPEN_RE = re.compile(
+        r"^(?:open|launch|start|fire\s+up|turn\s+on)\s+(?:the\s+|my\s+)?"
+        r"(?:camera|webcam)\s*$",
+        re.IGNORECASE,
+    )
+
+    def _detect_camera(self, lower, text):
+        """Camera semantic family (generic, no app-specific branches).
+
+        - "open the camera" / "launch my camera" → camera open (native).
+        - "take a picture" / "capture a photo" / "take a photo with the
+          camera" → camera capture.
+        The executor resolves the native installed camera (UWP discovery)
+        and reports the REAL result; capture is only claimed when the
+        provider genuinely triggered and verified it.
+        """
+        if self._CAMERA_CAPTURE_RE.match(lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "camera", "capture", text, lower,
+                confidence=1.0, metadata={"camera_action": "capture"},
+            )
+        if self._CAMERA_OPEN_RE.match(lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "camera", "open", text, lower,
+                confidence=1.0, metadata={"camera_action": "open"},
+            )
+        return None
+
     def _detect_desktop_action(self, lower, text):
         # ── TYPE family: "type hello into Notepad", "write this in Notepad",
         #    "put hello into the current field", "enter my name" ─────────────
+        #    A payload that REQUESTs content ("a short poem about X", "a
+        #    three-point summary") is a GENERATED-content task: the LLM creates
+        #    the content, the deterministic desktop provider types it. A plain
+        #    literal payload ("hello", "my name is Joel") is typed verbatim.
+        # Artifact-first phrasing: "do a small comparison on X and Y and type
+        # it into notepad" / "make a comparison between A and B and put it in
+        # the editor". The artifact request becomes the GENERATED payload;
+        # the trailing "and type it into <target>" clause carries the app.
         m = re.match(
-            r"^(?:type|write|put|enter)\s+(.+?)\s+(?:into|in)\s+(.+)$",
+            r"^(?:do|make|write|draft|create|generate)\s+(?:a|an|the)?\s*"
+            r"(?:small|short|quick|brief|detailed|concise|real|proper|full|simple|professional|formal)?\s*"
+            r"(comparison|essay|report|summary|analysis|review|article|poem|story|letter|email|overview|guide|write-up)\s+"
+            r"(?:(?:on|about|of|between|comparing)\s+(.+?)\s+)?"
+            r"(?:and\s+)?(?:then\s+)?(?:type|put|enter|paste)\s+(?:it|that|this)?\s*"
+            r"(?:(?:into|in|onto|on\s+to)\s*){1,2}\s*(?:a\s+)?(?:new\s+)?(.+)$",
+            lower,
+        )
+        if m and self._looks_like_generated_content(
+            f"a {m.group(1)} on {m.group(2) or 'it'}"
+        ):
+            artifact = m.group(1)
+            topic = (m.group(2) or "").strip()
+            app = m.group(3).strip()
+            app_lower = app.lower().rstrip(".")
+            m_new = re.match(r"^(?:a|an|the)?\s*(?:new|another|fresh)\s+(.+)$", app_lower)
+            new_instance = bool(m_new)
+            if m_new:
+                app_lower = m_new.group(1).strip()
+            app_lower = re.sub(r"\s+(?:file|window|document|doc|tab|app)\s*$", "", app_lower)
+            app_lower = re.sub(r"^the\s+", "", app_lower)
+            # A GENERIC document target ("put it in a new document/file") with
+            # no real application named is a DOCUMENT-CREATION request, not a
+            # keystroke TYPE: the canonical document operator writes a real
+            # artifact. Only when a concrete app (notepad/word/...) is named
+            # does TYPE-into-app apply.
+            if app_lower in ("document", "doc", "file", "text", "note", "notes", "editor"):
+                subject = topic or artifact
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+                    confidence=1.0,
+                    metadata={"artifact": artifact, "style": "", "subject": subject},
+                )
+            if app_lower not in self._TYPE_TARGET_LANGUAGES:
+                payload = f"a {artifact}" + (f" on {topic}" if topic else "")
+                metadata = {
+                    "payload": payload,
+                    "generate": True,
+                }
+                if new_instance:
+                    metadata["new_instance"] = True
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "type", app_lower, text, lower,
+                    confidence=1.0,
+                    metadata=metadata,
+                )
+            return None
+
+        m = re.match(
+            r"^(?:type|write|put|enter|paste)\s+(.+?)\s+"
+            r"(?:(?:into|in|onto|on\s+to)\s*){1,2}\s*(.+)$",
             lower,
         )
         if m:
             payload, app = m.group(1).strip(), m.group(2).strip()
+            # Target normalization: "a new notepad file", "another editor",
+            # "a fresh document" -> base app "notepad"/"editor" + a flag that a
+            # NEW document must be opened (KIO never tampers with existing
+            # content unless the user explicitly asks to write onto it).
             app_lower = app.lower().rstrip(".")
+            new_instance = False
+            m_new = re.match(r"^(?:a|an|the)?\s*(?:new|another|fresh)\s+(.+)$", app_lower)
+            if m_new:
+                new_instance = True
+                app_lower = m_new.group(1).strip()
+            # Trailing artifact nouns: "notepad file", "editor window",
+            # "word document" -> "notepad"/"editor".
+            app_lower = re.sub(r"\s+(?:file|window|document|doc|tab|app)\s*$", "", app_lower)
             if app_lower not in self._TYPE_TARGET_LANGUAGES:
+                metadata = {
+                    "payload": payload,
+                    "generate": self._looks_like_generated_content(payload),
+                }
+                # New-document default lives in the EXECUTOR (True unless the
+                # user explicitly asks to write onto the existing file). The
+                # classifier only overrides when wording explicitly requests a
+                # fresh instance.
+                if new_instance:
+                    metadata["new_instance"] = True
                 return RoutingDecision(
-                    IntentType.DESKTOP_ACTION, "type", app, text, lower,
-                    confidence=1.0, metadata={"payload": payload},
+                    IntentType.DESKTOP_ACTION, "type", app_lower, text, lower,
+                    confidence=1.0,
+                    metadata=metadata,
                 )
             return None
+        # ── DOCUMENT-CREATION family: "create a Word document about X",
+        #    "make a Word file comparing X and Y", "create a report on X".
+        #    Generic artifact semantics: subject + artifact kind + style are
+        #    extracted; content is generated (LLM) and the document is written
+        #    by the canonical document operator — never fake typing into Word.
+        doc_routing = self._detect_document_creation(lower, text)
+        if doc_routing:
+            return doc_routing
+
         # Bare TYPE into the current focus — knowledge-shape guarded, so
         # "type 2 diabetes", "type of cancer", "type b blood" and single-noun
         # concepts ("type coercion") stay on the knowledge path, while any
@@ -1063,39 +1236,74 @@ class _IntentClassifier:
                 text, lower, confidence=1.0,
             )
 
-        # ── Shortcut family: normalize wording → canonical key combos ───────
-        # "save this"/"save the file" → ctrl+s; "copy that" → ctrl+c;
-        # "paste it here" → ctrl+v; "select all" → ctrl+a; undo/redo.
-        if re.fullmatch(r"save(?:\s+(?:this|the\s+file|it|that|file|document))?", lower):
+        # ── Shortcut family: SEMANTIC edit actions (not mechanical keys) ────
+        # "save this"/"save the file" → SAVE; "copy that" → COPY;
+        # "paste it here" → PASTE; "select all" → SELECT_ALL; undo/redo.
+        # The semantic action is preserved at the intent layer (target
+        # resolution + focus + verification happen in the executor); the key
+        # combo lives in metadata and only becomes a KEY_PRESS at the provider
+        # layer. Explicit "press ctrl+s" stays a literal key_press above.
+        #
+        # Natural variants converge through the same family: "copy the selected
+        # text", "select everything in notepad", "save the document". A
+        # trailing "in/into/on <app>" target is carried in metadata so the
+        # executor focuses that window before the key event.
+        def _edit_decision(action, combo, app=""):
             return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+s", text, lower,
-                confidence=1.0,
+                IntentType.DESKTOP_ACTION, action, app, text, lower,
+                confidence=1.0, metadata={"combo": combo},
             )
-        if re.fullmatch(r"copy(?:\s+(?:this|that|it|the\s+selection|selection))?", lower):
-            return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+c", text, lower,
-                confidence=1.0,
-            )
-        if re.fullmatch(r"paste(?:\s+(?:it\s+here|it|here|this|that))?", lower):
-            return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+v", text, lower,
-                confidence=1.0,
-            )
-        if lower in ("select all", "select everything", "select the whole thing"):
-            return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+a", text, lower,
-                confidence=1.0,
-            )
-        if lower in ("undo", "undo that", "undo it"):
-            return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+z", text, lower,
-                confidence=1.0,
-            )
-        if lower in ("redo", "redo that", "redo it"):
-            return RoutingDecision(
-                IntentType.DESKTOP_ACTION, "key_press", "ctrl+y", text, lower,
-                confidence=1.0,
-            )
+
+        _EDIT_TAIL = re.compile(r"^(.*?)(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?$")
+
+        def _with_app(match_obj):
+            try:
+                return (match_obj.group(2) or "").strip()
+            except IndexError:
+                return ""
+
+        m = re.fullmatch(
+            r"save(?:\s+(?:this|the\s+(?:file|document|doc|worksheet)|it|that|file|document|worksheet|all))?"
+            r"(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("save", "ctrl+s", _with_app(m))
+        m = re.fullmatch(
+            r"copy(?:\s+(?:this|that|it|the\s+(?:selected\s+)?(?:text|selection|content)|selection|text|all|everything))?"
+            r"(?:\s+(?:in|into|from|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("copy", "ctrl+c", _with_app(m))
+        m = re.fullmatch(
+            r"paste(?:\s+(?:it\s+here|it|here|this|that|the\s+text))?"
+            r"(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("paste", "ctrl+v", _with_app(m))
+        m = re.fullmatch(
+            r"select\s+(?:all|everything|the\s+whole\s+thing|all\s+text|everything\s+in\s+the\s+document)"
+            r"(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("select_all", "ctrl+a", _with_app(m))
+        m = re.fullmatch(
+            r"undo(?:\s+(?:that|it|this|the\s+last\s+(?:action|change|step)))?"
+            r"(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("undo", "ctrl+z", _with_app(m))
+        m = re.fullmatch(
+            r"redo(?:\s+(?:that|it|this))?"
+            r"(?:\s+(?:in|into|on|inside)\s+(?:the\s+)?(.+))?",
+            lower,
+        )
+        if m:
+            return _edit_decision("redo", "ctrl+y", _with_app(m))
 
         # ── SCROLL family: "scroll down/up", "scroll to the bottom/top" ───
         m = re.match(r"^scroll\s+(down|up)$", lower)
@@ -1142,6 +1350,129 @@ class _IntentClassifier:
         if not combo:
             return False
         return bool(self._KEY_COMBO_RE.fullmatch(combo))
+
+    # ── Generated-content detection for TYPE (capability quality) ──────────
+    # A payload that REQUESTS content ("a short poem about space", "a
+    # three-point summary", "a professional email") must be GENERATED by the
+    # LLM before the deterministic provider types it. A literal payload
+    # ("hello", "my name is Joel") is typed verbatim. Bounded artifact nouns
+    # + a following topic phrase; never a giant phrase dictionary.
+    _CONTENT_ARTIFACT_RE = re.compile(
+        r"^(?:a|an|the)?\s*(?:short|brief|long|professional|formal|quick|"
+        r"simple|small|detailed|concise|few|several|real|proper|one|1|"
+        r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s*[- ]?point)?\s*"
+        r"(?:study\s+|project\s+|research\s+|status\s+)?"
+        r"(poem|essay|email|letter|report|summary|explanation|paragraph|story|"
+        r"article|note|reply|message|description|review|analysis|plan|update|"
+        r"introduction|conclusion|list|write-up|document|doc|comparison|compare|contrast|write-up|overview|guide|tutorial)\b",
+        re.IGNORECASE,
+    )
+    _GENERATIVE_VERBS = frozenset({"write", "draft", "compose", "create", "generate", "make"})
+    _TOPIC_MARKERS = re.compile(r"\b(?:about|on|of|comparing|for|regarding)\b")
+
+    def _looks_like_generated_content(self, payload: str) -> bool:
+        """True when the TYPE payload is a content REQUEST, not literal text."""
+        p = (payload or "").strip().lower().rstrip(".")
+        if not p:
+            return False
+        # Artifact-noun start: "a short poem ...", "three-point summary ...".
+        if self._CONTENT_ARTIFACT_RE.match(p):
+            return True
+        # Generative verb + a topic marker: "write something about X".
+        first = p.split()[0] if p.split() else ""
+        if first in self._GENERATIVE_VERBS and self._TOPIC_MARKERS.search(p):
+            return True
+        # A quoted literal payload is never generated content.
+        if payload.strip().startswith(("\"", "'")):
+            return False
+        return False
+
+    # ── DOCUMENT-CREATION family ────────────────────────────────────────────
+    # "create a Word document about X" / "make a Word file comparing X and Y"
+    # / "create a report on X" — extract subject + artifact kind + style; the
+    # document operator writes a real .docx. Never fake typing into Word.
+    _CREATE_DOC_RE = re.compile(
+        r"^(?:create|make|draft|generate|produce|build|write)\s+"
+        r"(?:a|an|the)?\s*(?:new\s+)?(?:word|microsoft\s+word|ms\s+word|text|"
+        r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
+        r"story|poem|summary|comparison|overview|guide)?\s*"
+        r"(?:document|doc|file|report|write-up|paper|essay|article|letter|email|"
+        r"story|poem|summary|comparison|overview|guide)\s+"
+        r"(?:about|on|regarding|for)\s+(.+)$",
+        re.IGNORECASE,
+    )
+    _CREATE_DOC_COMPARE_RE = re.compile(
+        r"^(?:create|make|draft|generate|produce|build|write)\s+"
+        r"(?:a|an|the)?\s*(?:new\s+)?(?:word|microsoft\s+word|ms\s+word|text|"
+        r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
+        r"story|poem|summary|comparison|overview|guide)?\s*"
+        r"(?:document|doc|file|report|write-up|paper|essay|article|letter|email|"
+        r"story|poem|summary|comparison|overview|guide)\s+comparing\s+(.+)$",
+        re.IGNORECASE,
+    )
+    # Style modifiers stripped from the end of the subject ("make it concise").
+    _STYLE_TAIL_RE = re.compile(
+        r"\s+(?:and\s+)?(?:make\s+it|keep\s+it|make\s+it\s+really)\s+"
+        r"(concise|short|brief|professional|detailed|simple|poetic|formal|casual|fun)\s*$",
+        re.IGNORECASE,
+    )
+    # "put/place X in/into a new document/file" family — document-intent
+    # phrasings that don't start with create/make. The subject is the content
+    # description before the target clause ("a small comparison of A and B and
+    # put it in a new document" -> subject "a small comparison of A and B").
+    _PUT_INTO_DOC_RE = re.compile(
+        r"^(?:put|place|write|type|drop|paste)\s+(?:it|this|that|the\s+content|the\s+text)?\s*"
+        r"(?:in|into)\s+(?:a|an|the)?\s*(?:new\s+)?(?:document|file|doc|text\s+file)\s*$",
+        re.IGNORECASE,
+    )
+
+    def _detect_document_creation(self, lower, text):
+        subject = None
+        artifact = "document"
+        style = ""
+        m = self._CREATE_DOC_COMPARE_RE.match(lower)
+        if m:
+            subject = m.group(1).strip()
+            artifact = "comparison"
+        else:
+            m = self._CREATE_DOC_RE.match(lower)
+            if m:
+                subject = m.group(1).strip()
+                # Infer artifact from the noun actually used.
+                for noun, kind in (
+                    ("report", "report"), ("write-up", "report"),
+                    ("paper", "paper"), ("essay", "essay"), ("file", "file"),
+                ):
+                    if re.search(rf"\b{noun}\b", lower):
+                        artifact = kind
+                        break
+        if not subject:
+            # "write a short comparison of A and B and put it in a new
+            # document" — split on the "and put/place/type it in[to]" clause.
+            split = re.split(r"\s+and\s+(?:put|place|write|type|drop|paste)\s+(?:it|this|that)\s+(?:in|into)\s+(?:a|an|the)?\s*(?:new\s+)?(?:document|file|doc|text\s+file)\s*$", lower, maxsplit=1)
+            if len(split) == 2 and split[0].strip():
+                head = split[0].strip()
+                # Only treat as document-creation when the head is itself a
+                # content request (comparison/report/essay/notes/poem/summary
+                # about X), never a literal "type hello".
+                if re.search(r"\b(comparison|compare|report|essay|notes?|poem|summary|write-up|paper|overview|guide)\b.*\b(?:about|on|of|comparing)\b", head):
+                    subject = head
+                    if re.search(r"\b(comparison|compare|comparing)\b", head):
+                        artifact = "comparison"
+            if not subject:
+                return None
+        # Style tail: "... and make it concise" -> style=concise.
+        sm = self._STYLE_TAIL_RE.search(subject)
+        if sm:
+            style = sm.group(1)
+            subject = subject[: sm.start()].strip()
+        if not subject:
+            return None
+        return RoutingDecision(
+            IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+            confidence=1.0,
+            metadata={"artifact": artifact, "style": style, "subject": subject},
+        )
 
     # Semantic family for contextual desktop-state queries (Capability A).
     # Synonym/normalization-based (what/which/show/list/tell + state nouns),
@@ -1813,13 +2144,31 @@ class _IntentClassifier:
                          "play", "watch", "show", "tell", "do", "is", "are", "was",
                          "the", "a", "an", "i", "you", "we", "they", "he", "she",
                          "it", "that", "this", "there", "my", "your", "for", "to"}
+        # Casual-fragment guard: message-initial capitalization is a writing
+        # convention, NOT proper-noun evidence. "Yoo!", "Lol", "Wow", "Damn",
+        # "Sup", "Hey" typed with a capital initial must never become an
+        # ENTITY_QUERY (which would send the fragment to media/retrieval — the
+        # observed "Yoo" -> UFC biography bug). The guard is punctuation-
+        # tolerant ("Yoo!", "Yoo?") and applies to single casual words and to
+        # short ALL-casual fragments ("oh wow", "haha yeah") — never to
+        # phrases containing a non-casual word, so real entities ("OK Go",
+        # "Yeah Yeah Yeahs") keep the entity path.
+        def _casual_word(w: str) -> bool:
+            base = w.rstrip(".,!?;:")
+            return base in _CASUAL_FRAGMENTS or _casual_normalized(base) in _CASUAL_FRAGMENTS
+
+        _single_word_casual = len(words) <= 3 and all(_casual_word(w) for w in words)
 
         if not raw_text:
             raw_text = text
         orig_words = raw_text.strip().split() if raw_text else words
         orig_first = orig_words[0] if orig_words else ""
 
-        if orig_first and orig_first[0].isupper() and len(orig_first) > 1 and first_w not in skip and first_w not in two_word_stop:
+        if (
+            orig_first and orig_first[0].isupper() and len(orig_first) > 1
+            and first_w not in skip and first_w not in two_word_stop
+            and not _single_word_casual
+        ):
             return RoutingDecision(IntentType.ENTITY_QUERY, "information_query", raw_text, raw_text, lower, confidence=0.8)
 
         if len(words) >= 2:
@@ -1982,6 +2331,64 @@ class _ExecutionCoordinator:
                 return reused
         return execute_action(action, target)
 
+    def _exec_camera(self, meta: dict, dp) -> dict:
+        """Camera capability executor (generic — no app-specific branches).
+
+        Resolves the NATIVE installed camera through the same canonical app
+        discovery used for every open (UWP included), launches it, and for a
+        capture request attempts a real shutter press. Success is claimed only
+        when a new photo file actually appears in the camera output folder;
+        otherwise the limitation is reported truthfully.
+        """
+        import time as _t
+        from mini_kio.core.app_operator import _find_installed_app, _launch_discovered
+
+        camera_action = str(meta.get("camera_action") or "open")
+        # Native-first: resolve the installed camera app ONCE and launch that
+        # exact descriptor — never a website, and never a mismatch between the
+        # app we verified exists and the app we open. `_launch_discovered` is
+        # the same canonical launcher the generic open path uses.
+        found = _find_installed_app("camera") or _find_installed_app("webcam")
+        if not found:
+            return {"success": False, "message": "I couldn't find a native camera app installed on this PC."}
+        opened = _launch_discovered(found, str(found.get("display") or "camera"))
+        if not opened.get("success"):
+            return {"success": False, "message": f"Couldn't open the camera: {opened.get('message', '')}"}
+        _t.sleep(2.0)
+
+        if camera_action == "open":
+            # Honest verification: the launch succeeded (shell/explorer
+            # accepted it), but a UWP app window may take seconds to appear —
+            # never claim more than "launched".
+            return {"success": True, "message": "Opened the camera.", "verified": None}
+
+        # CAPTURE: attempt a real shutter press and verify a photo appeared.
+        try:
+            import pathlib as _pl
+            from glob import glob as _glob
+            cam_roll = _pl.Path.home() / "Pictures" / "Camera Roll"
+            before = set(_glob(str(cam_roll / "*"))) if cam_roll.is_dir() else set()
+            pressed = dp.execute("keyboard_press", target="enter")
+            if not pressed.get("success"):
+                pressed = dp.execute("keyboard_press", target="space")
+            _t.sleep(3.0)
+            after = set(_glob(str(cam_roll / "*"))) if cam_roll.is_dir() else set()
+            new_photos = after - before
+            if new_photos:
+                name = _pl.Path(sorted(new_photos)[-1]).name
+                return {"success": True, "message": f"Took a photo — saved {name}.", "verified": True}
+            return {
+                "success": False,
+                "message": "The camera is open, but I couldn't confirm a photo was saved — the shutter control isn't reliably reachable on this setup.",
+                "camera_open": True,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": f"The camera is open, but I couldn't verify the capture ({str(exc)[:60]}).",
+                "camera_open": True,
+            }
+
     def _exec_desktop_action(self, params: dict, decision: RoutingDecision) -> dict:
         """Canonical executor for the new desktop-action capability classes.
 
@@ -2000,47 +2407,200 @@ class _ExecutionCoordinator:
         meta = params.get("metadata") or {}
         dp = DesktopProvider()
 
+        # ── CAMERA capability (small, generic) ──────────────────────────────
+        # "open the camera" resolves the NATIVE installed camera application
+        # via generic UWP discovery — never a .com website. "take a picture"
+        # opens it and attempts a real capture; the result is only claimed
+        # when the provider genuinely triggered and verified it (photo file
+        # appeared in Camera Roll), otherwise an honest limitation.
+        if action == "camera":
+            return self._exec_camera(meta, dp)
+
         if action == "type":
             payload = str(meta.get("payload", "") or "")
             if not payload:
                 return {"success": False, "message": "What should I type?"}
+            # A bare referent pronoun that survived resolution ("write this"
+            # with no contextual content) must ask for clarification — never
+            # type the literal word "this".
+            if payload.strip().lower() in ("this", "that", "it", "them", "these", "those"):
+                return {"success": False, "message": "What should I type? I don't have that content in context."}
+            # Artifact-only payload without a topic ("the comparison", "an
+            # essay") resolves its topic from recent session context when a
+            # matching content request exists ("do a real comparison" after
+            # "a comparison on messi vs lewis hamilton"), otherwise asks —
+            # never typing the bare noun or fabricating content.
+            _artifact_only = re.fullmatch(
+                r"^(?:a|an|the)?\s*(?:small|short|quick|brief|detailed|concise|real|proper)?\s*"
+                r"(comparison|essay|report|summary|analysis|review|article|poem|story|letter|email|overview|guide|write-up)\s*$",
+                payload.strip().lower(),
+            )
+            if _artifact_only:
+                noun = _artifact_only.group(1)
+                inherited = self._inherit_content_topic(decision, noun)
+                if inherited:
+                    payload = f"a {noun} on {inherited}"
+                else:
+                    return {"success": False, "message": f"What should the {noun} be about? Tell me the topic and I'll write it."}
             app = target.strip()
-            opened_now = False
+            # New-file default: typing ALWAYS goes into a fresh document — KIO
+            # never tampers with existing file content. "type hello into
+            # notepad" opens a NEW blank document (Ctrl+N) if the app is
+            # already running; apps KIO just launched are already blank. Only
+            # an EXPLICIT write-onto request ("append", "add to the file",
+            # "write onto the existing file", "in the same file") reuses the
+            # existing window.
+            new_instance = bool(meta.get("new_instance", True))
+            write_onto = False
+            if decision is not None and getattr(decision, "raw_text", None):
+                raw = str(decision.raw_text).lower()
+                if re.search(
+                    r"\b(?:append|add\s+to|write\s+onto|onto\s+(?:the\s+)?(?:file|document|same|existing|current)|same\s+file|existing\s+file|this\s+file|the\s+current\s+file|keep\s+typing|continue\s+in)\b",
+                    raw,
+                ):
+                    write_onto = True
+            # Generated-content TYPE: the payload is a REQUEST ("a short poem
+            # about space"), so generate the actual content with the LLM FIRST
+            # (content generation) — then do ALL desktop interaction LAST
+            # (fresh instance → focus → type → verify). Generating first
+            # prevents the LLM latency from stealing focus away from the target
+            # between focus and typing, which previously caused typed text to
+            # land in the wrong window.
+            if meta.get("generate"):
+                generated = self._generate_content(payload, app or "")
+                if not generated:
+                    return {"success": False, "message": "I couldn't generate that content to type."}
+                payload = generated
+            import time
+            launch_pid = 0
+            focused = None
+            new_hwnd = 0
             if app:
-                # TYPE into a named app: focus it first (or open it if it is
-                # installed but not running), then type into its window.
-                focused = self._try_native_focus(app)
-                if not focused:
-                    from mini_kio.core.routing_utils import get_browser_routing
-                    route_info = get_browser_routing(app)
-                    if route_info["route_type"] == "native":
-                        execute_action("open_app", route_info["target"])
-                        import time
-                        time.sleep(0.8)
-                        focused = self._try_native_focus(route_info["target"])
-                        opened_now = True
-                    elif route_info["route_type"] == "browser_fallback":
-                        execute_action("execute_capability", route_info["target"])
-                        return {"success": True, "message": "Opened the web app — I can't type into a browser tab yet."}
+                from mini_kio.core.routing_utils import get_browser_routing
+                route_info = get_browser_routing(app)
+                if route_info["route_type"] == "browser_fallback":
+                    execute_action("execute_capability", route_info["target"])
+                    return {"success": True, "message": "Opened the web app — I can't type into a browser tab yet."}
+                if not write_onto:
+                    # DEFAULT (new file): launch a FRESH instance of the app.
+                    # Snapshot the app's existing windows FIRST so the newly
+                    # created window can be deterministically identified and
+                    # focused — Win11 Notepad restores previous session tabs,
+                    # so "launch + focus the app" can land in an old document.
+                    before = self._snapshot_app_windows(route_info["target"]) if app else set()
+                    launch = execute_action("open_app", route_info["target"])
+                    if not launch.get("success"):
+                        # App may be single-instance and already focused — fall
+                        # back to focusing the existing window truthfully.
+                        focused = self._try_native_focus(app)
+                        if not focused:
+                            return {"success": False, "message": f"Couldn't open {app} to type into it."}
+                    else:
+                        launch_pid = int(launch.get("pid") or 0)
+                        time.sleep(1.2)
+                        # Deterministically locate a FRESH BLANK document:
+                        # prefer a newly created window whose text control is
+                        # EMPTY (session-restored tabs carry old content and
+                        # must never receive new text). If no empty new window
+                        # appears, explicitly create one with the app's
+                        # new-document command (Ctrl+N) after focusing the app.
+                        seen: set[int] = set(before)
+                        new_hwnd = self._wait_for_blank_new_window(route_info["target"], seen)
+                        if new_hwnd:
+                            try:
+                                from mini_kio.platform.window_activation import _force_foreground
+                                _force_foreground(int(new_hwnd))
+                            except Exception:
+                                pass
+                            focused = True
+                        else:
+                            # No fresh blank window surfaced (single-instance
+                            # app, or every new window carries restored session
+                            # content) — focus the app and request a new
+                            # document explicitly so exactly ONE fresh blank
+                            # target exists.
+                            focused = self._try_native_focus(route_info["target"])
+                            if focused:
+                                time.sleep(0.4)
+                                new_doc = dp.execute("keyboard_hotkey", target="ctrl+n")
+                                if new_doc.get("success"):
+                                    time.sleep(0.8)
+                                    new_hwnd = self._wait_for_blank_new_window(route_info["target"], seen)
+                                    if new_hwnd:
+                                        try:
+                                            from mini_kio.platform.window_activation import _force_foreground
+                                            _force_foreground(int(new_hwnd))
+                                        except Exception:
+                                            pass
+                                        focused = True
+                else:
+                    # EXPLICIT write-onto: reuse the existing focused window.
+                    focused = self._try_native_focus(app)
                 if not focused:
                     return {"success": False, "message": f"Couldn't focus {app} to type into it."}
-                if not opened_now:
-                    # The app was ALREADY running, possibly with an existing
-                    # file open. Open a NEW blank document (generic Ctrl+N
-                    # new-document shortcut across Notepad/editors) so typed
-                    # text never lands in existing content. Apps KIO just
-                    # launched are already a fresh blank document.
-                    import time
-                    time.sleep(0.2)
-                    new_doc = dp.execute("keyboard_hotkey", target="ctrl+n")
-                    time.sleep(0.4)
-                    if not new_doc.get("success"):
-                        # The new-document shortcut failed: abort truthfully
-                        # rather than typing into the existing file.
-                        return {"success": False, "message": f"Couldn't open a new {target.strip().capitalize()} document to type into."}
-            result = dp.execute("keyboard_type", target=payload)
+            result = self._inject_text(dp, payload)
+            new_target_hwnd = 0
+            if app and not write_onto:
+                new_target_hwnd = int(new_hwnd or 0)
             if result.get("success"):
-                return {"success": True, "message": f"Typed it{(' into a new ' + target.strip().capitalize()) if target.strip() else ''}."}
+                # Verification: read back the target window (by the exact PID
+                # we launched/focused, falling back to app-wide / foreground)
+                # and confirm the payload actually landed. Unreadable windows
+                # (browsers/games) are an honest limitation, never a fabricated
+                # "verified".
+                verified = self._verify_typed(payload, bool(meta.get("generate")), app, launch_pid, new_target_hwnd)
+                where = f" into {app.capitalize()}" if app else ""
+                # A short settle window avoids false negatives from the edit
+                # control flushing asynchronously after typing.
+                if verified is None or verified is False:
+                    time.sleep(0.4)
+                    verified = self._verify_typed(payload, bool(meta.get("generate")), app, launch_pid, new_target_hwnd)
+                if verified is True:
+                    # Natural, outcome-focused wording — never expose internal
+                    # executor vocabulary ("verified", action schema names).
+                    if meta.get("generate"):
+                        msg = f"Done — I wrote that into {app.capitalize()} and checked the document." if app else "Done — I wrote that for you."
+                    else:
+                        msg = f"Done — typed it{where}." if app else "Done — typed it."
+                    return {"success": True, "message": msg, "verified": True}
+                if verified is False:
+                    # The window WAS readable and the payload is NOT present —
+                    # a truthful failure rather than a success-shaped lie.
+                    return {"success": False, "message": "I wrote it, but the text isn't showing in the document.", "typed": True}
+                # verified is None: window not readable → honest limitation.
+                if meta.get("generate"):
+                    msg = f"Done — I wrote that into {app.capitalize()}." if app else "Done — I wrote that for you."
+                else:
+                    msg = f"Done — typed it{where}." if app else "Done — typed it."
+                return {"success": True, "message": msg, "verified": None}
+            return result
+
+        if action == "create_document":
+            from mini_kio.core.document_operator import create_document
+            subject = str(target or meta.get("subject") or "").strip()
+            if not subject:
+                return {"success": False, "message": "What should the document be about?"}
+            artifact = str(meta.get("artifact") or "document")
+            style = str(meta.get("style") or "")
+            content = self._generate_content(
+                f"{subject}", "", artifact=artifact, style=style
+            )
+            if not content:
+                return {"success": False, "message": f"I couldn't generate content for the {subject} document."}
+            result = create_document(subject, content, artifact=artifact, style=style)
+            if result.get("success"):
+                # Open the created artifact so the user sees it immediately.
+                try:
+                    from mini_kio.core.document_operator import open_document
+                    import pathlib
+                    open_document(pathlib.Path(result["path"]))
+                except Exception:
+                    pass
+                return {
+                    "success": True,
+                    "message": f"Created {result.get('filename')} — {result.get('word_count', 0)} words.",
+                    "target": result.get("filename", subject),
+                }
             return result
 
         if action == "key_press":
@@ -2054,6 +2614,72 @@ class _ExecutionCoordinator:
             if result.get("success"):
                 return {"success": True, "message": f"Pressed {combo.upper()}."}
             return result
+
+        # ── SEMANTIC edit actions: SAVE / COPY / PASTE / SELECT_ALL / UNDO / ──
+        # REDO. These are meaningful operations against the CORRECT contextual
+        # target — resolved and focused first — not mechanical keypresses on
+        # whatever happens to be foreground. Where the environment allows, the
+        # result is VERIFIED against real state (clipboard for copy, window
+        # text for paste/select) instead of an unverified "Pressed X."
+        _semantic_combo = str((meta or {}).get("combo") or "").lower()
+        if action in ("save", "copy", "paste", "select_all", "undo", "redo"):
+            if not _semantic_combo:
+                return {"success": False, "message": f"Unknown {action} shortcut."}
+            # Resolve the target: an EXPLICIT app in the decision wins ("save
+            # the document in word", "select everything in notepad"); otherwise
+            # the session context (active entity / last target). Focus it so
+            # the key event lands in the window the user is actually working
+            # in, not whatever is foreground.
+            resolved_target = str(target or "").strip() or self._resolve_edit_target(decision)
+            if resolved_target:
+                focused = self._try_native_focus(resolved_target)
+                if not focused:
+                    # A stale referent is fine — the user's current foreground
+                    # window is the fallback, but never silently retarget.
+                    logger.info("[EDIT_ACTION] contextual target %s not focusable; using foreground", resolved_target)
+            if action == "copy":
+                # COPY must be verified against the real clipboard.
+                import time as _t
+                result = dp.execute("keyboard_hotkey", target=_semantic_combo)
+                _t.sleep(0.15)
+                clip = dp.execute("clipboard_get")
+                copied = str(clip.get("text") or "").strip()
+                if result.get("success") and copied:
+                    return {"success": True, "message": f"Copied {len(copied)} characters to the clipboard.", "verified": True}
+                if result.get("success"):
+                    return {"success": True, "message": "Pressed Ctrl+C, but the clipboard came back empty.", "verified": False}
+                return result
+            if action == "paste":
+                # PASTE must verify there IS something to paste first.
+                import time as _t
+                clip = dp.execute("clipboard_get")
+                copied = str(clip.get("text") or "").strip()
+                if not copied:
+                    return {"success": False, "message": "The clipboard is empty — nothing to paste."}
+                before = self._read_window_text_or_none()
+                result = dp.execute("keyboard_hotkey", target=_semantic_combo)
+                _t.sleep(0.2)
+                after = self._read_window_text_or_none()
+                if result.get("success"):
+                    if before is not None and after is not None and after != before:
+                        return {"success": True, "message": "Pasted it.", "verified": True}
+                    if before is None or after is None:
+                        return {"success": True, "message": "Pasted it.", "verified": None}
+                    return {"success": True, "message": "Pasted it, but the window content didn't change.", "verified": False}
+                return result
+            # SAVE / SELECT_ALL / UNDO / REDO: execute, then verify where the
+            # window text is readable (selection changes are observable via
+            # text read-back only in limited cases — an honest limitation
+            # otherwise, never a fabricated success).
+            result = dp.execute("keyboard_hotkey", target=_semantic_combo)
+            if not result.get("success"):
+                return result
+            labels = {
+                "save": "Saved", "select_all": "Selected everything",
+                "undo": "Undid that", "redo": "Redid that",
+            }
+            return {"success": True, "message": f"{labels[action]}.", "verified": None}
+
 
         if action == "scroll":
             direction = target.strip().lower()
@@ -2078,6 +2704,330 @@ class _ExecutionCoordinator:
             return result
 
         return {"success": False, "message": f"Unhandled desktop action: {action}"}
+
+    # ── Capability-quality verification helpers ─────────────────────────────
+    # TYPE/PASTE/COPY are VERIFIED against real application state where the
+    # target window exposes a standard text control. Unreadable windows are an
+    # honest limitation (verified=None), never a fabricated success.
+
+    def _read_window_text_or_none(self) -> Optional[str]:
+        """Best-effort read of the foreground window's text control.
+        Returns None when the window cannot be read (browser/game/empty)."""
+        try:
+            from mini_kio.desktop.text_readback import read_foreground_text
+            info = read_foreground_text()
+            if info.get("success"):
+                return str(info.get("text") or "")
+        except Exception as exc:
+            logger.debug("window text read-back unavailable: %s", exc)
+        return None
+
+    def _inject_text(self, dp, payload: str, force_typing: bool = False) -> dict:
+        """Insert a complete payload into the focused editor.
+
+        Atomic clipboard paste is the canonical mechanism for payloads larger
+        than a short literal: it injects the ENTIRE text in one operation,
+        cannot be truncated mid-stream, and does not depend on per-character
+        key events (whose focus can be stolen mid-typing, producing mixed or
+        partial documents). Short literals (< 80 chars) and force_typing are
+        sent as keystrokes. Falls back to typing if the clipboard is
+        unavailable. Returns the provider result dict.
+        """
+        if force_typing or len(payload) <= 80:
+            return dp.execute("keyboard_type", target=payload)
+        try:
+            clip = dp.execute("clipboard_set", target=payload)
+            if not clip.get("success"):
+                return dp.execute("keyboard_type", target=payload)
+            pasted = dp.execute("keyboard_hotkey", target="ctrl+v")
+            if pasted.get("success"):
+                return {"success": True, "action": "paste", "message": "Pasted complete content."}
+            return dp.execute("keyboard_type", target=payload)
+        except Exception:
+            return dp.execute("keyboard_type", target=payload)
+
+    def _verify_typed(self, payload: str, is_generated: bool = False, app: str = "", launch_pid: int = 0, target_hwnd: int = 0) -> Optional[bool]:
+        """Verify a typed payload actually landed in the target window's text
+        control. Prefers the exact newly-created window (target_hwnd), then the
+        exact PID that was launched/focused; then the named app's visible
+        windows; falls back to the foreground window.
+
+        Returns True when confirmed present, False when the window was readable
+        and the payload is absent, None when no readable window was found.
+        Generated content (LLM output) may be wrapped/reflowed, so the check is
+        normalized; for generated payloads the first meaningful line is probed.
+        """
+        texts: list[str] = []
+        if target_hwnd:
+            # Match the payload against ANY tab/control in the target window
+            # (multi-tab editors otherwise favor a restored tab).
+            texts = self._read_all_window_texts_for(int(target_hwnd))
+        if not texts:
+            texts = self._read_target_or_foreground_text(app, launch_pid)
+        if not texts:
+            return None
+        try:
+            from mini_kio.desktop.text_readback import payload_present
+        except Exception:
+            return None
+        if is_generated:
+            for probe in (payload, payload[:40], payload[:20]):
+                if probe and any(payload_present(probe, t) for t in texts):
+                    return True
+            logger.info(
+                "[VERIFY_MISS] generated payload=%r texts=%d lens=%r app=%r pid=%s hwnd=%s",
+                payload[:60], len(texts), [len(t) for t in texts[:4]], app, launch_pid, target_hwnd,
+            )
+            return False
+        ok = any(payload_present(payload, t) for t in texts) if payload else False
+        if not ok:
+            logger.info(
+                "[VERIFY_MISS] literal payload=%r texts=%d lens=%r app=%r pid=%s hwnd=%s",
+                payload[:60], len(texts), [len(t) for t in texts[:4]], app, launch_pid, target_hwnd,
+            )
+        return ok
+
+    def _read_target_or_foreground_text(self, app: str = "", launch_pid: int = 0) -> list[str]:
+        """Collect text from the exact launched PID's windows; then the named
+        target app's visible windows (by process match); falls back to the
+        foreground window when no app is named."""
+        try:
+            import ctypes as _ct
+            from ctypes import wintypes as _wt
+            from mini_kio.desktop.text_readback import read_foreground_text
+            from mini_kio.desktop.text_readback import _user32
+        except Exception:
+            return []
+        texts: list[str] = []
+        if launch_pid:
+            try:
+                found = []
+
+                def _cb(hwnd, _lp):
+                    if not _user32.IsWindowVisible(hwnd):
+                        return True
+                    pid = _wt.DWORD()
+                    _user32.GetWindowThreadProcessId(hwnd, _ct.byref(pid))
+                    if pid.value == launch_pid:
+                        found.append(hwnd)
+                    return True
+
+                _user32.EnumWindows(
+                    _ct.WINFUNCTYPE(_ct.c_bool, _wt.HWND, _wt.LPARAM)(_cb), 0
+                )
+                for hwnd in found:
+                    info = self._read_window_text_for(hwnd)
+                    if info:
+                        texts.append(info)
+            except Exception as exc:
+                logger.debug("pid-scoped read-back failed: %s", exc)
+        if not texts and app:
+            try:
+                import subprocess as _sp
+
+                # Map the app token to candidate process names.
+                base = app.lower().replace(" ", "").replace(".exe", "")
+                proc_names = {base + ".exe", base, "notepad.exe" if base == "notepad" else ""}
+                proc_names.discard("")
+                r = _sp.run(["tasklist"], capture_output=True, text=True)
+                pids = set()
+                for line in r.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].lower() in proc_names:
+                        try:
+                            pids.add(int(parts[1]))
+                        except ValueError:
+                            pass
+                if pids:
+                    found = []
+
+                    def _cb(hwnd, _lp):
+                        if not _user32.IsWindowVisible(hwnd):
+                            return True
+                        pid = _wt.DWORD()
+                        _user32.GetWindowThreadProcessId(hwnd, _ct.byref(pid))
+                        if pid.value in pids:
+                            found.append(hwnd)
+                        return True
+
+                    _user32.EnumWindows(
+                        _ct.WINFUNCTYPE(_ct.c_bool, _wt.HWND, _wt.LPARAM)(_cb), 0
+                    )
+                    for hwnd in found:
+                        info = self._read_window_text_for(hwnd)
+                        if info:
+                            texts.append(info)
+            except Exception as exc:
+                logger.debug("target-scoped read-back failed: %s", exc)
+        if not texts:
+            info = read_foreground_text()
+            if info.get("success"):
+                texts.append(str(info.get("text") or ""))
+        return texts
+
+    def _snapshot_app_windows(self, app: str) -> set[int]:
+        """Return the set of visible top-level HWNDs currently owned by the
+        given application (process-name match). Used to detect which window
+        is newly created by a fresh launch."""
+        try:
+            import ctypes as _ct
+            from ctypes import wintypes as _wt
+            import subprocess as _sp
+            from mini_kio.desktop.text_readback import _user32
+
+            base = app.lower().replace(" ", "").replace(".exe", "")
+            proc_names = {base + ".exe", base}
+            r = _sp.run(["tasklist"], capture_output=True, text=True)
+            pids = set()
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].lower() in proc_names:
+                    try:
+                        pids.add(int(parts[1]))
+                    except ValueError:
+                        pass
+            if not pids:
+                return set()
+            found = set()
+
+            def _cb(hwnd, _lp):
+                if not _user32.IsWindowVisible(hwnd):
+                    return True
+                pid = _wt.DWORD()
+                _user32.GetWindowThreadProcessId(hwnd, _ct.byref(pid))
+                if pid.value in pids:
+                    found.add(int(hwnd))
+                return True
+
+            _user32.EnumWindows(
+                _ct.WINFUNCTYPE(_ct.c_bool, _wt.HWND, _wt.LPARAM)(_cb), 0
+            )
+            return found
+        except Exception:
+            return set()
+
+    def _wait_for_new_window(self, app: str, before: set[int], timeout: float = 6.0) -> Optional[int]:
+        """Poll until a visible window that was NOT in the pre-launch snapshot
+        appears. Returns the new HWND, or None when the app did not surface a
+        distinct new window (single-instance apps reuse their window)."""
+        import time as _t
+        deadline = _t.monotonic() + timeout
+        while _t.monotonic() < deadline:
+            now = self._snapshot_app_windows(app)
+            new_wins = now - before
+            if new_wins:
+                return sorted(new_wins)[0]
+            _t.sleep(0.15)
+        return None
+
+    def _wait_for_blank_new_window(self, app: str, before: set[int], timeout: float = 6.0) -> Optional[int]:
+        """Poll for a newly created window whose text control is EMPTY.
+
+        Win11 Notepad restores previous session tabs on launch; those restored
+        windows are "new" relative to a pre-launch snapshot but carry OLD
+        content and must never receive new text. This helper keeps polling and
+        returns the first new window with no readable text (a genuine fresh
+        blank document), or None."""
+        import time as _t
+        deadline = _t.monotonic() + timeout
+        while _t.monotonic() < deadline:
+            now = self._snapshot_app_windows(app)
+            for hwnd in sorted(now - before):
+                text = self._read_window_text_for(int(hwnd))
+                if text in (None, ""):
+                    return int(hwnd)
+            _t.sleep(0.15)
+        return None
+
+    def _read_window_text_for(self, hwnd: int) -> Optional[str]:
+        """Read the largest text control inside a specific top-level window."""
+        try:
+            all_texts = self._read_all_window_texts_for(int(hwnd))
+            if not all_texts:
+                return None
+            return max(all_texts, key=len)
+        except Exception:
+            return None
+
+    def _read_all_window_texts_for(self, hwnd: int) -> list[str]:
+        """Read ALL text controls inside a specific top-level window.
+
+        Multi-tab editors (Win11 Notepad, browsers) expose one text control
+        per tab. Reading only the largest silently favors an unrelated
+        session-restored tab over the freshly typed document, which produced
+        false verification negatives. Returning every control's text lets
+        verification match the payload against ANY tab."""
+        try:
+            import ctypes as _ct
+            from ctypes import wintypes as _wt
+            from mini_kio.desktop.text_readback import _user32, _class_name, _EnumChildWindows, _EnumChildProc
+
+            controls = []
+
+            def _cb(h, _lp):
+                cls = _class_name(h)
+                if "Edit" in cls or "RichEdit" in cls:
+                    controls.append(h)
+                return True
+
+            _user32.EnumChildWindows(hwnd, _EnumChildProc(_cb), 0)
+            texts: list[str] = []
+            for c in controls:
+                ln = _user32.SendMessageW(c, 0x000E, 0, 0)  # WM_GETTEXTLENGTH
+                if ln <= 0:
+                    continue
+                buf = _ct.create_unicode_buffer(ln + 1)
+                _user32.SendMessageW(c, 0x000D, ln + 1, buf)  # WM_GETTEXT
+                if buf.value:
+                    texts.append(buf.value)
+            return texts
+        except Exception:
+            return []
+
+    def _inherit_content_topic(self, decision: RoutingDecision, artifact: str) -> Optional[str]:
+        """Inherit a content topic from recent session exchanges.
+
+        "Do a real comparison" after "a comparison on messi vs lewis hamilton"
+        should reuse the topic instead of asking. Scans the last few user
+        exchanges for "<artifact> on/about <topic>" (or "between A and B").
+        Returns None when no matching topic exists — the caller then asks.
+        """
+        try:
+            if decision is None or not getattr(decision, "session_id", None):
+                return None
+            from mini_kio.core.context_manager import get_session_context
+            ctx = get_session_context(decision.session_id)
+            history = ctx.get_history_window(6)
+            for user_text, _reply in reversed(history):
+                low = str(user_text or "").lower()
+                if artifact not in low:
+                    continue
+                m = re.search(
+                    rf"\b{artifact}\s+(?:on|about|of|between)\s+(.+?)\s*$",
+                    low,
+                )
+                if m:
+                    topic = m.group(1).strip().strip(".,!?;:")
+                    if topic and len(topic) < 80 and topic.lower() not in ("it", "this", "that", "them"):
+                        return topic
+            return None
+        except Exception:
+            return None
+
+    def _resolve_edit_target(self, decision: RoutingDecision) -> Optional[str]:
+        """Resolve the contextual target for a semantic edit action from the
+        session context (active entity / last successful target). Returns None
+        when no reliable referent exists — the user's current foreground
+        window is then the intended surface."""
+        try:
+            if decision is None or not getattr(decision, "session_id", None):
+                return None
+            from mini_kio.core.context_manager import get_session_context
+            ctx = get_session_context(decision.session_id)
+            entity = getattr(ctx, "active_entity", None) or getattr(ctx, "last_target", None)
+            return str(entity).strip() or None if entity else None
+        except Exception:
+            return None
 
     def _reuse_running_app(self, target: str) -> Optional[dict]:
         """Duplicate prevention: if the requested native app is already running
@@ -2478,6 +3428,140 @@ class _ExecutionCoordinator:
             "Hello. How can I help?",
         ])
 
+    def _research_facts(self, prompt: str) -> str:
+        """Ground a content-generation request with retrieved facts.
+
+        Uses the canonical knowledge/research router (Exa → Tavily →
+        DuckDuckGo → Wikipedia per the existing provider chain). Returns a
+        short "facts for grounding" block, or "" when no provider returned
+        usable material (bounded time so a research miss never blocks or
+        stalls content generation). KIO-self topics never go to the web:
+        "kio" mentions short-circuit to "" so a KIO document request can
+        never become a random web search.
+        """
+        import time as _t
+        low = (prompt or "").lower()
+        # KIO-self topics never reach the web: any request about KIO itself
+        # (identity/status/capabilities/architecture) short-circuits research.
+        if re.search(r"\bkio\b", low):
+            return ""
+        try:
+            from mini_kio.knowledge.retrieval_router import KnowledgeRouter
+            router = KnowledgeRouter()
+            start = _t.time()
+            result = router.route_for_topic(prompt, mode="short")
+            if isinstance(result, tuple):
+                multi, _plain = result
+            else:
+                multi = result
+            # Cap research time: if the chain ran long, still synthesize with
+            # whatever came back (never block content generation on research).
+            elapsed = _t.time() - start
+            logger.info("[CONTENT_RESEARCH] prompt=%.40r elapsed=%.1fs", prompt, elapsed)
+            if multi and getattr(multi, "sources", None):
+                snippets = [
+                    str(getattr(s, "content", "") or "").strip()
+                    for s in multi.sources if getattr(s, "content", None)
+                ]
+                snippets = [s[:400] for s in snippets if s]
+                if snippets:
+                    return "\n".join(f"- {s}" for s in snippets[:3])
+        except Exception as exc:
+            logger.debug("[CONTENT_RESEARCH] research unavailable: %s", exc)
+        return ""
+
+    def _generate_content(self, prompt: str, target_app: str = "", *, artifact: str = "", style: str = "") -> Optional[str]:
+        """Generate requested content with the LLM (content generation only).
+
+        Used for generated-content TYPE tasks ("a short poem about space") and
+        document creation ("create a Word document about machine learning").
+        The deterministic desktop/document provider does the execution; the LLM
+        only produces the content the user asked for. The system prompt keeps
+        output clean (plain text, no markdown/headings garbage) so the typed
+        text or document body is readable.
+
+        FACTUAL GROUNDING: for substantive/factual content requests, the
+        canonical research router (Exa/Tavily/DDG/Wikipedia) is consulted
+        FIRST and the retrieved facts are passed to the LLM as grounding — the
+        LLM synthesizes clean final content from real material instead of
+        generating from memory alone. KIO-self topics never reach the web.
+        """
+        from mini_kio.llm.llm_ops import ask_llm_sync
+
+        extra = ""
+        if artifact:
+            extra += f" It should be structured as a {artifact or 'document'} document."
+        if style:
+            extra += f" Keep it {style}."
+        # Structured artifacts (spreadsheet/presentation) need their structure
+        # preserved; editor typing needs plain prose. Make the instruction
+        # artifact-aware instead of forcing plain prose onto everything.
+        if artifact in ("spreadsheet", "presentation", "table"):
+            structure_rule = (
+                "For a spreadsheet: output actual tabular data with a header "
+                "row and one record per line, separated by tabs. "
+                "For a presentation: output slide titles as short lines followed "
+                "by concise bullet points for each slide."
+            )
+        else:
+            structure_rule = (
+                "Plain readable prose with real paragraphs. "
+                "Do not output markdown."
+            )
+        system_prompt = (
+            "You are KIO, generating content the user requested. "
+            "Return ONLY the content itself — no preamble, no closing line, "
+            "no headings like 'Here is...' or 'Sure!'. "
+            + structure_rule + " "
+            "If the user asked for a poem, write a poem. "
+            "If they asked for a summary, write a summary. "
+            "Do not invent facts you are not sure about; say so inside the "
+            "content if needed. Never fabricate quotes, statistics, or sources."
+            + extra
+        )
+        # Research grounding for substantive factual requests (comparisons,
+        # reports, essays, explanations). Creative requests (poems, stories)
+        # and pure-literal typing do not need the web.
+        facts = ""
+        if artifact in ("comparison", "report", "paper", "overview", "guide", "write-up") \
+                or re.search(r"(comparison|compare|report|research|explain|analysis|overview)", (prompt or "").lower()):
+            facts = self._research_facts(prompt)
+        if facts:
+            system_prompt += (
+                "\n\nUse the following retrieved facts as grounding for the "
+                "content. Synthesize them into clean, readable prose — do not "
+                "copy them verbatim, do not list them as bullet dumps, and do "
+                "not fabricate details beyond them."
+                f"\n\nRETRIEVED FACTS:\n{facts}"
+            )
+        try:
+            # 2400 tokens so a substantive essay/report/comparison completes
+            # instead of silently truncating (the old 1400 cap produced the
+            # "one sentence" / partial-content documents).
+            reply = ask_llm_sync(
+                prompt,
+                system_prompt=system_prompt,
+                timeout=45.0,
+                max_tokens=2400,
+                task="content",
+            )
+        except Exception:
+            return None
+        if not reply:
+            return None
+        cleaned = reply.strip().strip('"').strip("'")
+        if not cleaned or cleaned.lower() == prompt.lower().strip():
+            return None
+        # Truncation guard: if the reply ends mid-sentence (no terminal
+        # punctuation) it was cut off — trim to the last complete sentence
+        # rather than typing a partial tail into the user's editor.
+        import re as _re
+        if len(cleaned) > 80 and not _re.search(r"[.!?…]\s*$", cleaned):
+            m_end = _re.search(r"(?:[.!?…])\s+[^.!?…]+$", cleaned)
+            if m_end:
+                cleaned = cleaned[: m_end.start() + 1].rstrip()
+        return cleaned
+
     def _chat_converse(self, decision: RoutingDecision) -> Optional[str]:
         from mini_kio.llm.llm_ops import ask_llm_sync
 
@@ -2508,6 +3592,11 @@ class _ExecutionCoordinator:
             "section below. If that section is empty, you have NO prior context - greet naturally and "
             "do not claim or imply you were discussing anything before. "
             "You are honest that you are an AI companion when asked directly. "
+            "CRITICAL: You do NOT perform desktop actions yourself (typing, clicking, pressing "
+            "keys, opening apps, saving files). If a message asks you to type, write, create, "
+            "open, or save something in an application, you must NOT claim you did it or that you "
+            "'will' do it. Say plainly that you can handle it through your command system or that "
+            "you weren't able to execute it — never fabricate an action you did not perform. "
             "NEVER invent the user's name, age, gender, appearance, location, feelings, health, "
             "relationships, personal history, or past events. Never address the user by any name. "
             "Never assume anything about the user's identity or life. Only the 'Known facts' section "

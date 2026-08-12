@@ -313,10 +313,12 @@ class DesktopActionClassificationTest(unittest.TestCase):
         d = _classify("write a poem")
         self.assertNotEqual(d.intent_type.value, "desktop_action")
 
-    def test_type_into_running_app_opens_new_document_first(self):
-        # Live-found regression: "type hello into notepad" with Notepad ALREADY
-        # open on an existing file must create a NEW blank document (Ctrl+N)
-        # before typing — typed text must never land in existing content.
+    def test_type_into_running_app_launches_fresh_instance_by_default(self):
+        # Capability-quality (live directive): typing ALWAYS goes into a NEW
+        # document — KIO never tampers with existing file content. "type hello
+        # into notepad" with Notepad already running LAUNCHES a fresh app
+        # instance (a new process = a guaranteed new blank document) rather
+        # than typing into the existing window.
         from mini_kio.core.pipeline import _ExecutionCoordinator
 
         events = []
@@ -331,20 +333,109 @@ class DesktopActionClassificationTest(unittest.TestCase):
             return_value=dp,
         ), mock.patch.object(
             coord, "_try_native_focus",
-            side_effect=[{"success": True, "message": "Focused Notepad."}, None],
+            return_value={"success": True, "message": "Focused Notepad."},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[],
+        ), mock.patch.object(
+            coord, "_wait_for_blank_new_window", return_value=9001,
+        ), mock.patch.object(
+            coord, "_read_window_text_for", return_value="",
+        ), mock.patch(
+            "mini_kio.core.execution_boundary.execute_action",
+            return_value={"success": True, "message": "Opened notepad", "pid": 4242},
         ):
             result = coord._exec_desktop_action(
                 {"action": "type", "target": "notepad", "metadata": {"payload": "hello"}},
                 None,
             )
         self.assertTrue(result["success"])
-        # Ctrl+N must be sent BEFORE the payload is typed.
-        hotkey_idx = [i for i, (c, _) in enumerate(events) if c == "keyboard_hotkey"]
-        type_idx = [i for i, (c, _) in enumerate(events) if c == "keyboard_type"]
-        self.assertTrue(hotkey_idx and type_idx, f"events={events}")
-        self.assertLess(hotkey_idx[0], type_idx[0])
-        self.assertEqual(events[type_idx[0]][1], "hello")
-        self.assertIn("new", result["message"].lower())
+        caps = [c for c, _ in events]
+        # a FRESH blank window is located (never a ctrl+n hack) then typed into.
+        self.assertIn("keyboard_type", caps)
+        self.assertNotIn("keyboard_hotkey", caps)
+
+    def test_type_write_onto_existing_file_reuses_window(self):
+        # The only exception: an EXPLICIT write-onto request ("append",
+        # "write onto the existing file") reuses the existing window — never
+        # launches a second instance.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        from mini_kio.core.pipeline import RoutingDecision
+        from mini_kio.core.pipeline import IntentType
+
+        events = []
+        dp = mock.Mock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or
+            ({"success": True, "message": "ok"} if cap.startswith("keyboard_") else {"success": False, "message": "no"})
+        )
+        coord = _ExecutionCoordinator()
+        decision = RoutingDecision(
+            IntentType.DESKTOP_ACTION, "type", "notepad",
+            "append this to the existing file in notepad", "append this to the existing file in notepad",
+            confidence=1.0,
+        )
+        launched = []
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider",
+            return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus",
+            return_value={"success": True, "message": "Focused Notepad."},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[],
+        ), mock.patch(
+            "mini_kio.core.execution_boundary.execute_action",
+            side_effect=lambda a, t: launched.append(a) or {"success": True, "message": "ok"},
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "notepad", "metadata": {"payload": "more text"}},
+                decision,
+            )
+        self.assertTrue(result["success"])
+        # write-onto: existing window reused — NO fresh launch, NO ctrl+n.
+        self.assertEqual(launched, [])
+        caps = [c for c, _ in events]
+        self.assertNotIn("keyboard_hotkey", caps)
+        self.assertIn("keyboard_type", caps)
+
+    def test_type_new_instance_launches_fresh_process(self):
+        # Explicit new-instance semantics ("type X into a NEW notepad") launch
+        # a fresh process — the deterministic new-blank-document path.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+
+        events = []
+        dp = mock.Mock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or
+            ({"success": True, "message": "ok"} if cap.startswith("keyboard_") else {"success": False, "message": "no"})
+        )
+        coord = _ExecutionCoordinator()
+        launched = []
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus",
+            return_value={"success": True, "message": "Focused Notepad."},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[],
+        ), mock.patch.object(
+            coord, "_wait_for_blank_new_window", return_value=9002,
+        ), mock.patch.object(
+            coord, "_read_window_text_for", return_value="",
+        ), mock.patch(
+            "mini_kio.core.execution_boundary.execute_action",
+            side_effect=lambda a, t: launched.append(a) or {"success": True, "message": "opened", "pid": 77},
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "a new notepad", "metadata": {"payload": "hello"}},
+                None,
+            )
+        self.assertTrue(result["success"])
+        caps = [c for c, _ in events]
+        # a fresh PROCESS is launched (not a ctrl+n hotkey), then typed into.
+        self.assertEqual(launched, ["open_app"])
+        self.assertIn("keyboard_type", caps)
+        self.assertNotIn("keyboard_hotkey", caps)
 
     def test_type_into_freshly_opened_app_skips_ctrl_n(self):
         # If KIO itself just launched the app, it is already a blank document
@@ -363,10 +454,16 @@ class DesktopActionClassificationTest(unittest.TestCase):
             return_value=dp,
         ), mock.patch.object(
             coord, "_try_native_focus",
-            side_effect=[None, {"success": True, "message": "Focused Notepad."}],
+            return_value={"success": True, "message": "Focused Notepad."},
         ), mock.patch(
             "mini_kio.core.execution_boundary.execute_action",
-            return_value={"success": True},
+            return_value={"success": True, "pid": 4242},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[],
+        ), mock.patch.object(
+            coord, "_wait_for_blank_new_window", return_value=9003,
+        ), mock.patch.object(
+            coord, "_read_window_text_for", return_value="",
         ):
             result = coord._exec_desktop_action(
                 {"action": "type", "target": "notepad", "metadata": {"payload": "hello"}},
@@ -403,13 +500,19 @@ class DesktopActionClassificationTest(unittest.TestCase):
         d = _classify("hit me with your best shot")
         self.assertNotEqual(d.intent_type.value, "desktop_action")
 
-    def test_shortcut_family(self):
-        self.assertEqual(_classify("save").target, "ctrl+s")
-        self.assertEqual(_classify("copy that").target, "ctrl+c")
-        self.assertEqual(_classify("paste it here").target, "ctrl+v")
-        self.assertEqual(_classify("select all").target, "ctrl+a")
-        self.assertEqual(_classify("undo").target, "ctrl+z")
-        self.assertEqual(_classify("redo").target, "ctrl+y")
+    def test_shortcut_family_is_semantic(self):
+        # Capability-quality: edit shortcuts are SEMANTIC actions (SAVE/COPY/
+        # PASTE/SELECT_ALL/UNDO/REDO) whose key combo lives in metadata — not
+        # mechanical key_press with a hardcoded target. The executor resolves
+        # the contextual target and verifies the real result.
+        self.assertEqual(_classify("save").action, "save")
+        self.assertEqual((_classify("save").metadata or {}).get("combo"), "ctrl+s")
+        self.assertEqual(_classify("copy that").action, "copy")
+        self.assertEqual((_classify("copy that").metadata or {}).get("combo"), "ctrl+c")
+        self.assertEqual(_classify("paste it here").action, "paste")
+        self.assertEqual(_classify("select all").action, "select_all")
+        self.assertEqual(_classify("undo").action, "undo")
+        self.assertEqual(_classify("redo").action, "redo")
 
     def test_scroll_and_click(self):
         self.assertEqual(_classify("scroll down").action, "scroll")
@@ -438,12 +541,12 @@ class DesktopActionClassificationTest(unittest.TestCase):
             called = exec_action.call_args[0][0]
             self.assertEqual(called["action"], "type")
             self.assertEqual(called["metadata"]["payload"], "hello")
-            # save step -> canonical key_press ctrl+s
+            # save step -> semantic SAVE with the combo in metadata
             r2 = _run_desktop_action_step("save", "")
             self.assertTrue(r2["success"])
             called2 = exec_action.call_args[0][0]
-            self.assertEqual(called2["action"], "key_press")
-            self.assertEqual(called2["target"], "ctrl+s")
+            self.assertEqual(called2["action"], "save")
+            self.assertEqual(called2["metadata"]["combo"], "ctrl+s")
 
 
 class LockUnlockTest(unittest.TestCase):
@@ -719,6 +822,19 @@ class LLMBypassAuditTest(unittest.TestCase):
             d = _classify(phrase)
             self.assertEqual(d.intent_type.value, "operational", phrase)
             self.assertEqual(d.action, "app_installed", phrase)
+
+    def test_informal_kio_possessive_is_operational(self):
+        # Live-found leak: "whats kios status" (informal possessive) reached
+        # the identity path instead of the deterministic operational status
+        # owner. "kios" must canonicalize to "kio's" for the KIO-self
+        # families, while genuinely different words ("kiosk") stay on the
+        # knowledge path.
+        for phrase in ("whats kios status", "kios health", "what is kios uptime", "kios status"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "operational", phrase)
+        self.assertNotIn(
+            d := _classify("what is a kiosk").intent_type.value, ("operational", "identity")
+        )
 
     def test_running_state_query_is_os_probe(self):
         d = _classify("is spotify running")
@@ -1118,6 +1234,858 @@ class CompanionPreferenceTest(unittest.TestCase):
         self.assertIsNotNone(t)
         rules = " ".join(resolve_anti_hallucination_rules()).lower()
         self.assertIn("memory", rules)
+
+
+
+class GeneratedTypeTest(unittest.TestCase):
+    """Capability-quality: TYPE must distinguish literal text from generated
+    content. "type hello into notepad" types verbatim; "write a short poem
+    about X in notepad" requests CONTENT GENERATION (LLM) then deterministic
+    execution. A bare referent pronoun with no context asks for clarification.
+    """
+
+    def test_literal_payload_is_not_generated(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify("type hello into notepad", "type hello into notepad")
+        self.assertEqual(d.action, "type")
+        self.assertFalse((d.metadata or {}).get("generate"))
+        self.assertEqual((d.metadata or {}).get("payload"), "hello")
+
+    def test_poem_request_is_generated_content(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "write a short poem comparing messi and ronaldo in notepad",
+            "write a short poem comparing messi and ronaldo in notepad",
+        )
+        self.assertEqual(d.action, "type")
+        self.assertTrue((d.metadata or {}).get("generate"))
+        self.assertEqual(d.target, "notepad")
+
+    def test_n_point_summary_is_generated(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "put a three-point study summary into notepad",
+            "put a three-point study summary into notepad",
+        )
+        self.assertEqual(d.action, "type")
+        self.assertTrue((d.metadata or {}).get("generate"))
+
+    def test_bare_pronoun_requests_clarification(self):
+        # A "this" that survived referent resolution must NOT be typed literally.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify("write this in notepad", "write this in notepad")
+        self.assertEqual(d.action, "type")
+        self.assertEqual((d.metadata or {}).get("payload"), "this")
+        # Executor guard: ask for content instead of typing the word.
+        from mini_kio.core import pipeline as pl
+        from unittest import mock
+        with mock.patch.object(pl._ExecutionCoordinator, "_try_native_focus",
+                               return_value={"success": True}):
+            exec_result = pl._ExecutionCoordinator()._exec_desktop_action(
+                {"action": "type", "target": "notepad",
+                 "metadata": {"payload": "this"}},
+                None,
+            )
+        self.assertFalse(exec_result["success"])
+        self.assertIn("What should I type", exec_result["message"])
+
+
+class SemanticEditActionTest(unittest.TestCase):
+    """Capability-quality: SAVE / COPY / PASTE / SELECT_ALL / UNDO / REDO are
+    semantic operations with contextual target resolution + real verification
+    — not mechanical keypresses with unverified success messages."""
+
+    def _make_coord(self, events, dp):
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        return _ExecutionCoordinator()
+
+    def _typed_events(self):
+        events = []
+        dp = mock.Mock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or
+            ({"success": True, "message": "ok", "text": "hello world"} if cap == "clipboard_get" else
+             {"success": True, "message": "ok"} if cap.startswith("keyboard_") else
+             {"success": False, "message": "no"})
+        )
+        return events, dp
+
+    def test_copy_is_verified_against_real_clipboard(self):
+        # COPY reads the clipboard back and reports the ACTUAL copied content
+        # length — a truthful verification, not a bare "Pressed Ctrl+C."
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events, dp = self._typed_events()
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(coord, "_try_native_focus", return_value=None), \
+             mock.patch.object(coord, "_resolve_edit_target", return_value=None):
+            result = coord._exec_desktop_action(
+                {"action": "copy", "target": "", "metadata": {"combo": "ctrl+c"}},
+                None,
+            )
+        self.assertTrue(result["success"])
+        self.assertIn("11 characters", result["message"])
+        self.assertTrue(result.get("verified"))
+        self.assertIn(("keyboard_hotkey", "ctrl+c"), events)
+        self.assertIn(("clipboard_get", ""), events)
+
+    def test_paste_with_empty_clipboard_is_truthful(self):
+        # PASTE with an empty clipboard is a truthful failure, never a fake
+        # "Pasted."
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events, dp = self._typed_events()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or
+            {"success": False, "message": "clipboard empty"} if cap == "clipboard_get" else
+            {"success": True, "message": "ok"}
+        )
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(coord, "_try_native_focus", return_value=None), \
+             mock.patch.object(coord, "_resolve_edit_target", return_value=None):
+            result = coord._exec_desktop_action(
+                {"action": "paste", "target": "", "metadata": {"combo": "ctrl+v"}},
+                None,
+            )
+        self.assertFalse(result["success"])
+        self.assertIn("empty", result["message"].lower())
+
+    def test_save_resolves_contextual_target_before_key(self):
+        # SAVE resolves the session's active entity and focuses it BEFORE
+        # sending Ctrl+S — the key lands in the window the user is working in.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events, dp = self._typed_events()
+        coord = _ExecutionCoordinator()
+        focused = []
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_resolve_edit_target", return_value="notepad",
+        ), mock.patch.object(
+            coord, "_try_native_focus",
+            side_effect=lambda t: focused.append(t) or {"success": True, "message": "focused"},
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "save", "target": "", "metadata": {"combo": "ctrl+s"}},
+                None,
+            )
+        self.assertTrue(result["success"])
+        self.assertEqual(focused, ["notepad"])
+        self.assertIn(("keyboard_hotkey", "ctrl+s"), events)
+        self.assertIn("Saved", result["message"])
+
+    def test_select_all_is_semantic_action(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify("select everything", "select everything")
+        self.assertEqual(d.action, "select_all")
+        self.assertEqual((d.metadata or {}).get("combo"), "ctrl+a")
+
+    def test_type_verification_confirmed_payload(self):
+        # TYPE read-back confirms the payload actually landed in the window.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events = []
+        dp = mock.Mock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or {"success": True, "message": "ok"}
+        )
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus",
+            return_value={"success": True, "message": "Focused Notepad."},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text",
+            return_value=["hello there my friend"],
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "notepad", "metadata": {"payload": "hello"}},
+                None,
+            )
+        self.assertTrue(result["success"])
+        self.assertTrue(result.get("verified"))
+        # Natural outcome wording — never internal "verified" vocabulary.
+        self.assertNotIn("verified", result["message"].lower())
+        self.assertTrue("done" in result["message"].lower() or "typed" in result["message"].lower())
+
+    def test_large_payload_uses_atomic_paste_not_per_char_typing(self):
+        # Root-cause regression: generated documents were typed one character
+        # at a time (slow, interruptible, truncation-prone → mixed/partial
+        # content). Large payloads MUST use atomic clipboard paste, with
+        # keyboard_type only as fallback for short literals.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events = []
+        dp = mock.MagicMock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or {"success": True, "message": "ok"}
+        )
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus", return_value={"success": True},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[]
+        ), mock.patch.object(
+            coord, "_snapshot_app_windows", return_value={10, 20},
+        ), mock.patch.object(
+            coord, "_wait_for_new_window", return_value=30,
+        ):
+            big = "word " * 60  # ~300 chars > 80 threshold
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "notepad", "metadata": {"payload": big}},
+                None,
+            )
+        caps = [c for c, _ in events]
+        self.assertIn("clipboard_set", caps)
+        self.assertIn("keyboard_hotkey", caps)
+        self.assertNotIn("keyboard_type", caps)
+        self.assertTrue(result["success"])
+
+    def test_short_literal_uses_direct_typing(self):
+        # "type hello KIO" is a LITERAL — no content generation, no clipboard
+        # round-trip; direct typing is the correct cheap path.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events = []
+        dp = mock.MagicMock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or {"success": True, "message": "ok"}
+        )
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus", return_value={"success": True},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text", return_value=[]
+        ), mock.patch.object(
+            coord, "_snapshot_app_windows", return_value=set(),
+        ), mock.patch.object(
+            coord, "_wait_for_new_window", return_value=5,
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "notepad", "metadata": {"payload": "hello KIO"}},
+                None,
+            )
+        caps = [c for c, _ in events]
+        self.assertIn("keyboard_type", caps)
+        self.assertNotIn("clipboard_set", caps)
+        self.assertTrue(result["success"])
+
+    def test_type_verification_absent_payload_is_truthful_failure(self):
+        # Window WAS readable and the payload is NOT present → truthful
+        # failure, never a success-shaped "Typed it."
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        events = []
+        dp = mock.Mock()
+        dp.execute.side_effect = lambda cap, target="": (
+            events.append((cap, target)) or {"success": True, "message": "ok"}
+        )
+        coord = _ExecutionCoordinator()
+        with mock.patch(
+            "mini_kio.desktop.DesktopProvider", return_value=dp,
+        ), mock.patch.object(
+            coord, "_try_native_focus",
+            return_value={"success": True, "message": "Focused Notepad."},
+        ), mock.patch.object(
+            coord, "_read_target_or_foreground_text",
+            return_value=["completely different content"],
+        ):
+            result = coord._exec_desktop_action(
+                {"action": "type", "target": "notepad", "metadata": {"payload": "hello"}},
+                None,
+            )
+        self.assertFalse(result["success"])
+        self.assertIn("isn't showing", result["message"])
+
+
+class LiveFoundTypeRoutingTest(unittest.TestCase):
+    """Live Telegram regressions from the real conversation: content-request
+    phrasings that previously fell to companion chat (fabricating 'I'll type
+    CTRL+C into Notepad') or parsed the target wrong ('a new notepad file')
+    must converge on the canonical TYPE/create_document semantics."""
+
+    def test_do_a_comparison_and_type_it_into_notepad(self):
+        # "Do a small comparison on X and Y and type it into notepad" must be
+        # a GENERATED-content TYPE task — not a companion preference answer.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "do a small comparison on KTU 2024 scheme and KTU 2019 scheme and type it into notepad",
+            "do a small comparison on KTU 2024 scheme and KTU 2019 scheme and type it into notepad",
+        )
+        self.assertEqual(d.intent_type.value, "desktop_action")
+        self.assertEqual(d.action, "type")
+        self.assertEqual(d.target, "notepad")
+        self.assertTrue((d.metadata or {}).get("generate"))
+        payload = (d.metadata or {}).get("payload", "")
+        self.assertIn("comparison", payload)
+        self.assertIn("ktu", payload)
+
+    def test_type_the_comparison_onto_notepad(self):
+        # "onto" connector + artifact-only referent must classify as TYPE.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "type the comparison onto notepad",
+            "type the comparison onto notepad",
+        )
+        self.assertEqual(d.action, "type")
+        self.assertEqual(d.target, "notepad")
+
+    def test_comparison_in_new_notepad_file_normalizes_target(self):
+        # "a new notepad file" -> target "notepad" (artifact suffix stripped),
+        # never a broken "A new notepad file" target.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "type a comparison on messi vs lewis hamilton in a new notepad file",
+            "type a comparison on messi vs lewis hamilton in a new notepad file",
+        )
+        self.assertEqual(d.action, "type")
+        self.assertEqual(d.target, "notepad")
+        self.assertTrue((d.metadata or {}).get("generate"))
+        self.assertTrue((d.metadata or {}).get("new_instance"))
+
+    def test_doubled_connector_into_onto(self):
+        # "do a real comparison and type into onto a new notepad file" — the
+        # doubled connector must not break classification.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "do a real comparison and type into onto a new notepad file",
+            "do a real comparison and type into onto a new notepad file",
+        )
+        self.assertEqual(d.action, "type")
+        self.assertEqual(d.target, "notepad")
+        self.assertTrue((d.metadata or {}).get("generate"))
+
+    def test_bare_write_essay_routes_to_document_creation(self):
+        # User directive: "write an essay on X" (no explicit app) routes to
+        # LLM content + real artifact creation, not a companion answer.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify("write an essay on KIO", "write an essay on KIO")
+        self.assertEqual(d.action, "create_document")
+        self.assertEqual(d.target, "kio")
+
+    def test_artifact_only_payload_inherits_topic_from_context(self):
+        # "do a real comparison" after "a comparison on messi vs lewis
+        # hamilton" inherits the topic from recent context instead of asking.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        from mini_kio.core.pipeline import RoutingDecision
+        from mini_kio.core.pipeline import IntentType
+        from mini_kio.core.context_manager import get_session_context
+
+        ctx = get_session_context("inherit-topic-test")
+        ctx.append_exchange(
+            "type a comparison on messi vs lewis hamilton in a new notepad file",
+            "Typed it into a new Notepad.",
+        )
+        coord = _ExecutionCoordinator()
+        decision = RoutingDecision(
+            IntentType.DESKTOP_ACTION, "type", "notepad",
+            "do a real comparison and type into onto a new notepad file",
+            "do a real comparison and type into onto a new notepad file",
+            confidence=1.0, session_id="inherit-topic-test",
+        )
+        topic = coord._inherit_content_topic(decision, "comparison")
+        self.assertIsNotNone(topic)
+        self.assertIn("messi", topic)
+
+
+class DocumentCreationTest(unittest.TestCase):
+    """Capability-quality: CREATE DOCUMENT produces a meaningful artifact with
+    a real filename, clean structured content, and verification facts. The
+    document operator is the canonical owner (dependency-free OOXML)."""
+
+    def test_meaningful_filenames(self):
+        from mini_kio.core.document_operator import generate_document_filename
+        self.assertEqual(
+            generate_document_filename("renewable energy", "report"),
+            "Renewable_Energy_Report",
+        )
+        self.assertEqual(
+            generate_document_filename("messi and ronaldo", "comparison"),
+            "Messi_And_Ronaldo_Comparison",
+        )
+        self.assertEqual(
+            generate_document_filename("machine learning", "document"),
+            "Machine_Learning_Overview",
+        )
+
+    def test_create_and_verify_docx(self):
+        from mini_kio.core.document_operator import (
+            create_document, verify_docx, _parse_content_blocks,
+        )
+        import pathlib, tempfile
+        content = (
+            "Machine Learning: A Brief Overview\n\n"
+            "What is Machine Learning?\n"
+            "Machine learning is a branch of AI where systems learn from data.\n\n"
+            "Key Concepts\n- Training data\n- Models\n- Generalization\n\n"
+            "Why It Matters\nML powers modern software.\n"
+        )
+        blocks = _parse_content_blocks(content)
+        self.assertTrue(any(k == "heading" for k, _ in blocks))
+        self.assertTrue(any(k == "bullet" for k, _ in blocks))
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_document("machine learning", content, artifact="report", out_dir=tmp)
+        self.assertTrue(r["success"], r)
+        self.assertTrue(r["filename"].startswith("Machine_Learning_Report"))
+        path = pathlib.Path(r["path"])
+        self.assertTrue(path.exists())
+        facts = verify_docx(path)
+        self.assertTrue(facts["valid_zip"])
+        self.assertGreater(facts["word_count"], 10)
+
+    def test_collision_never_overwrites(self):
+        from mini_kio.core.document_operator import (
+            create_document, _ensure_unique,
+        )
+        import pathlib, tempfile
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        p1 = _ensure_unique(tmp / "Doc.docx")
+        p1.write_bytes(b"x")
+        p2 = _ensure_unique(tmp / "Doc.docx")
+        self.assertNotEqual(p1, p2)
+        self.assertEqual(p2.name, "Doc (2).docx")
+
+    def test_create_document_routing(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify(
+            "create a word document about machine learning",
+            "create a word document about machine learning",
+        )
+        self.assertEqual(d.action, "create_document")
+        self.assertEqual(d.target, "machine learning")
+        self.assertEqual((d.metadata or {}).get("artifact"), "document")
+        d2 = p._classifier.classify(
+            "make a word file comparing messi and ronaldo",
+            "make a word file comparing messi and ronaldo",
+        )
+        self.assertEqual(d2.action, "create_document")
+        self.assertEqual((d2.metadata or {}).get("artifact"), "comparison")
+        d3 = p._classifier.classify(
+            "create a report on renewable energy and make it concise",
+            "create a report on renewable energy and make it concise",
+        )
+        self.assertEqual(d3.action, "create_document")
+        self.assertEqual(d3.target, "renewable energy")
+        self.assertEqual((d3.metadata or {}).get("style"), "concise")
+
+    def test_no_markdown_leak_in_document_xml(self):
+        from mini_kio.core.document_operator import _sanitize_markdown
+        dirty = "## Headers\n**bold** text with `code` and ```fences```\n"
+        clean = _sanitize_markdown(dirty)
+        self.assertNotIn("##", clean)
+        self.assertNotIn("**", clean)
+        self.assertNotIn("`", clean)
+        self.assertNotIn("```", clean)
+
+
+
+class ReferentStyleModifierTest(unittest.TestCase):
+    """Live-found (document-creation revalidation): 'create a word document
+    about renewable energy and make IT concise' spliced the active entity into
+    the style modifier -> 'make notepad concise' -> filename
+    Renewable_Energy_And_Make_Notepad_Concise_Overview.docx. A pronoun in a
+    QUALITY-MODIFIER construction is a style/format modifier, never a target
+    referent. Real referents ("close it") must still resolve.
+    """
+
+    def _ctx_with_entity(self, entity):
+        from mini_kio.core.context_manager import SessionContext
+        cm = SessionContext(session_id="guard-test")
+        cm.update({"success": True, "action": "open_app", "target": entity},
+                  f"open {entity}")
+        return cm
+
+    def test_style_modifier_it_is_not_resolved(self):
+        cm = self._ctx_with_entity("notepad")
+        resolved = cm.resolved_text(
+            "create a word document about renewable energy and make it concise"
+        )
+        self.assertIn("make it concise", resolved)
+        self.assertNotIn("make notepad", resolved)
+
+    def test_style_modifier_variants(self):
+        cm = self._ctx_with_entity("word")
+        for q in (
+            "keep it short",
+            "turn it professional",
+            "write it as a poem",
+            "make it a list",
+        ):
+            self.assertEqual(cm.resolved_text(q), q, q)
+
+    def test_real_referent_still_resolves(self):
+        cm = self._ctx_with_entity("notepad")
+        self.assertEqual(cm.resolved_text("close it"), "close notepad")
+        self.assertEqual(cm.resolved_text("focus it"), "focus notepad")
+
+
+class SemanticEditVariantsTest(unittest.TestCase):
+    """Natural-language semantic edit actions (Section 13 directive):
+    "select everything", "copy the selected text", "save the document" must
+    converge to their semantic action with the key combo in metadata — never
+    a mechanical-key vocabulary leak or an LLM/conversation fallback."""
+
+    def _classify(self, text):
+        from mini_kio.core.pipeline import _IntentClassifier
+        return _IntentClassifier().classify(text, text)
+
+    def test_semantic_edit_variants_route(self):
+        cases = {
+            "select everything": ("select_all", "ctrl+a"),
+            "select the whole thing": ("select_all", "ctrl+a"),
+            "select all text": ("select_all", "ctrl+a"),
+            "copy the selected text": ("copy", "ctrl+c"),
+            "copy everything": ("copy", "ctrl+c"),
+            "save the document": ("save", "ctrl+s"),
+            "save the file": ("save", "ctrl+s"),
+            "save all": ("save", "ctrl+s"),
+            "paste it here": ("paste", "ctrl+v"),
+            "undo that": ("undo", "ctrl+z"),
+            "undo the last action": ("undo", "ctrl+z"),
+            "redo this": ("redo", "ctrl+y"),
+        }
+        for phrase, (action, combo) in cases.items():
+            d = self._classify(phrase)
+            self.assertEqual(d.intent_type.value, "desktop_action", phrase)
+            self.assertEqual(d.action, action, phrase)
+            self.assertEqual(d.metadata.get("combo"), combo, phrase)
+
+    def test_pronoun_edit_actions_survive_context_resolution(self):
+        # Live-found regression: context resolution spliced "copy it" into
+        # "copy notepad", destroying the semantic action. Edit-action verbs
+        # must keep their pronoun so the classifier recognizes the action and
+        # the executor resolves the target from context.
+        from mini_kio.core.context_manager import get_session_context
+        from mini_kio.core.pipeline import _IntentClassifier
+        ctx = get_session_context("test-edit-pronoun")
+        ctx.active_entity = "notepad"
+        ctx.last_target = "notepad"
+        c = _IntentClassifier()
+        for phrase, action in (
+            ("copy it", "copy"), ("paste it", "paste"), ("save it", "save"),
+            ("undo it", "undo"), ("redo it", "redo"),
+        ):
+            resolved = ctx.resolved_text(phrase)
+            d = c.classify(resolved, phrase)
+            self.assertEqual(d.intent_type.value, "desktop_action", (phrase, resolved))
+            self.assertEqual(d.action, action, (phrase, resolved))
+
+    def test_generic_document_target_routes_to_create_document(self):
+        # "do a comparison of A and B and put it in a new document" (no app
+        # named) is a DOCUMENT-CREATION request — the document operator writes
+        # a real artifact, never keystroke-TYPE into an app called "document".
+        from mini_kio.core.pipeline import _IntentClassifier
+        c = _IntentClassifier()
+        d = c.classify(
+            "do a small comparison of messi and ronaldo and put it in a new document",
+            "do a small comparison of messi and ronaldo and put it in a new document",
+        )
+        self.assertEqual(d.intent_type.value, "desktop_action")
+        self.assertEqual(d.action, "create_document")
+        self.assertEqual(d.metadata.get("artifact"), "comparison")
+        self.assertEqual(d.metadata.get("subject"), "messi and ronaldo")
+
+    def test_named_app_document_stays_type_generate(self):
+        # Same content request but with a NAMED app keeps the TYPE-into-app
+        # path (generate the content, then type it into the fresh Notepad).
+        from mini_kio.core.pipeline import _IntentClassifier
+        c = _IntentClassifier()
+        d = c.classify(
+            "do a small comparison on KTU 2024 scheme and KTU 2019 scheme and type it into notepad",
+            "do a small comparison on KTU 2024 scheme and KTU 2019 scheme and type it into notepad",
+        )
+        self.assertEqual(d.intent_type.value, "desktop_action")
+        self.assertEqual(d.action, "type")
+        self.assertEqual(d.target, "notepad")
+        self.assertTrue(d.metadata.get("generate"))
+
+    def test_literal_type_never_generates(self):
+        from mini_kio.core.pipeline import _IntentClassifier
+        c = _IntentClassifier()
+        d = c.classify("type hello into notepad", "type hello into notepad")
+        self.assertEqual(d.action, "type")
+        self.assertFalse(d.metadata.get("generate"))
+
+    def test_research_facts_kio_self_short_circuit(self):
+        # KIO-self content requests must NEVER reach the web research chain.
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        coord = _ExecutionCoordinator()
+        self.assertEqual(coord._research_facts("write a document about KIO capabilities"), "")
+        self.assertEqual(coord._research_facts("what is kio's architecture"), "")
+
+    def test_conversation_reply_never_poisons_context_referent(self):
+        # Live-found: a companion reply stored the USER'S OWN SENTENCE as
+        # active_entity, which the next request's pronoun splice injected
+        # verbatim ("put it in a new document" -> "put <whole previous
+        # question> in a new document"), dragging a fresh document request
+        # into the conversation path. Sentence-length referents must never be
+        # stored or spliced.
+        from mini_kio.core.context_manager import get_session_context
+        ctx = get_session_context("test-poison-referent")
+        # Simulate a conversation result whose target is the raw user sentence.
+        ctx.update(
+            {
+                "success": True,
+                "message": "I'd choose Spotify...",
+                "target": "if you had to pick, would you rather recommend Spotify or YouTube Music for discovering new music",
+                "action": "converse",
+            },
+            "if you had to pick, would you rather recommend Spotify or YouTube Music for discovering new music",
+        )
+        self.assertIsNone(ctx.active_entity)
+        self.assertIsNone(ctx.last_target)
+        # A fresh document request must survive context resolution intact.
+        resolved = ctx.resolved_text(
+            "do a small comparison of Messi and Ronaldo and put it in a new document"
+        )
+        self.assertEqual(resolved, "do a small comparison of Messi and Ronaldo and put it in a new document")
+        # Concise entity referents still splice normally.
+        ctx2 = get_session_context("test-poison-referent-ok")
+        ctx2.update({"success": True, "message": "Done.", "target": "notepad", "action": "open_app"}, "open notepad")
+        self.assertEqual(ctx2.active_entity, "notepad")
+        self.assertEqual(ctx2.resolved_text("close it"), "close notepad")
+
+    def test_research_facts_grounds_non_kio_query(self):
+        # A factual non-KIO query goes through the router; a provider miss
+        # must degrade to "" (never raise, never block content generation).
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        coord = _ExecutionCoordinator()
+        facts = coord._research_facts("compare KTU 2024 and 2019 schemes")
+        self.assertIsInstance(facts, str)
+
+    def test_semantic_edit_with_explicit_app_target(self):
+        d = self._classify("save the file in word")
+        self.assertEqual(d.intent_type.value, "desktop_action")
+        self.assertEqual(d.action, "save")
+        self.assertEqual(d.metadata.get("combo"), "ctrl+s")
+
+    def test_knowledge_shapes_stay_out(self):
+        for phrase in (
+            "copy files to usb", "save money", "what is copywriting",
+            "how to save a file", "select all files", "select all files in downloads",
+        ):
+            d = self._classify(phrase)
+            self.assertNotEqual(d.intent_type.value, "desktop_action", phrase)
+            self.assertNotEqual(d.action, "copy", phrase)
+
+
+class CameraCapabilityTest(unittest.TestCase):
+    """Camera capability: semantic family + generic UWP native resolution.
+
+    - "open camera" / "launch my camera" must resolve the NATIVE installed
+      camera app (UWP discovery), never a .com website.
+    - "take a picture" / "capture a photo" must route to the camera capture
+      capability, never to the LLM/web.
+    - The executor must claim capture success ONLY when a photo file actually
+      appeared (truthful verification), otherwise report the limitation.
+    """
+
+    def _classify(self, text):
+        from mini_kio.core.pipeline import _IntentClassifier
+        return _IntentClassifier().classify(text, text)
+
+    def test_capture_phrasing_routes_to_camera_capability(self):
+        for q in (
+            "take a picture",
+            "take a photo with the camera",
+            "capture a photo",
+            "snap a picture",
+            "take a selfie",
+            "take a picture with the camera",
+        ):
+            d = self._classify(q)
+            self.assertEqual(d.intent_type.value, "desktop_action", q)
+            self.assertEqual(d.action, "camera", q)
+            self.assertEqual(d.target, "capture", q)
+            self.assertEqual(d.metadata.get("camera_action"), "capture", q)
+
+    def test_open_camera_routes_native_app(self):
+        for q in ("open the camera", "open camera", "launch my camera"):
+            d = self._classify(q)
+            # Native open path (target normalized to "camera"); the executor's
+            # native-first discovery resolves the UWP app — never a website.
+            self.assertEqual(d.intent_type.value, "desktop_open", q)
+            self.assertEqual(d.target, "camera", q)
+
+    def test_what_is_a_camera_stays_knowledge(self):
+        d = self._classify("what is a camera")
+        self.assertNotEqual(d.intent_type.value, "desktop_action")
+        self.assertNotEqual(d.action, "camera")
+
+    def _reset_uwp_cache(self):
+        from mini_kio.core.app_operator import _UWP_APPS_CACHE
+        _UWP_APPS_CACHE["ts"] = 0.0
+        _UWP_APPS_CACHE["failed_ts"] = 0.0
+        _UWP_APPS_CACHE["apps"] = []
+
+    @mock.patch("mini_kio.core.execution_boundary.execute_action")
+    @mock.patch("mini_kio.core.app_operator.subprocess.run")
+    def test_uwp_discovery_finds_native_camera(self, mock_subprocess_run, mock_exec):
+        # Get-StartApps returns the real Windows Camera AUMID.
+        mock_subprocess_run.return_value = mock.Mock(
+            stdout="Camera|Microsoft.WindowsCamera_8wekyb3d8bbwe!App\r\n"
+                   "Photos|Microsoft.Windows.Photos_8wekyb3d8bbwe!App\r\n",
+            stderr="",
+        )
+        self._reset_uwp_cache()
+        from mini_kio.core.app_operator import _find_installed_app
+        found = _find_installed_app("camera")
+        self.assertIsNotNone(found)
+        self.assertEqual(found["kind"], "uwp")
+        self.assertIn("WindowsCamera", found["target"])
+        # Routing must prefer the native route over the .com website.
+        from mini_kio.core.routing_utils import get_browser_routing
+        route = get_browser_routing("camera")
+        self.assertEqual(route["route_type"], "native")
+        self._reset_uwp_cache()
+
+    @mock.patch("mini_kio.core.app_operator.subprocess.run")
+    def test_uwp_short_fragment_never_overmatches(self, mock_subprocess_run):
+        mock_subprocess_run.return_value = mock.Mock(
+            stdout="Camera|Microsoft.WindowsCamera_8wekyb3d8bbwe!App\r\n"
+                   "Photos|Microsoft.Windows.Photos_8wekyb3d8bbwe!App\r\n",
+            stderr="",
+        )
+        self._reset_uwp_cache()
+        from mini_kio.core.app_operator import _find_installed_app
+        self.assertIsNone(_find_installed_app("a"))  # len < 3
+        self.assertIsNone(_find_installed_app("zq"))  # len < 3
+        self._reset_uwp_cache()
+
+    def test_capture_executor_claims_only_verified_photo(self):
+        # The camera executor must return an honest limitation when no photo
+        # file appears, never a fake "Took a photo". The REAL executor is
+        # exercised with all external dependencies mocked at their import
+        # sites (the method imports at call time).
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        coord = _ExecutionCoordinator()
+        dp = mock.Mock()
+        dp.execute.return_value = {"success": True}
+        with mock.patch(
+            "mini_kio.core.app_operator._find_installed_app",
+            return_value={"kind": "uwp", "target": "CameraAUMID", "display": "Camera"},
+        ), mock.patch(
+            "mini_kio.core.app_operator._launch_discovered",
+            return_value={"success": True, "message": "Opened camera"},
+        ), mock.patch("mini_kio.core.pipeline.time.sleep"), mock.patch(
+            "pathlib.Path.home",
+            return_value=__import__("pathlib").Path("."),
+        ):
+            # A non-existent Camera Roll dir → no new photos → truthful
+            # limitation, never a fabricated capture.
+            result = coord._exec_camera({"camera_action": "capture"}, dp)
+        self.assertFalse(result["success"])
+        self.assertIn("couldn't confirm", result["message"])
+        self.assertTrue(result.get("camera_open"))
+        self.assertNotIn("Took a photo", result["message"])
+
+
+class CasualFragmentRoutingTest(unittest.TestCase):
+    """Live-found: "Yoo" (message-initial capital) became an ENTITY_QUERY
+    and returned an unrelated UFC fighter biography. Message-initial
+    capitalization is a writing convention, not proper-noun evidence —
+    casual/greeting/social fragments must stay on the conversation family
+    while genuine entities (Messi, Spotify, ChatGPT) keep the entity path."""
+
+    def _classify(self, text):
+        from mini_kio.core.pipeline import _IntentClassifier
+        return _IntentClassifier().classify(text, text)
+
+    def test_casual_fragments_never_become_entity_queries(self):
+        # The exact live regression plus a broad casual family, all typed with
+        # a message-initial capital letter (the failing condition).
+        casual = (
+            "Yoo", "Yooo", "Yo", "Hey", "Heyy", "Hi", "Hello", "Sup",
+            "Lol", "Lmao", "Wow", "Damn", "Cool", "Nice", "Okay", "K",
+            "Alright", "Thanks", "Ty", "Bro", "Dude", "Bruh", "Yikes",
+            "Hmm", "Oh", "Ah", "Yeah", "Yep", "Nope", "Nah", "Omg",
+            # Punctuation variants are the most natural greeting forms — they
+            # must not leak through the guard ("yoo!" != "yoo" raw).
+            "Yoo!", "Yoo?", "Hey!", "Hi!", "Lol!", "Wow!", "Oh wow", "Haha yeah",
+        )
+        for q in casual:
+            d = self._classify(q)
+            self.assertIn(
+                d.intent_type.value, ("conversation", "greeting", "social"),
+                f"{q!r} must stay conversational, got {d.intent_type.value}",
+            )
+            self.assertNotEqual(
+                d.intent_type.value, "entity_query", f"{q!r} became an entity query",
+            )
+
+    def test_genuine_entities_still_route_to_entity_query(self):
+        for q in ("Messi", "Ronaldo", "Spotify", "ChatGPT", "One hundred years of solitude"):
+            d = self._classify(q)
+            self.assertEqual(d.intent_type.value, "entity_query", q)
+
+    def test_entities_starting_with_casual_word_keep_entity_path(self):
+        # "Nice France", "Good Charlotte", "Great Barrier Reef": the all-casual
+        # guard fires ONLY when every word is a casual fragment, so real
+        # entities that merely START with a casual token keep the entity path.
+        for q in ("Nice France", "Good Charlotte", "Great Barrier Reef", "Cool Runnings"):
+            d = self._classify(q)
+            self.assertEqual(d.intent_type.value, "entity_query", q)
+
+    def test_full_pipeline_yoo_is_conversation(self):
+        from mini_kio.core.pipeline import Pipeline
+        res = Pipeline().run("Yoo", session_id="test-casual-yoo")
+        self.assertEqual(res.get("action"), "converse")
+        self.assertNotIn("UFC", str(res.get("message", "")))
+
+    def test_repeated_vowel_casual_forms_stay_conversational(self):
+        # "Yoooooo" / "Heeeey" are emphasis-stretched casual fragments, not
+        # proper nouns. The entity heuristic must fold runs of 3+ repeats
+        # before the capitalization check, while keeping double-letter
+        # entities ("Messi", "Ronaldo") intact.
+        for q in ("Yoooooo", "Yooo", "Heeeey", "Wooow", "Daaaamn", "Lool", "Sssup"):
+            d = self._classify(q)
+            self.assertIn(
+                d.intent_type.value, ("conversation", "greeting", "social"),
+                f"{q!r} must stay conversational, got {d.intent_type.value}",
+            )
+        # Double-letter genuine entities must NOT be collapsed away.
+        for q in ("Messi", "Ronaldo", "Spotify"):
+            d = self._classify(q)
+            self.assertEqual(d.intent_type.value, "entity_query", q)
+
+    def test_conversation_reply_never_becomes_next_referent(self):
+        # Live-found class: a conversational reply's target is the user's own
+        # sentence. Even a SHORT one-word reply ("sure") must never become the
+        # referent spliced into the next command ("open it" -> "open sure").
+        # Gated by action KIND, not length: conversation/identity/operational
+        # results never feed the referent store.
+        from mini_kio.core.context_manager import get_session_context
+        ctx = get_session_context("test-ref-gate")
+        ctx.active_entity = None
+        ctx.last_target = None
+        ctx.update({"success": True, "action": "converse", "target": "sure"}, "sure")
+        self.assertIsNone(ctx.active_entity)
+        self.assertIsNone(ctx.last_target)
+        ctx.update({"success": True, "action": "identity", "target": "KIO"}, "what is kio")
+        self.assertIsNone(ctx.active_entity)
+        # Real executed actions still become referents.
+        ctx.update({"success": True, "action": "open_app", "target": "notepad"}, "open notepad")
+        self.assertEqual(ctx.active_entity, "notepad")
+        ctx.update(
+            {"success": True, "action": "create_document", "target": "Messi_Comparison.docx"},
+            "create doc",
+        )
+        self.assertIn("messi", ctx.active_entity)
+        self.assertIn("comparison", ctx.resolved_text("close it"))
 
 
 

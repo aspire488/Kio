@@ -117,6 +117,20 @@ _KNOWN_ENTITIES = frozenset({
 
 _MAX_EXCHANGES = 10
 
+# BC-5: results from cognition-only owners (conversation, identity, status,
+# operational readings) never produce an actionable referent. Their "target"
+# is either the user's own sentence (converse) or an empty/synthetic value —
+# storing it would poison the NEXT command's pronoun splice ("open it" ->
+# "open <previous conversational sentence>"). Gating by action KIND is
+# canonical: short one-word replies ("sure", "cool!") are covered even
+# though the length guard below would let them through.
+_NON_REFERENT_ACTIONS = frozenset({
+    "converse", "identity", "health", "status", "battery", "uptime",
+    "app_inventory", "lock_state", "system", "system_status",
+    "list_tabs", "greeting", "acknowledge", "capability", "capabilities",
+    "recommend", "search", "information_query", "entity_query",
+})
+
 
 @dataclass
 class PendingAction:
@@ -624,15 +638,49 @@ class SessionContext:
             )
 
         # G5: pronoun → active_entity, then session last_target fallback
+        # A pronoun in a QUALITY-MODIFIER construction ("make it concise",
+        # "keep it short", "write it as a poem", "turn it professional") is
+        # a style/format modifier, NEVER a target referent — splicing the
+        # active entity in produced "make notepad concise" inside a document
+        # request. Bounded modifier verb + style noun/adj grammar.
+        if re.search(
+            r"\b(?:make|keep|set|turn|render|leave|write|put)\s+"
+            r"(?:it|that|this)\s+(?:(?:into|as)\s+)?(?:a|an|the)?\s*"
+            r"(?:concise|short|brief|professional|formal|detailed|simple|poetic|"
+            r"casual|fun|long|clear|clean|neat|poem|essay|report|bullet|list|table)\b",
+            lower,
+        ):
+            return text
+        # SEMANTIC-EDIT guard: "copy it", "paste that", "save this",
+        # "select it", "undo it" are SEMANTIC ACTIONS whose pronoun is the
+        # generic object of the action — the classifier recognizes the action
+        # (COPY / PASTE / SAVE / SELECT_ALL / UNDO / REDO) and the executor
+        # resolves the contextual target. Splicing the entity here produced
+        # "copy notepad", which the classifier could not recognize and the
+        # whole request fell to the LLM/conversation path. Bounded verb list.
+        if re.search(
+            r"\b(?:copy|paste|save|select|undo|redo|cut|delete|erase)\s+\b(it|that|this|them|these|those)\b",
+            lower,
+        ):
+            return text
         if re.search(r"\b(it|that|this)\b", lower):
-            if self.active_entity:
+            # BC-4: never splice a sentence-length referent. A conversational
+            # question stored by mistake (or any long entity) would be injected
+            # verbatim into a fresh command. Referents must look like concise
+            # entity names to be spliced.
+            def _spliceable(ref: str) -> bool:
+                ref = (ref or "").strip()
+                return bool(ref) and len(ref) <= 48 and ref.count(" ") <= 6 \
+                    and not any(ch in ref for ch in "?!/;:()")
+
+            if self.active_entity and _spliceable(self.active_entity):
                 resolved = re.sub(
                     r"\b(it|that|this)\b", self.active_entity, text, flags=re.IGNORECASE
                 )
                 if resolved != text:
                     logger.info("[CONTEXT_RESOLVE] pronoun: %r → %r", text, resolved)
                     return resolved.strip()
-            if self.last_target:
+            if self.last_target and _spliceable(self.last_target):
                 resolved = re.sub(
                     r"\b(it|that|this)\b", self.last_target, text, flags=re.IGNORECASE
                 )
@@ -653,6 +701,16 @@ class SessionContext:
 
         target = result.get("target") or result.get("subject") or ""
         clean = None
+        # BC-5: cognition-only results never feed the action-referent store.
+        # A conversational reply (action="converse"), an identity/status
+        # answer, or an operational reading (health/battery/inventory) has NO
+        # actionable referent — a later "open it" must not splice the reply
+        # text into a command. This gates by ACTION KIND (canonical), not by
+        # length: even a one-word conversational reply ("sure", "cool!") can
+        # never become the referent that poisons the next request.
+        action_kind = result.get("action") or ""
+        if action_kind in _NON_REFERENT_ACTIONS:
+            target = ""
         # Failed executions MUST NOT become conversational context — only
         # successful results may set the referent (a failed "open X" never
         # makes a later "close it" target X). Exception: a failed PLAY keeps
@@ -665,6 +723,16 @@ class SessionContext:
             # "close it"/"open that" splices back into a command.
             from mini_kio.core.target_ref import safe_target_name
             clean = safe_target_name(str(target)).strip().rstrip(".,!?;:")
+            # BC-4: belt-and-suspenders length guard on top of the action-kind
+            # gate above — a sentence-length referent must never be stored, it
+            # would be spliced into the NEXT command. Only concise entity-like
+            # names are valid referents.
+            if clean and (
+                len(clean) > 48
+                or clean.count(" ") > 6
+                or any(ch in clean for ch in "?!/;:()")
+            ):
+                clean = None
             if clean:
                 self.active_entity = clean
                 self.last_target = clean
