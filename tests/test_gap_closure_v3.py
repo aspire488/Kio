@@ -1994,6 +1994,127 @@ class CameraCapabilityTest(unittest.TestCase):
         self.assertNotIn("Took a photo", result["message"])
 
 
+class GenericArtifactCreationTest(unittest.TestCase):
+    """Generic CONTENT + ARTIFACT capability: the same semantic task model
+    resolves essay/report -> .docx (Word), spreadsheet/budget -> .xlsx
+    (Excel), presentation/slides -> .pptx (PowerPoint) through ONE canonical
+    artifact operator — never per-app branches. Destination applications in
+    the user's phrasing are FORMAT hints, and every artifact is verified."""
+
+    def _classify(self, text):
+        from mini_kio.core.pipeline import _IntentClassifier
+        return _IntentClassifier().classify(text, text)
+
+    def test_spreadsheet_and_presentation_routing(self):
+        cases = [
+            ("make a spreadsheet comparing X and Y in Excel", "spreadsheet"),
+            ("create a presentation about black holes", "presentation"),
+            ("prepare slides about KIO", "presentation"),
+            ("create a budget spreadsheet", "spreadsheet"),
+            ("make an excel sheet of sales data", "spreadsheet"),
+            ("make a comparison of Messi and Ronaldo in Excel", "spreadsheet"),
+            ("create a study guide about python", "study guide"),
+            ("write an essay about climate change in Word", "essay"),
+            ("create a report on the KTU 2024 scheme", "report"),
+        ]
+        for text, artifact in cases:
+            d = self._classify(text)
+            self.assertEqual(d.action, "create_document", text)
+            self.assertEqual((d.metadata or {}).get("artifact"), artifact, text)
+
+    def test_destination_app_tail_is_stripped_from_subject(self):
+        d = self._classify("make a spreadsheet comparing X and Y in Excel")
+        self.assertNotIn("excel", d.target.lower())
+        self.assertEqual(d.target.strip().lower(), "x and y")
+
+    def test_bare_artifact_asks_for_topic(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        d = p._classifier.classify("create a study guide", "create a study guide")
+        self.assertEqual(d.action, "create_document")
+        self.assertEqual((d.metadata or {}).get("artifact"), "study guide")
+        self.assertEqual((d.metadata or {}).get("subject"), "")
+
+    def test_non_artifact_phrases_stay_conversational(self):
+        for q in ("make a paper airplane", "create a mess", "make a move"):
+            d = self._classify(q)
+            self.assertNotEqual(d.action, "create_document", q)
+
+    def test_save_as_clause_is_single_document_intent(self):
+        # Live-found: "write a short essay about X and save it as a Word
+        # document" was misrouted to multi_step/TYPE (both "write" and "save"
+        # look like verbs). It is ONE document-creation intent — the artifact
+        # operator persists the file itself. The save-as clause maps to the
+        # artifact FORMAT, and genuine multi-step commands stay multi-step.
+        cases = [
+            ("write a short essay about renewable energy and save it as a Word document", "essay"),
+            ("write an essay about climate change and save it as a word doc", "essay"),
+            ("draft a report about KIO and save it as a document", "report"),
+            ("create a presentation about AI and save it as a powerpoint", "presentation"),
+            ("make a spreadsheet about expenses and save it as an excel file", "spreadsheet"),
+        ]
+        for text, artifact in cases:
+            d = self._classify(text)
+            self.assertEqual(d.action, "create_document", text)
+            self.assertEqual((d.metadata or {}).get("artifact"), artifact, text)
+            self.assertNotIn("save", d.target.lower(), text)
+        # Genuine multi-step must NOT be swallowed by the save-as detector.
+        for text in ("open chrome and search for cats and dogs", "open github and youtube"):
+            d = self._classify(text)
+            self.assertEqual(d.action, "multi_step", text)
+
+    def test_create_xlsx_spreadsheet(self):
+        from mini_kio.core.artifact_operator import create_artifact, verify_xlsx
+        import pathlib, tempfile
+        content = "Category\tAmount\nRent\t1200\nFood\t400\nTransport\t150"
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("monthly budget", content, artifact="spreadsheet", out_dir=tmp)
+        self.assertTrue(r["success"], r)
+        self.assertTrue(r["filename"].endswith(".xlsx"), r)
+        self.assertIn("Monthly_Budget", r["filename"])
+        path = pathlib.Path(r["path"])
+        self.assertTrue(path.exists())
+        facts = verify_xlsx(path)
+        self.assertTrue(facts["valid_zip"])
+        self.assertGreaterEqual(facts["row_count"], 4)  # header + 3 data rows
+        self.assertGreaterEqual(facts["cell_count"], 8)
+
+    def test_create_pptx_presentation(self):
+        from mini_kio.core.artifact_operator import create_artifact, verify_pptx
+        import pathlib, tempfile
+        content = (
+            "Introduction\n- What is a black hole\n- How they form\n"
+            "Key Concepts\n- Event horizon\n- Singularity\n"
+            "Why It Matters\n- Spacetime\n- Cosmology"
+        )
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("black holes", content, artifact="presentation", out_dir=tmp)
+        self.assertTrue(r["success"], r)
+        self.assertTrue(r["filename"].endswith(".pptx"), r)
+        self.assertIn("Black_Holes", r["filename"])
+        path = pathlib.Path(r["path"])
+        self.assertTrue(path.exists())
+        facts = verify_pptx(path)
+        self.assertTrue(facts["valid_zip"])
+        self.assertGreaterEqual(facts["slide_count"], 3)
+
+    def test_artifact_files_are_wellformed_ooxml(self):
+        # Every XML/rels part inside the produced artifacts must be well-formed
+        # (this is what stops Word/Excel/PowerPoint repair prompts).
+        from mini_kio.core.artifact_operator import create_artifact
+        import pathlib, tempfile, zipfile, xml.dom.minidom
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        create_artifact("b", "Category\tAmount\nRent\t1", artifact="spreadsheet", out_dir=tmp)
+        create_artifact("s", "Intro\n- one\n- two", artifact="presentation", out_dir=tmp)
+        create_artifact("d", "Title\nBody text.", artifact="document", out_dir=tmp)
+        for f in tmp.iterdir():
+            with zipfile.ZipFile(str(f)) as zf:
+                self.assertIsNone(zf.testzip())
+                for name in zf.namelist():
+                    if name.endswith((".xml", ".rels")):
+                        xml.dom.minidom.parseString(zf.read(name))
+
+
 class CasualFragmentRoutingTest(unittest.TestCase):
     """Live-found: "Yoo" (message-initial capital) became an ENTITY_QUERY
     and returned an unrelated UFC fighter biography. Message-initial

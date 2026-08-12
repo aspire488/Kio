@@ -470,6 +470,14 @@ class _IntentClassifier:
                 confidence=1.0, metadata={"blocked": True, "reason": "forbidden_target"},
             )
 
+        # Document + save-as family runs BEFORE multi-step: "write a short
+        # essay about renewable energy and save it as a Word document" is ONE
+        # document-creation intent (the artifact operator saves to Documents
+        # itself) — never a two-step write-then-save chain.
+        save_as = self._detect_document_save_as(lower, raw_text, text)
+        if save_as:
+            return save_as
+
         multi = self._classify_multi_step(lower, raw_text)
         if multi:
             return multi
@@ -1151,6 +1159,21 @@ class _IntentClassifier:
         )
         if m:
             payload, app = m.group(1).strip(), m.group(2).strip()
+            # Office-application destinations (Word/Excel/PowerPoint) with a
+            # generated-content payload are ARTIFACT-CREATION requests, not
+            # keystroke typing: "write an essay about climate change in Word"
+            # must produce a real .docx via the artifact operator, never fake
+            # typing into Word. Only literal payloads ("type hello into word")
+            # fall through to the TYPE path below.
+            if self._looks_like_generated_content(payload):
+                app_hint = app.lower().strip()
+                if re.search(
+                    r"\b(?:word|microsoft word|ms word|excel|microsoft excel|powerpoint|slides)\b",
+                    app_hint,
+                ):
+                    doc_routing = self._detect_document_creation(lower, text)
+                    if doc_routing:
+                        return doc_routing
             # Target normalization: "a new notepad file", "another editor",
             # "a fresh document" -> base app "notepad"/"editor" + a flag that a
             # NEW document must be opened (KIO never tampers with existing
@@ -1389,25 +1412,62 @@ class _IntentClassifier:
 
     # ── DOCUMENT-CREATION family ────────────────────────────────────────────
     # "create a Word document about X" / "make a Word file comparing X and Y"
-    # / "create a report on X" — extract subject + artifact kind + style; the
-    # document operator writes a real .docx. Never fake typing into Word.
+    # / "create a report on X" / "make a spreadsheet about X" / "create a
+    # presentation about X" — extract subject + artifact kind + style; the
+    # generic artifact operator writes a real .docx/.xlsx/.pptx artifact. The
+    # DESTINATION APPLICATION (word/excel/powerpoint) is a modality hint that
+    # maps to an artifact FORMAT, never a hardcoded per-app branch. Never fake
+    # typing into an office app.
     _CREATE_DOC_RE = re.compile(
-        r"^(?:create|make|draft|generate|produce|build|write)\s+"
-        r"(?:a|an|the)?\s*(?:new\s+)?(?:word|microsoft\s+word|ms\s+word|text|"
+        r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
+        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
-        r"story|poem|summary|comparison|overview|guide)?\s*"
+        r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
+        r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s*"
         r"(?:document|doc|file|report|write-up|paper|essay|article|letter|email|"
-        r"story|poem|summary|comparison|overview|guide)\s+"
-        r"(?:about|on|regarding|for)\s+(.+)$",
+        r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
+        r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s+"
+        r"(?:about|on|regarding|for|of)\s+(.+)$",
         re.IGNORECASE,
     )
     _CREATE_DOC_COMPARE_RE = re.compile(
-        r"^(?:create|make|draft|generate|produce|build|write)\s+"
-        r"(?:a|an|the)?\s*(?:new\s+)?(?:word|microsoft\s+word|ms\s+word|text|"
+        r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
+        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
-        r"story|poem|summary|comparison|overview|guide)?\s*"
+        r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
+        r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s*"
         r"(?:document|doc|file|report|write-up|paper|essay|article|letter|email|"
-        r"story|poem|summary|comparison|overview|guide)\s+comparing\s+(.+)$",
+        r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
+        r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s+comparing\s+(.+)$",
+        re.IGNORECASE,
+    )
+    # Destination-modality suffix: "in Excel" / "in PowerPoint" / "in Word"
+    # attached to a create phrase ("make a comparison of X and Y in Excel").
+    # The app name is a FORMAT hint that maps to a spreadsheet/presentation/
+    # document artifact — generic, never app-specific.
+    _DEST_APP_TAIL_RE = re.compile(
+        r"\s+(?:in|into)\s+(?:microsoft\s+)?(excel|spreadsheet|powerpoint|slides|word|docx|xlsx|pptx)\s*$",
+        re.IGNORECASE,
+    )
+    # "make a clean report from this" / "make a spreadsheet from these
+    # results" — source-material form. The SOURCE is the subject when it is a
+    # real noun phrase; a bare pronoun (this/that/it) leaves the subject empty
+    # so the executor truthfully asks what it should be about.
+    _CREATE_FROM_RE = re.compile(
+        r"^(?:make|create|draft|write|prepare)\s+(?:a|an|the)?\s*"
+        r"(?:clean|nice|quick|brief|detailed|concise|professional|formal|simple|short)?\s*"
+        r"(spreadsheet|excel|sheet|presentation|slides|deck|report|summary|comparison|"
+        r"study\s+guide|notes?|table|budget|poem|essay|overview|guide|plan)\s+"
+        r"(?:from|out\s+of|based\s+on)\s+(.+)$",
+        re.IGNORECASE,
+    )
+    # "turn this into a presentation" / "make it into a report" — conversion
+    # form. The source is contextual; a bare pronoun leaves subject empty.
+    _CONVERT_INTO_RE = re.compile(
+        r"^(?:turn|convert|transform|make)\s+(?:this|that|it|the\s+(?:notes?|text|content|results?))?\s*"
+        r"(?:in)?to\s+(?:a|an|the)?\s*(?:new|fresh|clean|nice|quick|professional|detailed)?\s*"
+        r"(spreadsheet|excel|sheet|presentation|slides|deck|report|summary|comparison|"
+        r"study\s+guide|notes?|table|budget|poem|essay|overview|guide|plan|document|doc)\s*$",
         re.IGNORECASE,
     )
     # Style modifiers stripped from the end of the subject ("make it concise").
@@ -1426,6 +1486,94 @@ class _IntentClassifier:
         re.IGNORECASE,
     )
 
+    # Artifact-kind normalization: the noun the user actually used maps to a
+    # canonical artifact kind. Excel/PowerPoint (destination apps) become the
+    # FORMAT they imply — generic, never app-specific branches.
+    _ARTIFACT_KIND_MAP = {
+        "spreadsheet": "spreadsheet", "excel": "spreadsheet", "sheet": "spreadsheet",
+        "xlsx": "spreadsheet", "budget": "budget", "table": "table",
+        "presentation": "presentation", "slides": "presentation", "deck": "presentation",
+        "ppt": "presentation", "pptx": "presentation", "powerpoint": "presentation",
+        "study": "study guide", "study guide": "study guide",
+        "notes": "notes", "note": "notes", "checklist": "checklist",
+        "report": "report", "write-up": "report", "paper": "paper",
+        "essay": "essay", "file": "file", "article": "article",
+        "email": "email", "letter": "letter", "poem": "poem",
+        "summary": "summary", "overview": "overview", "guide": "guide",
+        "comparison": "comparison", "plan": "plan", "outline": "outline",
+    }
+    _ARTIFACT_NOUNS = re.compile(
+        r"\b(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
+        r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
+        r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|outline)\b"
+    )
+    # Generic bare-artifact fallback: "create/make + <any descriptor words> +
+    # <artifact noun>" with NO "about X" ("travel budget spreadsheet",
+    # "clean quick report", "personal budget"). The descriptor words become
+    # the subject; the FINAL artifact noun determines the format. Bounded to a
+    # handful of leading words so "make a paper airplane" stays an action.
+    _CREATE_BARE_ARTIFACT_FALLBACK_RE = re.compile(
+        r"^(?:create|make|draft|generate|produce|build|prepare)\s+"
+        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*"
+        r"((?:[a-z]+\s+){0,4}?)"
+        r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
+        r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
+        r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|outline)\s*$",
+        re.IGNORECASE,
+    )
+    # Bare artifact form: "create a study guide" / "make a spreadsheet" /
+    # "create a presentation" / "create a budget spreadsheet" (compound noun)
+    # with NO "about X" — subject stays empty (or the descriptive compound
+    # first word) and the executor asks/uses it; never fabricates a topic.
+    _CREATE_BARE_ARTIFACT_RE = re.compile(
+        r"^(?:create|make|draft|generate|produce|build|prepare)\s+"
+        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*"
+        r"(?:(?:budget|monthly|weekly|annual|expense|expenses|sales|project|simple|basic|clean|quick)"
+        r"(?:\s+(?:budget|monthly|weekly|annual|expense|expenses|sales|project|travel|personal|home|kitchen|rent|food))?\s+)?"
+        r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
+        r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
+        r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|outline)\s*$",
+        re.IGNORECASE,
+    )
+
+    # "write a short essay about renewable energy and save it as a Word
+    # document" / "make a report on X and save it as a Word file" — the
+    # artifact + topic are extracted and the "and save it as <format>" clause
+    # maps to the artifact FORMAT. ONE document-creation intent; the artifact
+    # operator persists the file to Documents itself.
+    _CREATE_DOC_SAVE_AS_RE = re.compile(
+        r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
+        r"(?:a|an|the)?\s*(?:new|fresh|short|brief|quick|detailed|concise|simple)?\s*"
+        r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|ppt|"
+        r"pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|essay|file|"
+        r"article|email|letter|poem|summary|overview|guide|comparison|plan|outline)\s+"
+        r"(?:about|on|regarding|for|of)\s+(.+?)\s+"
+        r"and\s+save\s+(?:it|this|that)?\s+as\s+(?:a|an|the)?\s*"
+        r"((?:word|microsoft\s+word|excel|spreadsheet|powerpoint|slides|ppt|docx|xlsx|pptx|text)?\s*"
+        r"(?:document|doc|file|spreadsheet|sheet|presentation|deck|workbook)?)\s*$",
+        re.IGNORECASE,
+    )
+
+    def _detect_document_save_as(self, lower, raw_text, text):
+        m = self._CREATE_DOC_SAVE_AS_RE.match(lower)
+        if not m:
+            return None
+        artifact = self._ARTIFACT_KIND_MAP.get(m.group(1).lower().strip(), "document")
+        subject = m.group(2).strip()
+        tail = m.group(3) or ""
+        # The save-as clause names the destination FORMAT (Word/Excel/PPT).
+        if re.search(r"excel|spreadsheet|sheet|xlsx", tail):
+            artifact = "spreadsheet"
+        elif re.search(r"powerpoint|slides|ppt|pptx|presentation|deck", tail):
+            artifact = "presentation"
+        elif re.search(r"word|docx", tail):
+            artifact = "document" if artifact == "document" else artifact
+        return RoutingDecision(
+            IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+            confidence=1.0,
+            metadata={"artifact": artifact, "style": "", "subject": subject},
+        )
+
     def _detect_document_creation(self, lower, text):
         subject = None
         artifact = "document"
@@ -1434,19 +1582,120 @@ class _IntentClassifier:
         if m:
             subject = m.group(1).strip()
             artifact = "comparison"
+            # Destination-app tail: "... in Excel" -> spreadsheet format.
+            dm = self._DEST_APP_TAIL_RE.search(subject)
+            if dm:
+                dest = dm.group(1).lower()
+                subject = subject[: dm.start()].strip()
+                if dest in ("excel", "spreadsheet", "xlsx"):
+                    artifact = "spreadsheet"
+                elif dest in ("powerpoint", "slides", "pptx"):
+                    artifact = "presentation"
+            # "... and make it concise" style tail.
+            sm = self._STYLE_TAIL_RE.search(subject)
+            if sm:
+                style = sm.group(1)
+                subject = subject[: sm.start()].strip()
         else:
             m = self._CREATE_DOC_RE.match(lower)
             if m:
                 subject = m.group(1).strip()
-                # Infer artifact from the noun actually used.
-                for noun, kind in (
-                    ("report", "report"), ("write-up", "report"),
-                    ("paper", "paper"), ("essay", "essay"), ("file", "file"),
-                ):
-                    if re.search(rf"\b{noun}\b", lower):
-                        artifact = kind
-                        break
-        if not subject:
+                # "make a table of contents" is a TABLE-OF-CONTENTS request
+                # (an outline inside a document), NOT a spreadsheet of a topic
+                # named "contents". Never route it to artifact creation.
+                if re.search(r"^contents$", subject) and re.search(r"\btable\b", lower):
+                    return None
+                # Destination-app tail: "... in Excel" -> spreadsheet format.
+                dm = self._DEST_APP_TAIL_RE.search(subject)
+                if dm:
+                    dest = dm.group(1).lower()
+                    subject = subject[: dm.start()].strip()
+                    if dest in ("excel", "spreadsheet", "xlsx"):
+                        artifact = "spreadsheet"
+                    elif dest in ("powerpoint", "slides", "pptx"):
+                        artifact = "presentation"
+                    elif dest in ("word", "docx"):
+                        artifact = "document"
+                # Infer artifact from the noun in the LEADING clause (before
+                # the topic marker) — "create a presentation about black holes"
+                # has "presentation" in the leading clause, not the subject.
+                if artifact == "document":
+                    m_topic = re.search(
+                        r"\s+(?:about|on|regarding|for|of|comparing)\s+", lower
+                    )
+                    leading = lower[: m_topic.start()] if m_topic else lower
+                    nm = self._ARTIFACT_NOUNS.search(leading)
+                    if nm:
+                        noun = nm.group(1).lower().strip()
+                        artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                # Style tail: "... and make it concise" -> style=concise.
+                sm = self._STYLE_TAIL_RE.search(subject)
+                if sm:
+                    style = sm.group(1)
+                    subject = subject[: sm.start()].strip()
+            else:
+                # "make a clean report from these results" / "turn this into
+                # a presentation" — source/convert forms.
+                fm = self._CREATE_FROM_RE.match(lower)
+                if fm:
+                    noun = fm.group(1).lower().strip()
+                    artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                    src = (fm.group(2) or "").strip().lower()
+                    if src in ("this", "that", "it", "the notes", "the text", "the content", "the results", "the data"):
+                        subject = ""
+                    else:
+                        subject = src
+                else:
+                    cm = self._CONVERT_INTO_RE.match(lower)
+                    if cm:
+                        noun = cm.group(1).lower().strip()
+                        artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                        subject = ""
+                    else:
+                        # Bare artifact form: "create a study guide" /
+                        # "create a budget spreadsheet" (compound noun).
+                        bm = self._CREATE_BARE_ARTIFACT_RE.match(lower)
+                        if bm:
+                            noun = (bm.group(1) or "").lower().strip()
+                            artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                            # Compound descriptor is non-capturing; recover it
+                            # by re-matching the prefix ("monthly budget" etc.).
+                            # Topic-like words (budget, monthly, expense, sales)
+                            # become the subject; style-like words (simple,
+                            # clean, quick) become the style. Never let an
+                            # adjective become a topic.
+                            desc_m = re.match(
+                                r"^(?:create|make|draft|generate|produce|build|prepare)\s+"
+                                r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*"
+                                r"(.+?)\s+(?:spreadsheet|excel|sheet|xlsx|budget|table|presentation|"
+                                r"slides|deck|ppt|pptx|powerpoint|study\s+guide|notes?|checklist|"
+                                r"report|write-up|paper|essay|file|article|email|letter|poem|"
+                                r"summary|overview|guide|comparison|plan|outline)\s*$",
+                                lower,
+                            )
+                            desc = ""
+                            if desc_m:
+                                desc = desc_m.group(1).strip().lower()
+                            topic_words = ("budget", "monthly", "weekly", "annual", "expense", "expenses", "sales", "project", "travel")
+                            style_words = ("simple", "basic", "clean", "quick")
+                            subj_bits = [w for w in desc.split() if w in topic_words]
+                            style_bits = [w for w in desc.split() if w in style_words]
+                            if subj_bits:
+                                subject = " ".join(subj_bits)
+                            elif style_bits:
+                                style = style_bits[0]
+                                subject = ""
+                        else:
+                            # Generic fallback: any descriptor words before the
+                            # final artifact noun ("travel budget spreadsheet",
+                            # "clean quick report", "personal budget").
+                            bf = self._CREATE_BARE_ARTIFACT_FALLBACK_RE.match(lower)
+                            if bf:
+                                noun = (bf.group(2) or "").lower().strip()
+                                artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                                desc = (bf.group(1) or "").strip()
+                                subject = desc if desc else ""
+        if not subject and artifact == "document":
             # "write a short comparison of A and B and put it in a new
             # document" — split on the "and put/place/type it in[to]" clause.
             split = re.split(r"\s+and\s+(?:put|place|write|type|drop|paste)\s+(?:it|this|that)\s+(?:in|into)\s+(?:a|an|the)?\s*(?:new\s+)?(?:document|file|doc|text\s+file)\s*$", lower, maxsplit=1)
@@ -1455,17 +1704,23 @@ class _IntentClassifier:
                 # Only treat as document-creation when the head is itself a
                 # content request (comparison/report/essay/notes/poem/summary
                 # about X), never a literal "type hello".
-                if re.search(r"\b(comparison|compare|report|essay|notes?|poem|summary|write-up|paper|overview|guide)\b.*\b(?:about|on|of|comparing)\b", head):
+                if re.search(r"\b(comparison|compare|report|essay|notes?|poem|summary|write-up|paper|overview|guide|study\s+guide)\b.*\b(?:about|on|of|comparing)\b", head):
                     subject = head
                     if re.search(r"\b(comparison|compare|comparing)\b", head):
                         artifact = "comparison"
-            if not subject:
-                return None
-        # Style tail: "... and make it concise" -> style=concise.
-        sm = self._STYLE_TAIL_RE.search(subject)
-        if sm:
-            style = sm.group(1)
-            subject = subject[: sm.start()].strip()
+                    elif re.search(r"\b(spreadsheet|excel|sheet|budget|table)\b", head):
+                        artifact = "spreadsheet"
+                    elif re.search(r"\b(presentation|slides|deck|ppt)\b", head):
+                        artifact = "presentation"
+        if not subject and artifact != "document":
+            # Bare artifact with no topic ("create a study guide"): route with
+            # an EMPTY target so the executor truthfully asks what it should
+            # be about — never fabricate a subject.
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "create_document", "", text, lower,
+                confidence=1.0,
+                metadata={"artifact": artifact, "style": style, "subject": ""},
+            )
         if not subject:
             return None
         return RoutingDecision(
@@ -2576,29 +2831,41 @@ class _ExecutionCoordinator:
             return result
 
         if action == "create_document":
-            from mini_kio.core.document_operator import create_document
+            from mini_kio.core.artifact_operator import create_artifact, open_artifact
             subject = str(target or meta.get("subject") or "").strip()
-            if not subject:
-                return {"success": False, "message": "What should the document be about?"}
             artifact = str(meta.get("artifact") or "document")
             style = str(meta.get("style") or "")
+            if not subject:
+                # Bare artifact request ("create a study guide") — ask what it
+                # should be about instead of fabricating a topic.
+                return {
+                    "success": False,
+                    "message": f"Sure — what should the {artifact} be about?",
+                }
             content = self._generate_content(
                 f"{subject}", "", artifact=artifact, style=style
             )
             if not content:
-                return {"success": False, "message": f"I couldn't generate content for the {subject} document."}
-            result = create_document(subject, content, artifact=artifact, style=style)
+                return {"success": False, "message": f"I couldn't generate content for that {artifact}."}
+            result = create_artifact(subject, content, artifact=artifact, style=style)
             if result.get("success"):
-                # Open the created artifact so the user sees it immediately.
+                # Open the created artifact in its default application.
                 try:
-                    from mini_kio.core.document_operator import open_document
                     import pathlib
-                    open_document(pathlib.Path(result["path"]))
+                    open_artifact(pathlib.Path(result["path"]))
                 except Exception:
                     pass
+                if "word_count" in result:
+                    detail, unit = result["word_count"], "word"
+                elif "row_count" in result:
+                    detail, unit = result["row_count"], "row"
+                else:
+                    detail, unit = result.get("slide_count", 0), "slide"
+                if detail != 1:
+                    unit += "s"
                 return {
                     "success": True,
-                    "message": f"Created {result.get('filename')} — {result.get('word_count', 0)} words.",
+                    "message": f"Created {result.get('filename')} — {detail} {unit}.",
                     "target": result.get("filename", subject),
                 }
             return result
