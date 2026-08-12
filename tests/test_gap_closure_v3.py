@@ -155,6 +155,112 @@ class CloseAllTest(unittest.TestCase):
         # Never claim everything closed when something remains.
         self.assertNotIn("Spotify", result["closed"])
 
+    def test_executor_never_targets_explorer_shell(self):
+        # User directive (2026-08-12): close-all must NEVER target explorer.exe
+        # — File Explorer is the Windows desktop shell. Even when a File
+        # Explorer window (with a real titled window, as in practice) is
+        # observed, it must be excluded from the close pass AND from the
+        # remaining report.
+        from mini_kio.core import app_operator
+
+        fake_windows = [
+            {"app": "File Explorer", "base": "explorer", "pid": 303, "title": "Documents"},
+            {"app": "Notepad", "base": "notepad", "pid": 101, "title": "Untitled"},
+        ]
+        closed = []
+        with mock.patch(
+            "mini_kio.core.desktop_state.observe_native_windows",
+            side_effect=[(list(fake_windows), True), (list(fake_windows), True)],
+        ), mock.patch.object(
+            app_operator, "close_app",
+            side_effect=lambda name, pid=None: closed.append((name, pid)) or {"success": True, "message": f"Closed {name}."},
+        ):
+            result = app_operator.close_all_user_apps()
+        closed_names = {n for n, _ in closed}
+        self.assertNotIn("File Explorer", closed_names)
+        self.assertNotIn("explorer", closed_names)
+        self.assertNotIn("explorer.exe", closed_names)
+        self.assertNotIn("File Explorer", result.get("closed", []))
+        self.assertIn("Notepad", closed_names)
+
+    def test_executor_skips_explorer_regardless_of_base_case(self):
+        # Explorer protection must be case-proof: the observation layer
+        # lowercases bases, but a defensive explicit guard should hold even
+        # for a mixed-case "Explorer" base.
+        from mini_kio.core import app_operator
+
+        fake_windows = [
+            {"app": "File Explorer", "base": "Explorer", "pid": 303, "title": "Downloads"},
+            {"app": "Calculator", "base": "calculator", "pid": 404, "title": "Calculator"},
+        ]
+        closed = []
+        with mock.patch(
+            "mini_kio.core.desktop_state.observe_native_windows",
+            side_effect=[(list(fake_windows), True), (list(fake_windows), True)],
+        ), mock.patch.object(
+            app_operator, "close_app",
+            side_effect=lambda name, pid=None: closed.append((name, pid)) or {"success": True, "message": f"Closed {name}."},
+        ):
+            result = app_operator.close_all_user_apps()
+        closed_names = {n for n, _ in closed}
+        self.assertNotIn("File Explorer", closed_names)
+        self.assertNotIn("explorer", closed_names)
+        self.assertIn("Calculator", closed_names)
+        self.assertTrue(result["success"])
+
+    def test_close_all_forbidden_set_is_case_normalized(self):
+        # Live-found: close-all closed the terminal because the forbidden set
+        # held mixed-case "WindowsTerminal.exe" while window observation
+        # lowercases to "windowsterminal.exe" — the case-sensitive lookup
+        # missed. Every forbidden entry must be lowercase so the protection
+        # is deterministic.
+        from mini_kio.core import app_operator
+
+        forbidden = app_operator._close_all_forbidden_exes()
+        self.assertTrue(all(f == f.lower() for f in forbidden))
+        self.assertIn("explorer.exe", forbidden)
+        self.assertIn("windowsterminal.exe", forbidden)
+        self.assertIn("cmd.exe", forbidden)
+        self.assertIn("dwm.exe", forbidden)
+
+    def test_execute_action_close_all_dispatch_without_target_arg(self):
+        # Live-found regression: "close all apps" failed with
+        # "close_all_user_apps() takes 0 positional arguments but 1 was given"
+        # because the dispatch passed the positional target. The no-arg
+        # handler must be invoked as handler(), and the boundary must surface
+        # a truthful failure (never a success-shaped "Done.").
+        #
+        # NOTE: _load_handler() returns STATIC_ACTION_TABLE[...]["handler"],
+        # which captured the ORIGINAL function at import time — patching the
+        # module attribute (execution_boundary.close_all_user_apps) would be
+        # ineffective and the REAL close-all would run. Patch the table entry
+        # the dispatcher actually resolves.
+        from mini_kio.core import execution_boundary
+
+        entry = execution_boundary.STATIC_ACTION_TABLE["close_all_apps"]
+        handler = mock.Mock(return_value={"success": True, "message": "Closed all apps."})
+        # execute_action builds handler_name via handler.__module__/.__name__
+        handler.__name__ = "close_all_user_apps"
+        handler.__module__ = "mini_kio.core.app_operator"
+        with mock.patch.dict(entry, {"handler": handler}), mock.patch.object(
+            execution_boundary, "_in_test_mode", return_value=False,
+        ):
+            result = execution_boundary.execute_action("close_all_apps", "")
+        self.assertTrue(result["success"])
+        handler.assert_called_once_with()  # no positional target
+
+    def test_generic_failure_never_formats_as_done(self):
+        # Live-found regression: a failed generic action was rendered as
+        # "Done." — an untruthful success claim. Failures must surface the
+        # actual error text.
+        from mini_kio.core import runtime_response_formatter as fmt
+        rendered = fmt.format_result(
+            "close_all_apps", "", False,
+            {"message": "Execution failed: boom", "outcome_class": "failure"},
+        )
+        self.assertNotIn("Done", rendered)
+        self.assertIn("boom", rendered.lower())
+
 
 class DesktopActionClassificationTest(unittest.TestCase):
     """Section 11/12: generic capability classes with bounded anti-leak
@@ -398,6 +504,298 @@ class SystemNounBoundaryTest(unittest.TestCase):
     def test_shut_down_my_pc_is_shutdown(self):
         d = _classify("shut down my pc")
         self.assertEqual(d.action, "shutdown_system")
+
+
+class DegradedScopedGatingTest(unittest.TestCase):
+    """Live-found (2026-08-12): a browser connector outage escalated the
+    WHOLE runtime to DEGRADED and blocked unrelated native app launch/close.
+    Gate 2.5 refinement: integrity degrades per capability group, and the
+    safety gate blocks only the degraded group's actions."""
+
+    def test_browser_outage_degrades_browser_group_only(self):
+        from mini_kio.core import runtime as rt
+        from mini_kio.core.execution_boundary import check_safety_policy
+
+        r = rt.KioRuntime()
+        rt._CURRENT_RUNTIME = r
+        # 3 browser_goto failures (operator_reported_failure -> medium, w=2)
+        # cross the degraded threshold (6) for the browser group.
+        for _ in range(3):
+            rt.record_runtime_integrity_warning(
+                "execution_failure",
+                {"action": "browser_goto", "target": "https://x.com",
+                 "failure_class": "operator_reported_failure"},
+            )
+        self.assertEqual(r.safety_state, "DEGRADED")
+        self.assertEqual(r.degraded_capability_groups, {"browser"})
+
+        # Browser-group actions are blocked...
+        allowed, reason = check_safety_policy("browser_goto", "https://x.com", r)
+        self.assertFalse(allowed)
+        self.assertIn("browser", reason)
+        allowed, _ = check_safety_policy(
+            "execute_capability", "chrome::open_url::https://chatgpt.com::chatgpt", r)
+        self.assertFalse(allowed)
+
+        # ...but native launch/close, media, and system control stay available.
+        allowed, _ = check_safety_policy("open_app", "notepad", r)
+        self.assertTrue(allowed)
+        allowed, _ = check_safety_policy("close_app", "notepad", r)
+        self.assertTrue(allowed)
+        allowed, _ = check_safety_policy("open_folder", "downloads", r)
+        self.assertTrue(allowed)
+        allowed, _ = check_safety_policy("lock_system", "", r)
+        self.assertTrue(allowed)
+        allowed, _ = check_safety_policy("media_play", "", r)
+        self.assertTrue(allowed)
+
+    def test_benign_failures_never_degrade_runtime(self):
+        # "open <nonexistent>", "close <not running>", invalid URLs, etc.
+        # are normal user-request outcomes, NOT runtime integrity problems.
+        from mini_kio.core import runtime as rt
+
+        r = rt.KioRuntime()
+        rt._CURRENT_RUNTIME = r
+        for _ in range(12):
+            rt.record_runtime_integrity_warning(
+                "execution_failure",
+                {"action": "open_app", "target": "nonexistentapp",
+                 "failure_class": "not_installed"},
+            )
+        self.assertEqual(r.safety_state, "NORMAL")
+        self.assertEqual(r.integrity_score, 0)
+        self.assertEqual(r.degraded_capability_groups, set())
+
+    def test_group_scores_reset_on_manual_recovery(self):
+        from mini_kio.core import runtime as rt
+
+        r = rt.KioRuntime()
+        rt._CURRENT_RUNTIME = r
+        for _ in range(3):
+            rt.record_runtime_integrity_warning(
+                "execution_failure",
+                {"action": "browser_goto", "target": "https://x.com",
+                 "failure_class": "operator_reported_failure"},
+            )
+        self.assertEqual(r.safety_state, "DEGRADED")
+        rt.manual_runtime_recovery()
+        self.assertEqual(r.safety_state, "NORMAL")
+        self.assertEqual(r.integrity_group_scores, {})
+        self.assertEqual(r.degraded_capability_groups, set())
+
+
+class TargetInstanceSemanticsTest(unittest.TestCase):
+    """Section 2/3: the semantic layer must distinguish open / open another /
+    new tab / new window / new instance / focus — generically, never per-app.
+    Entity identity is preserved while INSTANCE changes."""
+
+    def test_plain_open_is_existing_target(self):
+        d = _classify("open chatgpt")
+        self.assertFalse(d.metadata.get("explicit_new"))
+
+    def test_open_another_tab_marks_explicit_new(self):
+        d = _classify("open another tab of chatgpt")
+        self.assertEqual(d.intent_type.value, "browser_navigate")
+        self.assertEqual(d.action, "execute_capability")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "tab")
+        self.assertIn("chatgpt", d.target)
+
+    def test_open_a_new_entity_tab_trailing_form(self):
+        # Live-found semantic gap (2026-08-12): "open a new chatgpt tab" was
+        # routed to NATIVE open_app with target "chatgpt tab" (the trailing
+        # "tab" leaked into the entity). It must be a NEW browser-tab
+        # instance of the entity, never a native app named "chatgpt tab".
+        d = _classify("open a new chatgpt tab")
+        self.assertEqual(d.intent_type.value, "browser_navigate")
+        self.assertEqual(d.action, "execute_capability")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "tab")
+        self.assertIn("chatgpt", d.target)
+        self.assertNotIn("tab", d.target.split("::")[-1])  # entity is chatgpt, not chatgpt tab
+
+    def test_open_another_entity_tab_trailing_form(self):
+        d = _classify("open another github tab")
+        self.assertEqual(d.action, "execute_capability")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "tab")
+        self.assertIn("github", d.target)
+
+    def test_open_in_new_tab_has_browser_prefix(self):
+        # Live-found latent bug: "open X in a new tab" produced an EMPTY
+        # browser prefix ("::open_url::...") which broke execute_capability
+        # parsing. The modal target must carry the resolved default browser.
+        d = _classify("open chatgpt in a new tab")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        prefix = d.target.split("::")[0]
+        self.assertIn(prefix, ("chrome", "edge", "firefox", "brave", "comet"))
+
+    def test_new_browser_window_is_window_instance(self):
+        d = _classify("open a new browser window for github")
+        self.assertEqual(d.intent_type.value, "browser_navigate")
+        self.assertEqual(d.action, "execute_capability")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "window")
+        self.assertIn("github", d.target)
+
+    def test_another_entity_window_is_window_instance(self):
+        d = _classify("open another github window")
+        self.assertEqual(d.action, "execute_capability")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "window")
+
+    def test_open_in_new_window_is_window_instance(self):
+        d = _classify("open github in a new window")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.metadata.get("instance"), "window")
+
+    def test_open_in_new_tab_marks_explicit_new(self):
+        d = _classify("open chatgpt in a new tab")
+        self.assertTrue(d.metadata.get("explicit_new"))
+
+    def test_open_another_instance_marks_explicit_new(self):
+        d = _classify("open another calculator")
+        self.assertEqual(d.intent_type.value, "desktop_open")
+        self.assertEqual(d.action, "open_app")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.target, "calculator")
+
+    def test_open_a_new_instance_marks_explicit_new(self):
+        d = _classify("open a new calculator")
+        self.assertTrue(d.metadata.get("explicit_new"))
+        self.assertEqual(d.target, "calculator")
+
+    def test_focus_is_not_explicit_new(self):
+        d = _classify("focus chatgpt")
+        self.assertEqual(d.intent_type.value, "browser_focus")
+        self.assertEqual(d.action, "focus")
+
+    def test_switch_to_is_focus_not_new(self):
+        d = _classify("switch to chatgpt")
+        self.assertEqual(d.action, "focus")
+
+    def test_plain_open_skips_force_new_dup_prevention(self):
+        # The executor path: default open must go through duplicate
+        # prevention; explicit-new opens must skip it (force_new).
+        from mini_kio.core import app_operator
+        from mini_kio.core import command_router
+
+        with mock.patch.object(
+            app_operator, "_find_existing_web_target", return_value=None
+        ), mock.patch.object(
+            command_router, "_get_connector", return_value=None
+        ):
+            # friendly_name with ::new marker -> force_new skips dedup
+            result = app_operator.execute_capability(
+                "chrome::open_url::https://chatgpt.com::chatgpt::new")
+        self.assertIn("chatgpt", result.get("message", "").lower())
+
+
+class LLMBypassAuditTest(unittest.TestCase):
+    """Section 7 (2026-08-12 directive): deterministic local/system state
+    queries must NEVER fall through to LLM/web knowledge. The app inventory
+    is answered from actual Windows state, whatever the possession wording."""
+
+    def test_what_apps_do_you_have_is_inventory(self):
+        # Live-found: "what apps do you have" produced irrelevant external
+        # web content. It is the SAME inventory as "what apps do I have".
+        for phrase in (
+            "what apps do you have",
+            "what apps does the system have",
+            "what apps does the computer have",
+            "what apps do i have",
+            "what apps are installed",
+            "what apps have you got",
+            "what software is installed",
+            "what programs are installed",
+            "what apps are on my computer",
+        ):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "operational", phrase)
+            self.assertEqual(d.action, "app_inventory", phrase)
+
+    def test_installed_existence_query_is_os_probe(self):
+        for phrase in ("is notepad installed", "is winrar installed"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "operational", phrase)
+            self.assertEqual(d.action, "app_installed", phrase)
+
+    def test_running_state_query_is_os_probe(self):
+        d = _classify("is spotify running")
+        self.assertEqual(d.intent_type.value, "operational")
+        self.assertEqual(d.action, "app_running")
+
+    def test_knowledge_queries_stay_knowledge(self):
+        # "what is notepad" must stay a KNOWLEDGE query, never an OS action.
+        d = _classify("what is notepad")
+        self.assertEqual(d.intent_type.value, "information")
+
+
+class CompanionIntelligenceAuditTest(unittest.TestCase):
+    """Section 17 (2026-08-12 directive): Companion Intelligence — the
+    doctrine's dimensions (independent judgment, preference, disagreement,
+    recommendation, uncertainty, curiosity, emotional modelling, self-
+    evaluation) must route to the conversational/identity owners, NEVER to
+    web knowledge or the wrong canonical owner."""
+
+    def test_opinion_judgment_routes_conversation(self):
+        # Curated opinion topics ("ai", "technology") have deterministic
+        # canonical answers; uncurated topics route to the conversational LLM.
+        for phrase in (
+            "what is your take on remote work",
+            "in your opinion, is it worth it",
+            "what do you think about urban farming",
+        ):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "conversation", phrase)
+            self.assertEqual(d.action, "converse", phrase)
+        # Curated deterministic opinions stay on the identity owner.
+        for phrase in ("what do you think about ai", "what are your opinions on technology"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "identity", phrase)
+
+    def test_preference_and_recommendation_route_conversation(self):
+        for phrase in (
+            "do you like jazz music",
+            "what is your favorite color",
+            "should i watch dune",
+            "recommend a good movie for tonight",
+            "would you recommend that book",
+            "which is better, apple or android",
+        ):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "conversation", phrase)
+            self.assertEqual(d.action, "converse", phrase)
+
+    def test_disagreement_routes_conversation(self):
+        d = _classify("i disagree with you")
+        self.assertEqual(d.intent_type.value, "conversation")
+
+    def test_emotional_expression_routes_empathy(self):
+        for phrase in ("i feel really stressed today", "im so excited"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "conversation", phrase)
+            self.assertEqual(d.action, "empathy", phrase)
+
+    def test_curiosity_is_conversation_not_static_identity(self):
+        # Live-found: "what are you curious about" matched the identity
+        # dataset's broad "what are you" prefix and returned the static
+        # "who are you" identity. Curiosity is a conversational dimension
+        # (doctrine Section 5) and must route to the LLM with personality
+        # context, while "who are you" stays the deterministic identity.
+        for phrase in (
+            "what are you curious about",
+            "what interests you",
+            "what excites you",
+            "what are you interested in",
+        ):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "conversation", phrase)
+            self.assertEqual(d.action, "converse", phrase)
+        # Identity questions remain deterministic.
+        for phrase in ("who are you", "what is kio", "what are you"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "identity", phrase)
 
 
 class MCPStartupNonBlockingTest(unittest.TestCase):

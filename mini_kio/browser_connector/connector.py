@@ -252,9 +252,19 @@ class Connector:
         return self._token
 
     def is_connected(self) -> bool:
-        """In mock mode, always connected. In live mode, checks extension."""
+        """In mock mode, always connected. In live mode, checks extension.
+
+        Self-healing (2026-08-12): a stale extension handle whose WebSocket
+        already closed is cleared synchronously here, so callers never wait
+        for the 30s liveness watchdog before a command fast-fails. This is
+        the shared browser-path latency fix — every consumer (browser_goto,
+        execute_capability, focus/close) checks is_connected() first.
+        """
         if self._mock:
             return True
+        if self._extension is None:
+            return False
+        self._clear_stale_extension()
         return self._extension is not None
 
     @property
@@ -714,6 +724,26 @@ class Connector:
         try:
             if cmd.type == MessageType.CLOSE_TAB:
                 self._log_browser_trace(command_id, "close_tab", "PENDING", f"command sent: {serialize(cmd)}")
+            # Latency fast-fail (2026-08-12): a stale extension handle (WS
+            # closed but not yet reaped by the 30s liveness watchdog) would
+            # otherwise make every browser command hang for the full 30s
+            # `wait_for` timeout. Detect a closed handle synchronously and
+            # fail immediately — a dead extension must never cost 30 seconds
+            # per command.
+            ws_state = getattr(ext, "state", None)
+            if ws_state is not None:
+                if getattr(ws_state, "name", str(ws_state)) != "OPEN":
+                    self._pending.pop(command_id, None)
+                    return Message(
+                        type=MessageType.RESULT, command_id=command_id,
+                        success=False, error="extension not connected",
+                    )
+            elif not bool(getattr(ext, "open", True)):
+                self._pending.pop(command_id, None)
+                return Message(
+                    type=MessageType.RESULT, command_id=command_id,
+                    success=False, error="extension not connected",
+                )
             await ext.send(serialize(cmd))
             resp = await asyncio.wait_for(fut, timeout=30.0)
             return resp

@@ -21,6 +21,7 @@ from typing import Any, Callable
 from mini_kio.core.runtime import (
     RamBudgetError,
     SafetyState,
+    classify_capability_group,
     emit_runtime_trace,
     get_runtime,
     get_runtime_snapshot,
@@ -576,6 +577,21 @@ def _resolve_live_registration_pid(name: str, fallback_pid: int | None) -> int |
     return None
 
 
+def _degraded_close_allowed(rt: Any, target: str) -> bool:
+    """DEGRADED close_app allowance: closing a process KIO itself owns and
+    verified (tracked) is safe even inside a degraded state — an outage must
+    not lock the user out of cleaning up what KIO started."""
+    try:
+        registry_key = _resolve_registry_key(target)
+        if registry_key:
+            rt.prune_tracked_processes()
+            if rt.get_tracked_process(registry_key) is not None:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
     """Check if the action is permitted in the current safety state (Gate 2.5)."""
     state = rt.safety_state
@@ -591,14 +607,35 @@ def check_safety_policy(action: str, target: str, rt: Any) -> tuple[bool, str]:
         return False, f"System is in EMERGENCY. Action category '{category}' is blocked."
 
     if state == SafetyState.DEGRADED:
+        # Capability-group scoped gating (Gate 2.5 refinement): a provider
+        # outage degrades ONLY the capability groups that genuinely depend on
+        # it. A browser connector outage degrades the browser group; native
+        # app launch/close, media, and system control remain available when
+        # their groups were never degraded. The degraded set is populated by
+        # record_runtime_integrity_warning (per-group accumulation).
+        degraded_groups = getattr(rt, "degraded_capability_groups", None) or set()
+        group = classify_capability_group(action, target)
+        if degraded_groups:
+            if group in degraded_groups:
+                # close_app keeps its tracked-owned allowance even inside a
+                # degraded native group: closing a process KIO itself owns and
+                # verified is safe and should not be blocked by an outage in
+                # the same group.
+                if action == "close_app" and _degraded_close_allowed(rt, target):
+                    return True, ""
+                return False, f"System is DEGRADED. {group} controls are temporarily unavailable."
+            return True, ""
+        # Legacy conservative fallback when no group info is available (e.g.
+        # DEGRADED escalated via observer/channel failures): keep the original
+        # all-or-nothing external gating.
         if category == "external_open":
             return False, f"System is DEGRADED. Action category '{category}' is blocked."
         if action == "close_app":
-            registry_key = _resolve_registry_key(target)
-            if registry_key:
-                rt.prune_tracked_processes()
-                if rt.get_tracked_process(registry_key) is not None:
-                    return True, ""
+            # Tracked-owned close stays allowed (return True BEFORE the
+            # external_control check — close_app's own category would
+            # otherwise block it).
+            if _degraded_close_allowed(rt, target):
+                return True, ""
             return False, "System is DEGRADED. close_app is allowed only for tracked owned processes."
         if category == "external_control":
             return False, f"System is DEGRADED. Action category '{category}' is blocked."
@@ -1010,9 +1047,11 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             except Exception as pid_lookup_exc:
                 logger.warning("PID lookup failed for close: %s", pid_lookup_exc)
 
-        if canonical_action in ("lock_system", "unlock_system", "lock_state", "recovery_runtime"):
-            # No-argument system-control handlers (lock/unlock/lock-state query
-            # and manual recovery) must not receive the positional target arg.
+        if canonical_action in ("lock_system", "unlock_system", "lock_state",
+                                "recovery_runtime", "close_all_apps"):
+            # No-argument system-control handlers (lock/unlock/lock-state query,
+            # manual recovery, and the SCOPE=ALL_APPLICATIONS close) must not
+            # receive the positional target arg.
             result = handler()
         elif canonical_action == "close_app" and pid_for_close is not None:
             result = handler(target, pid=pid_for_close)

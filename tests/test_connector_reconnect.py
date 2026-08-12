@@ -33,16 +33,48 @@ def test_state_starts_disconnected():
 
 
 def test_stale_closed_handle_is_cleared():
+    # 2026-08-12 latency fix: is_connected() is now SELF-HEALING — it clears a
+    # stale (closed) extension handle synchronously so callers never wait for
+    # the 30s liveness watchdog before a command fast-fails. A closed handle
+    # must therefore report disconnected immediately, and the explicit
+    # _clear_stale_extension() must still be a safe no-op on the same handle.
     c = _connector()
     c._extension = _FakeSocket("CLOSED")
     c._extension_state = STATE_READY
-    assert c.is_connected()
+    assert not c.is_connected()  # self-healed: stale handle cleared on check
+    assert c._extension is None
+    assert c.state == STATE_DISCONNECTED
 
-    c._clear_stale_extension()
-
+    c._clear_stale_extension()  # explicit re-clear remains a safe no-op
     assert c._extension is None
     assert c.state == STATE_DISCONNECTED
     assert not c.is_connected()
+
+
+def test_send_and_wait_fast_fails_on_closed_handle():
+    """2026-08-12 latency fix: a closed extension handle must not make a
+    command wait the full 30s wait_for timeout. _send_and_wait checks the
+    socket state synchronously and returns immediately."""
+    import asyncio
+    from mini_kio.browser_connector.connector import Message, MessageType
+
+    async def _fake_send(x):
+        return None
+
+    async def run():
+        c = _connector()
+        c._extension = _FakeSocket("CLOSED")
+        c._loop = asyncio.get_running_loop()
+        cmd = Message(type=MessageType.OPEN_TAB, url="https://x.com")
+        c._pending[cmd.command_id] = asyncio.get_running_loop().create_future()
+        t0 = asyncio.get_running_loop().time()
+        resp = await c._send_and_wait(cmd)
+        elapsed = asyncio.get_running_loop().time() - t0
+        assert resp.success is False
+        assert "not connected" in resp.error
+        assert elapsed < 1.0, f"fast-fail took {elapsed:.2f}s"
+
+    asyncio.run(run())
 
 
 def test_closing_state_handle_is_cleared():

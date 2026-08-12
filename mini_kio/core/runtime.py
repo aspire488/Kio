@@ -40,6 +40,77 @@ _INTEGRITY_SEVERITY_WEIGHTS = {
 _INTEGRITY_SCORE_DEGRADED_THRESHOLD = 6
 _INTEGRITY_SCORE_EMERGENCY_THRESHOLD = 10
 
+# Capability groups for SCOPED degraded gating (Gate 2.5 refinement).
+# A provider outage must only degrade the capability groups that genuinely
+# depend on it: a browser connector outage blocks browser control, never
+# native app launch/close, media, or system control. Integrity failures are
+# accumulated per group; a group crosses into the degraded set independently.
+_CAPABILITY_GROUP_BROWSER = "browser"
+_CAPABILITY_GROUP_NATIVE = "native"
+_CAPABILITY_GROUP_MEDIA = "media"
+_CAPABILITY_GROUP_SYSTEM = "system"
+_CAPABILITY_GROUP_OTHER = "other"
+
+_BROWSER_GROUP_ACTIONS = frozenset({
+    "browser_goto", "browser_click", "browser_hover", "browser_scroll",
+    "browser_drag", "browser_select", "browser_fill", "browser_type",
+    "browser_keypress", "browser_evaluate", "browser_extract_text",
+    "browser_extract_html", "browser_screenshot", "browser_pdf",
+    "search_web", "play_youtube", "search_youtube",
+})
+_MEDIA_GROUP_ACTIONS = frozenset({
+    "media_play", "media_pause", "media_stop", "media_mute", "media_unmute",
+    "media_volume_up", "media_volume_down", "media_seek_forward", "media_seek_backward",
+})
+_SYSTEM_GROUP_ACTIONS = frozenset({
+    "lock_system", "unlock_system", "lock_state", "recovery_runtime",
+    "shutdown_system", "restart_system",
+})
+_NATIVE_GROUP_ACTIONS = frozenset({
+    "open_app", "close_app", "close_all_apps", "open_folder",
+})
+
+# Benign user-outcome failures: these are NORMAL answers to user requests
+# ("open X" when X isn't installed, "close X" when X isn't running, an
+# invalid URL, an already-open target), not runtime integrity failures. They
+# are recorded for observability but must NEVER contribute to degradation
+# score — otherwise a few routine requests would escalate the whole runtime.
+_BENIGN_EXECUTION_FAILURE_CLASSES = frozenset({
+    "not_installed", "not_found", "not_running", "not_tracked",
+    "launch_failed", "invalid_input", "invalid_url", "invalid_web_target",
+    "missing_pid", "process_not_active", "pid_not_found", "process_persists",
+    "already_open", "referent_missing", "capability_close_failed",
+    "unsupported", "restricted_target", "passed_with_residuals",
+})
+
+
+def classify_capability_group(action: str, target: str = "") -> str:
+    """Classify an action into the capability group it depends on.
+
+    Pure string classifier (no registry imports) so both the integrity
+    recorder (runtime.py) and the safety gate (execution_boundary.py) agree
+    on group membership. `execute_capability` routes BOTH browser opens
+    (chrome::open_url::...) and native capabilities (type/keypress/focus/...),
+    so its group is derived from the capability target.
+    """
+    canonical = (action or "").strip().lower()
+    if canonical == "execute_capability":
+        t = (target or "").lower()
+        if "::open_url::" in t or t.startswith((
+            "chrome::", "edge::", "firefox::", "brave::", "comet::", "youtube::",
+        )):
+            return _CAPABILITY_GROUP_BROWSER
+        return _CAPABILITY_GROUP_NATIVE
+    if canonical in _BROWSER_GROUP_ACTIONS:
+        return _CAPABILITY_GROUP_BROWSER
+    if canonical in _MEDIA_GROUP_ACTIONS:
+        return _CAPABILITY_GROUP_MEDIA
+    if canonical in _SYSTEM_GROUP_ACTIONS:
+        return _CAPABILITY_GROUP_SYSTEM
+    if canonical in _NATIVE_GROUP_ACTIONS:
+        return _CAPABILITY_GROUP_NATIVE
+    return _CAPABILITY_GROUP_OTHER
+
 
 def get_runtime() -> "KioRuntime | None":
     """Return the current KioRuntime singleton instance.
@@ -171,6 +242,14 @@ class KioRuntime:
     integrity_warnings: deque[dict[str, object]] = field(
         default_factory=lambda: deque(maxlen=_INTEGRITY_WARNING_LIMIT)
     )
+    # Capability-group scoped degradation (Gate 2.5 refinement): each group
+    # accumulates its own integrity score, and a group only enters the
+    # degraded set when ITS score crosses the threshold. A browser connector
+    # outage degrades the browser group alone — native launch/close, media,
+    # and system control stay available. This is what prevents one provider's
+    # failure from globally poisoning unrelated capabilities.
+    integrity_group_scores: dict[str, int] = field(default_factory=dict)
+    degraded_capability_groups: set[str] = field(default_factory=set)
     tracked_processes: list[dict[str, object]] = field(default_factory=list)
     resource_guard: ResourceGuard = field(default_factory=lambda: ResourceGuard())
     execution_counter: int = 0
@@ -544,10 +623,53 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
 
     severity = _classify_integrity_severity(category, detail)
     weight = 0 if category == "blocked_attempt" else _INTEGRITY_SEVERITY_WEIGHTS.get(severity, 1)
+
+    # Benign user-outcome failures (target not found / not installed / invalid
+    # URL / already open / etc.) are NORMAL answers to user requests, not
+    # runtime integrity problems. They are recorded for observability but must
+    # never escalate integrity state — otherwise a few routine "open X"
+    # requests for a missing app would degrade the whole runtime.
+    failure_class = ""
+    action = ""
+    target = ""
+    if isinstance(detail, dict):
+        failure_class = str(detail.get("failure_class", "") or "").lower()
+        action = str(detail.get("action", "") or "")
+        target = str(detail.get("target", "") or "")
+    if (
+        category == "execution_failure"
+        and failure_class in _BENIGN_EXECUTION_FAILURE_CLASSES
+    ):
+        weight = 0
+
     runtime.integrity_score += weight
     runtime.integrity_severity_counts[severity] = (
         runtime.integrity_severity_counts.get(severity, 0) + 1
     )
+
+    # Capability-group scoped degradation: only the group that ACTUALLY
+    # failed accumulates score, and a group enters the degraded set on its own
+    # merits. Systemic (non-benign) execution failures degrade their own
+    # capability group; observer degradations map to a group by observer name
+    # when determinable.
+    group = None
+    if weight > 0 and category == "execution_failure" and action:
+        group = classify_capability_group(action, target)
+    elif weight > 0 and category == "observer_degraded":
+        observer_name = str(detail.get("observer", "") or "").lower() if isinstance(detail, dict) else ""
+        if "browser" in observer_name or "connector" in observer_name:
+            group = _CAPABILITY_GROUP_BROWSER
+        elif "media" in observer_name:
+            group = _CAPABILITY_GROUP_MEDIA
+        elif "camera" in observer_name or "activation" in observer_name:
+            group = _CAPABILITY_GROUP_SYSTEM
+        else:
+            group = _CAPABILITY_GROUP_OTHER
+    if group is not None:
+        group_score = runtime.integrity_group_scores.get(group, 0) + weight
+        runtime.integrity_group_scores[group] = group_score
+        if group_score >= _INTEGRITY_SCORE_DEGRADED_THRESHOLD:
+            runtime.degraded_capability_groups.add(group)
 
     threshold_trigger = ""
     if severity == "critical" or runtime.integrity_score >= _INTEGRITY_SCORE_EMERGENCY_THRESHOLD:
@@ -562,6 +684,8 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
         "severity": severity,
         "weight": weight,
         "score": runtime.integrity_score,
+        "group": group,
+        "group_score": runtime.integrity_group_scores.get(group or "", 0) if group else None,
         "threshold_trigger": threshold_trigger,
         "created_at_ms": int((time.monotonic() - runtime.started_at) * 1000),
     }
@@ -589,6 +713,7 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
                     safety_state=runtime.safety_state,
                     reason="weighted_degradation_breach",
                     threshold_trigger=threshold_trigger,
+                    degraded_groups=sorted(runtime.degraded_capability_groups),
                 )
 
     emit_runtime_trace(
@@ -598,6 +723,9 @@ def record_runtime_integrity_warning(category: str, detail: object) -> None:
         severity=severity,
         weight=weight,
         score=runtime.integrity_score,
+        group=group or "",
+        group_score=runtime.integrity_group_scores.get(group or "", 0) if group else 0,
+        degraded_groups=sorted(runtime.degraded_capability_groups),
         threshold_trigger=threshold_trigger,
         integrity_status=runtime.integrity_status,
         safety_state=runtime.safety_state,
@@ -649,6 +777,8 @@ def get_runtime_integrity_snapshot() -> dict[str, object]:
         "score": runtime.integrity_score,
         "counts": dict(runtime.integrity_counts),
         "severity_counts": dict(runtime.integrity_severity_counts),
+        "group_scores": dict(runtime.integrity_group_scores),
+        "degraded_groups": sorted(runtime.degraded_capability_groups),
         "warning_count": len(runtime.integrity_warnings),
         "recent_warnings": [dict(item) for item in runtime.integrity_warnings],
     }
@@ -1077,6 +1207,8 @@ def manual_runtime_recovery() -> dict[str, object]:
     runtime.integrity_score = 0
     runtime.integrity_severity_counts.clear()
     runtime.integrity_status = _INTEGRITY_STATUS_HEALTHY
+    runtime.integrity_group_scores.clear()
+    runtime.degraded_capability_groups.clear()
     
     # Reset safety state to NORMAL
     runtime.safety_state = SafetyState.NORMAL

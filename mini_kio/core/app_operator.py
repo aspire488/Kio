@@ -1370,12 +1370,20 @@ def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
 # applications and are included in the close scope; system chrome is not.
 def _close_all_forbidden_exes() -> frozenset[str]:
     from mini_kio.core.desktop_state import _SYSTEM_SHELL_EXES, _SKIP_WRAPPER_EXES
-    return _SYSTEM_SHELL_EXES | _SKIP_WRAPPER_EXES | frozenset({
-        "winlogon.exe", "csrss.exe", "lsass.exe", "services.exe", "smss.exe",
-        "svchost.exe", "fontdrvhost.exe", "dwm.exe", "wininit.exe",
-        "MsMpEng.exe", "NisSrv.exe", "SecurityHealthService.exe",
-        "WdNisSvc.exe", "MsSense.exe",
-    })
+    # Case-normalized to lowercase: window observation lowercases process image
+    # names ("windowsterminal.exe"), so a mixed-case entry like
+    # "WindowsTerminal.exe" would never match and the shell could be
+    # terminated (live-found: close-all closed the terminal while explorer.exe
+    # survived). Lowercasing every entry makes the protection deterministic
+    # for explorer.exe and every other system shell.
+    return frozenset(f.lower() for f in (
+        _SYSTEM_SHELL_EXES | _SKIP_WRAPPER_EXES | frozenset({
+            "winlogon.exe", "csrss.exe", "lsass.exe", "services.exe", "smss.exe",
+            "svchost.exe", "fontdrvhost.exe", "dwm.exe", "wininit.exe",
+            "MsMpEng.exe", "NisSrv.exe", "SecurityHealthService.exe",
+            "WdNisSvc.exe", "MsSense.exe",
+        })
+    ))
 
 
 def _fmt_close_all_names(names: list[str]) -> str:
@@ -1429,6 +1437,13 @@ def close_all_user_apps() -> dict:
         base = str(w.get("base") or "").lower()
         if pid <= 0 or pid in kio_family:
             continue
+        # EXPLORER SHELL GUARD (user directive, 2026-08-12): File Explorer
+        # (explorer.exe) is the Windows desktop shell and must NEVER be
+        # targeted by close-all — even as a fallback for an unrecognized
+        # variant. Belt-and-suspenders on top of the case-normalized shell
+        # set and the restricted-target gate below.
+        if base == "explorer":
+            continue
         if base and (base + ".exe") in forbidden:
             continue
         if base and base in _RESTRICTED_CANONICAL_TARGETS:
@@ -1463,6 +1478,10 @@ def close_all_user_apps() -> dict:
             if pid in seen or pid <= 0 or pid in kio_family:
                 continue
             base = str(w.get("base") or "").lower()
+            # Same shell/explorer guards as the close pass — explorer.exe must
+            # never surface as "closed" or as a targetable leftover.
+            if base == "explorer":
+                continue
             if base and (base + ".exe") in forbidden:
                 continue
             if base and base in _RESTRICTED_CANONICAL_TARGETS:
@@ -2926,13 +2945,61 @@ def execute_capability(target: str) -> dict:
             else:
                 url = args if args.startswith("http") else "https://" + args
 
-            # Explicit additional-tab marker: the coordinator appends "::new"
-            # to the friendly name when the user asked for another/new tab —
-            # that request must skip duplicate prevention and really open.
+            # Explicit additional-instance markers: the coordinator appends
+            # "::new" (another/new TAB) or "::newwindow" (a NEW WINDOW) to the
+            # friendly name when the user asked for an additional instance —
+            # such a request must skip duplicate prevention and really create
+            # a new instance of the requested KIND, while keeping the entity.
             force_new = False
-            if isinstance(friendly_name, str) and friendly_name.endswith("::new"):
+            force_new_window = False
+            if isinstance(friendly_name, str) and friendly_name.endswith("::newwindow"):
+                force_new = True
+                force_new_window = True
+                friendly_name = friendly_name[:-10]
+            elif isinstance(friendly_name, str) and friendly_name.endswith("::new"):
                 force_new = True
                 friendly_name = friendly_name[:-5]
+
+            # A NEW WINDOW cannot be created through the Connector (its
+            # open_tab is tab-scoped). Route it to the browser binary launch
+            # with --new-window so a genuinely separate window is created.
+            if force_new_window:
+                info = _find_in_registry(app_name)
+                if not info:
+                    return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Browser {app_name} not found in registry."}, start_time)
+                path = _resolve_path(info)
+                if not path:
+                    return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Browser {app_name} path not found."}, start_time)
+                try:
+                    from mini_kio.core.runtime import get_runtime
+                    rt = get_runtime()
+                    # Chrome/Firefox/Brave/Edge all accept --new-window on every
+                    # platform; only passing it on Windows would make the
+                    # success message untruthful elsewhere (browser could reuse
+                    # an existing window while we claim a new one was opened).
+                    chrome_args = [path, "--new-window", url]
+                    proc = subprocess.Popen(
+                        chrome_args, shell=False,
+                        creationflags=_creation_flags(),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    if rt:
+                        rt.register_tracked_process(proc.pid, app_name, url)
+                    from mini_kio.core.routing_utils import register_browser_capability
+                    register_browser_capability(friendly_name, app_name, url, browser_pid=proc.pid)
+                    from mini_kio.core.target_ref import display_target_name
+                    return _normalize_public_result(
+                        "execute_capability", f"{app_name}::{friendly_name}",
+                        {"success": True, "message": f"Opened {display_target_name(friendly_name)} in a new {display_target_name(app_name)} window.",
+                         "pid": proc.pid, "canonical_name": app_name,
+                         "verification_mode": "noop", "capability_name": display_target_name(friendly_name),
+                         "browser": app_name, "instance": "window"},
+                        start_time)
+                except Exception as exc:
+                    return _normalize_public_result(
+                        "execute_capability", f"{app_name}::{friendly_name}",
+                        {"success": False, "message": f"Couldn't open {friendly_name} in a new window.", "failure_class": "launch_failed"},
+                        start_time)
 
             # Prefer Browser Connector in production for user browser commands.
             from mini_kio.core.async_utils import safe_run_async

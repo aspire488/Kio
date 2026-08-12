@@ -331,6 +331,11 @@ def _dispatch_format(
         return format_search(target, success, msg)
     if action == "execute_capability":
         return format_capability(target, success, details)
+    if not success:
+        # Truthfulness invariant: a failed generic action (close_all_apps,
+        # media, etc.) must surface its error — NEVER a success-shaped "Done."
+        # which would claim the action completed when it did not.
+        return _format_error(msg)
     return format_generic_success(target, msg)
 
 

@@ -459,6 +459,16 @@ class _IntentClassifier:
         if cls:
             return cls
 
+        # Curiosity/interest family (doctrine Section 5): "what are you
+        # curious about", "what interests you", "what are you excited about"
+        # are CONVERSATIONAL questions about KIO's cognitive orientation —
+        # they must NOT be captured by the identity dataset's broad "what are
+        # you" prefix trigger (which would answer with the static "who are
+        # you" identity). Generic family rule, not per-phrase.
+        curiosity = self._classify_curiosity(lower, text)
+        if curiosity:
+            return curiosity
+
         identity = self._check_identity(lower, raw_text, text)
         if identity:
             return identity
@@ -692,26 +702,62 @@ class _IntentClassifier:
     })
 
     def _detect_browser_webapp(self, lower, text):
-        # Explicit new-tab family: "open another tab of X", "open X in a new
-        # tab" — the user explicitly asked for an ADDITIONAL target, so
-        # duplicate prevention must not reuse the existing one.
+        # Generic target-instance semantics (Section 2/3 of the 2026-08-12
+        # directive): the semantic layer must distinguish INSTANCE kinds
+        # (existing target vs NEW tab vs NEW window) WITHOUT per-app branches.
+        # Every instance phrase converges on the same execute_capability owner
+        # with explicit_new=True plus an instance marker; the ENTITY (webapp)
+        # is preserved while only the INSTANCE changes.
         force_new = False
+        instance = "default"  # "default" | "tab" | "window"
         webapp = None
         browser = None
+
+        # 1. "open another tab of X" / "open a new tab of X"
         m = re.match(r"^open\s+(?:another|a\s+new)\s+tab\s+(?:of\s+)?(.+?)\s*$", lower)
         if m:
-            webapp, browser, force_new = m.group(1).strip(), "", True
+            webapp, instance, force_new = m.group(1).strip(), "tab", True
         else:
+            # 2. "open X in a new tab" / "open X in a fresh tab"
             m = re.match(r"^open\s+(.+?)\s+in\s+(?:a\s+)?(?:new|fresh)\s+tab\s*$", lower)
             if m:
-                webapp, browser, force_new = m.group(1).strip(), "", True
+                webapp, instance, force_new = m.group(1).strip(), "tab", True
             else:
-                m = re.match(r"^open\s+(.+?)\s+in\s+(chrome|edge|comet|firefox|brave|browser)$", lower)
+                # 3. "open a new X tab" / "open another X tab" / "open a fresh X tab"
+                m = re.match(r"^open\s+(?:a\s+)?(?:new|fresh|another)\s+(.+?)\s+tab\s*$", lower)
                 if m:
-                    webapp, browser = m.groups()
+                    webapp, instance, force_new = m.group(1).strip(), "tab", True
+                else:
+                    # 4. "open a new browser window for X" / "open another window for X"
+                    m = re.match(
+                        r"^open\s+(?:a\s+)?(?:new|fresh|another)\s+(?:browser\s+)?window\s+(?:for|of)\s*(.+?)\s*$",
+                        lower,
+                    )
+                    if m:
+                        webapp, instance, force_new = m.group(1).strip(), "window", True
+                    else:
+                        # 5. "open a new X window" / "open another X window"
+                        m = re.match(
+                            r"^open\s+(?:a\s+)?(?:new|fresh|another)\s+(.+?)\s+(?:browser\s+)?window\s*$",
+                            lower,
+                        )
+                        if m:
+                            webapp, instance, force_new = m.group(1).strip(), "window", True
+                        else:
+                            # 6. "open X in a new window"
+                            m = re.match(r"^open\s+(.+?)\s+in\s+(?:a\s+)?(?:new|fresh)\s+window\s*$", lower)
+                            if m:
+                                webapp, instance, force_new = m.group(1).strip(), "window", True
+                            else:
+                                # 7. "open X in <browser>" — modality selection only.
+                                m = re.match(r"^open\s+(.+?)\s+in\s+(chrome|edge|comet|firefox|brave|browser)$", lower)
+                                if m:
+                                    webapp, browser = m.groups()
         if not webapp:
             return None
-        if browser == "browser":
+        # A modal target with no explicit browser defaults to the configured
+        # browser (never an empty ::open_url:: prefix — that broke execution).
+        if not browser or browser == "browser":
             from mini_kio.core.config import DEFAULT_BROWSER
             browser = DEFAULT_BROWSER.lower()
         # A trailing app qualifier inside an explicit web request is noise
@@ -731,7 +777,12 @@ class _IntentClassifier:
                 IntentType.BROWSER_NAVIGATE, "execute_capability",
                 f"{browser}::open_url::{url}::{webapp}",
                 text, lower, confidence=1.0,
-                metadata={"explicit_new": force_new, "webapp": webapp_lower},
+                metadata={
+                    "explicit_new": force_new,
+                    "instance": instance,
+                    "webapp": webapp_lower,
+                    "browser": browser,
+                },
             )
         # Explicit "open X in <browser>" with a target that is NOT a valid
         # web destination (internal host, malformed, forbidden chars) is a
@@ -1275,7 +1326,12 @@ class _IntentClassifier:
         # Deterministic, real OS scan — never an LLM guess. Runs before the
         # desktop-state family so "what's running" stays list_tabs while
         # "what apps do I have" / "what's installed" answer the inventory.
-        (re.compile(r"^what(?:'s|s| is)?\s+(?:my\s+|the\s+)?(?:apps?|applications|software|programs?)\s+(?:do\s+i\s+have|are\s+installed|have\s+i\s+got)\b"), "app_inventory", ""),
+        # LLM-bypass audit (2026-08-12): "what apps do you have" and "what
+        # apps does the system have" previously fell through to LLM/web
+        # knowledge. Any possession wording (I/you/the system/the computer)
+        # over the apps noun is the SAME inventory — the OS owns the apps.
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:apps?|applications|software|programs?)\s+(?:do\s+i\s+have|does\s+(?:the\s+)?(?:system|computer|pc|laptop|machine)\s+have|do\s+you\s+have|have\s+(?:i|you)\s+got|are\s+installed)\b"), "app_inventory", ""),
+        (re.compile(r"^what(?:'s|s| is)?\s+(?:my\s+|the\s+)?(?:apps?|applications|software|programs?)\s+(?:is\s+installed|are\s+on\s+(?:my|this|the)\s+(?:computer|pc|laptop|machine))\b"), "app_inventory", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+installed\b"), "app_inventory", ""),
         (re.compile(r"^list\s+(?:my\s+)?(?:installed\s+)?(?:apps?|applications|software|programs?)\b"), "app_inventory", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:my\s+)?(?:installed\s+)?(?:apps?|applications|software|programs?)\b"), "app_inventory", ""),
@@ -1661,6 +1717,29 @@ class _IntentClassifier:
         )
         if any(re.match(p, lower) for p in recall):
             return RoutingDecision(IntentType.MEMORY, "recall", lower, lower, lower, confidence=0.9)
+        return None
+
+    # Curiosity/interest family — KIO's own cognitive orientation, asked about
+    # generically. Routes to conversation (LLM with personality context), never
+    # to the static identity answer. Two word orders are covered: "what are
+    # you curious about" and "what interests you".
+    _CURIOSITY_RE = re.compile(
+        r"^what(?:'s|\s+is|\s+are)?\s+(?:you|your|kio(?:'s)?)?\s*"
+        r"(?:curious\s+about|interested\s+in|excited\s+about|passionate\s+about|"
+        r"fascinated\s+by|drawn\s+to|keen\s+on|into)\b",
+        re.IGNORECASE,
+    )
+    _CURIOSITY_RE2 = re.compile(
+        r"^what\s+(?:interests|excites|fascinates|intrigues)\s+(?:you|kio)\b",
+        re.IGNORECASE,
+    )
+
+    def _classify_curiosity(self, lower, text):
+        if self._CURIOSITY_RE.match(lower) or self._CURIOSITY_RE2.match(lower):
+            return RoutingDecision(
+                IntentType.CONVERSATION, "converse", text, text, lower,
+                confidence=0.9,
+            )
         return None
 
     def _classify_opinion(self, lower, text):
@@ -2200,10 +2279,14 @@ class _ExecutionCoordinator:
             from mini_kio.core.execution_boundary import execute_action
             target = params.get("target", "")
             meta = params.get("metadata") or {}
-            # Explicit additional-tab request: tag the capability target so the
-            # executor skips duplicate prevention and really opens a new tab.
-            if meta.get("explicit_new") and "::open_url::" in target and not target.endswith("::new"):
-                target = target + "::new"
+            # Explicit additional-instance request: tag the capability target so
+            # the executor skips duplicate prevention and really creates a new
+            # instance. The INSTANCE kind is preserved — a new TAB (::new) vs
+            # a new WINDOW (::newwindow) — while the entity stays the webapp.
+            if meta.get("explicit_new") and "::open_url::" in target:
+                marker = "::newwindow" if meta.get("instance") == "window" else "::new"
+                if not target.endswith(marker):
+                    target = target + marker
             return execute_action("execute_capability", target)
 
         # Browser Connector is the single source of truth for tab state.
