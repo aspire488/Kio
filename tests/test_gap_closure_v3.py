@@ -998,5 +998,59 @@ class BrowserModalityGatingTest(unittest.TestCase):
 
 
 
+class InstanceMarkerReferentTest(unittest.TestCase):
+    """Live-found (post-commit 84a95b0 smoke): after "open a new chatgpt tab"
+    the context referent became 'new' (the ::new INSTANCE marker was captured
+    as the entity by parse_target's lazy arg + trailing name group), so a later
+    "close it" resolved to 'close new' -> truthful but useless failure.
+    The entity (chatgpt) must stay the referent; the instance marker is a
+    qualifier, never a name.
+    """
+
+    def test_newwindow_never_becomes_referent(self):
+        from mini_kio.core.target_ref import parse_target, safe_target_name
+        ref = parse_target("chrome::open_url::https://github.com::github::newwindow")
+        self.assertEqual(ref.name, "github")
+        self.assertEqual(ref.kind, "webapp")
+        self.assertEqual(ref.url, "https://github.com")
+        self.assertEqual(safe_target_name(
+            "chrome::open_url::https://github.com::github::newwindow"), "github")
+
+    def test_newtab_never_becomes_referent(self):
+        from mini_kio.core.target_ref import parse_target, safe_target_name
+        ref = parse_target("chrome::open_url::https://chat.openai.com::chatgpt::new")
+        self.assertEqual(ref.name, "chatgpt")
+        self.assertEqual(ref.url, "https://chat.openai.com")
+        self.assertEqual(safe_target_name(
+            "chrome::open_url::https://chat.openai.com::chatgpt::new"), "chatgpt")
+
+    def test_plain_capability_name_unchanged(self):
+        # No marker: name behavior is untouched.
+        from mini_kio.core.target_ref import parse_target, safe_target_name
+        ref = parse_target("chrome::open_url::https://chat.openai.com::chatgpt")
+        self.assertEqual(ref.name, "chatgpt")
+        self.assertEqual(safe_target_name(
+            "chrome::open_url::https://chat.openai.com::chatgpt"), "chatgpt")
+
+    def test_context_close_it_resolves_to_entity_not_marker(self):
+        # End-to-end referent: after a NEW-TAB execute_capability the
+        # context manager must remember 'chatgpt', so 'close it' becomes
+        # 'close chatgpt' — never 'close new'.
+        from mini_kio.core.context_manager import SessionContext
+        from mini_kio.core.target_ref import safe_target_name
+        cm = SessionContext(session_id="test-session")
+        target = "chrome::open_url::https://chat.openai.com::chatgpt::new"
+        result = {
+            "success": True,
+            "action": "execute_capability",
+            "target": target,
+        }
+        cm.update(result, "open a new chatgpt tab")
+        self.assertEqual(cm.active_entity, safe_target_name(target))
+        self.assertEqual(cm.active_entity, "chatgpt")
+        resolved = cm.resolved_text("close it")
+        self.assertEqual(resolved, "close chatgpt")
+
+
 if __name__ == "__main__":
     unittest.main()

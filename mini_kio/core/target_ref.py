@@ -51,6 +51,13 @@ _CAP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Instance markers the coordinator appends to a serialized capability target
+# for additional-instance requests ("open a new X tab" -> "::new", "open X in
+# a new window" -> "::newwindow"). These are INSTANCE qualifiers, never
+# entity names — a trailing marker must never become the conversational
+# referent (a later "close it" must resolve to the entity, not to "new").
+_INSTANCE_MARKERS = frozenset({"new", "newwindow"})
+
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 # Registered web apps that resolve to browser tabs even though they have no
@@ -86,6 +93,15 @@ def parse_target(raw: str) -> TargetRef:
         cap = m.group("cap").lower()
         arg = m.group("arg").strip()
         name = (m.group("name") or "").strip()
+        # BC-6: a trailing instance marker ("::new"/"::newwindow") must not be
+        # mistaken for the entity. The lazy arg group absorbs the URL plus the
+        # real entity ("https://chat.openai.com::chatgpt"), so recover the
+        # entity from the last arg segment and keep the marker out of the name.
+        if name.lower() in _INSTANCE_MARKERS and "::" in arg:
+            _prefix, _sep, _embedded = arg.rpartition("::")
+            if _sep:
+                name = _embedded
+                arg = _prefix
         if cap == "open_url":
             kind = "webapp"
             name = name or _name_from_url(arg) or browser
