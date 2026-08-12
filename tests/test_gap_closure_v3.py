@@ -1052,5 +1052,69 @@ class InstanceMarkerReferentTest(unittest.TestCase):
         self.assertEqual(resolved, "close chatgpt")
 
 
+class CompanionPreferenceTest(unittest.TestCase):
+    """Doctrine-aligned companion behavior: KIO has stable MODELED preferences
+    and may express concrete reasoned choices — never the deflecting
+    "I'm an AI, so I don't have preferences", and never fabricated human
+    biography (childhood, senses, memories, lived experience).
+    """
+
+    def test_modeled_preferences_are_stable_character_data(self):
+        from mini_kio.llm.KIO_character_knowledge import resolve_modeled_preferences
+        prefs = resolve_modeled_preferences()
+        self.assertTrue(len(prefs) >= 5)
+        # Stable across calls — same object identity semantics, no random flip.
+        self.assertEqual(resolve_modeled_preferences(), prefs)
+        # Character values, not biography claims.
+        joined = " ".join(prefs).lower()
+        self.assertNotIn("childhood", joined)
+        self.assertNotIn("i remember", joined)
+        self.assertIn("prefer", joined)
+
+    def test_converse_prompt_allows_reasoned_preferences(self):
+        # The live converse prompt must ALLOW concrete reasoned choices and
+        # forbid the "I'm an AI, no preferences" deflection — the previous
+        # text forced analytic deflection which produced that exact failure.
+        import mini_kio.core.pipeline as pl
+        src = open(pl.__file__, encoding="utf-8").read()
+        # The ban on deflection is present...
+        self.assertIn("deflecting with", src)
+        # ...and the old force-analytic-only clause is gone.
+        self.assertNotIn("discuss them analytically instead", src)
+        # Modeled preferences are injected from the canonical character layer.
+        self.assertIn("resolve_modeled_preferences", src)
+        self.assertIn("stable modeled preferences", src)
+
+    def test_preference_questions_route_to_converse(self):
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        for q in (
+            "do you like jazz music",
+            "what's your favorite movie",
+            "would you rather use python or javascript",
+            "which approach would you choose",
+            "what would you recommend",
+            "do you agree with that",
+            "what are you curious about",
+        ):
+            d = p._classifier.classify(q, q)
+            self.assertEqual(
+                d.intent_type.value, "conversation", f"{q!r} should be conversation"
+            )
+            self.assertEqual(d.action, "converse", f"{q!r} action")
+
+    def test_anti_fabrication_boundary_preserved(self):
+        # The doctrine boundary: modeled preference yes, invented biography no.
+        from mini_kio.llm.KIO_character_knowledge import (
+            resolve_canonical_truth,
+            resolve_anti_hallucination_rules,
+        )
+        t = resolve_canonical_truth("not_human")
+        self.assertIsNotNone(t)
+        rules = " ".join(resolve_anti_hallucination_rules()).lower()
+        self.assertIn("memory", rules)
+
+
+
 if __name__ == "__main__":
     unittest.main()

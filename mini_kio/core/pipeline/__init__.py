@@ -2493,13 +2493,15 @@ class _ExecutionCoordinator:
             "reply in 1-2 sentences and stop. Never append robotic prompts such as "
             "'Want more detail?', 'Anything else?', 'Let me know if you need anything'. "
             "Only expand unprompted when the user explicitly asked for depth. "
-            "When asked for an opinion or to compare options, give a "
-            "reasoned analytical perspective grounded in KIO's design philosophy (determinism, "
-            "safety, honesty, human judgment) and the facts at hand. You may have opinions, but "
-            "you never invent personal human experience: you do not have a body, senses, "
-            "emotions, a childhood, or personal taste from living. Do not claim to like/dislike "
-            "music, films, food, games, or sports from personal experience; discuss them "
-            "analytically instead. If you don't know, or the topic is current/breaking, say so "
+            "When asked for a preference, opinion, taste, or to compare options, give a concrete "
+            "reasoned choice ('I'd choose X because ...') instead of deflecting with 'I'm an AI, "
+            "so I don't have preferences' — deflecting is a substitute for truthful behavior. "
+            "You have stable modeled preferences and tastes (included below); express them "
+            "consistently and naturally in your own voice. The one hard boundary: never invent "
+            "personal human experience. You do not have a body, senses, emotions, a childhood, "
+            "memories, or lived experience. Modeled preference ('I prefer X') is fine; claiming "
+            "to have physically experienced something is not. If you don't know, or the topic is "
+            "current/breaking, say so "
             "honestly instead of inventing facts. Plain prose only - no headings, no bullet lists, "
             "no 'Quick rundown' sections. "
             "NEVER reference past conversation topics unless they appear in the 'Recent conversation' "
@@ -2513,6 +2515,21 @@ class _ExecutionCoordinator:
             "If you don't know something about the user, say so instead of guessing. Do not speculate "
             "about how the user is feeling or what they are doing unless they told you.",
         ]
+        # Doctrine Section 6/8: personality persists; modeled preferences are
+        # stable character data (never random per-call), injected from the
+        # canonical character authority so KIO's taste does not flip between
+        # conversations.
+        try:
+            from mini_kio.llm.KIO_character_knowledge import resolve_modeled_preferences
+            _prefs = resolve_modeled_preferences()
+            if _prefs:
+                parts.append(
+                    "KIO stable modeled preferences (keep these consistent, never random):\n"
+                    + "\n".join(f"- {p}" for p in _prefs)
+                )
+        except Exception:
+            pass
+
         try:
             if ctx is not None:
                 facts = ctx.get_all_facts()
