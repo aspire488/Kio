@@ -1420,7 +1420,9 @@ class _IntentClassifier:
     # typing into an office app.
     _CREATE_DOC_RE = re.compile(
         r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*(?:word|microsoft\s+word|ms\s+word|text|"
+        r"(?:a|an|the)?\s*(?:new|fresh|another|small|short|quick|brief|detailed|concise|"
+        r"simple|clean|nice|basic|professional|formal|mini|full|proper)?\s*"
+        r"(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
         r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
         r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s*"
@@ -1432,7 +1434,9 @@ class _IntentClassifier:
     )
     _CREATE_DOC_COMPARE_RE = re.compile(
         r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*(?:word|microsoft\s+word|ms\s+word|text|"
+        r"(?:a|an|the)?\s*(?:new|fresh|another|small|short|quick|brief|detailed|concise|"
+        r"simple|clean|nice|basic|professional|formal|mini|full|proper)?\s*"
+        r"(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
         r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
         r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s*"
@@ -1543,7 +1547,8 @@ class _IntentClassifier:
     # operator persists the file to Documents itself.
     _CREATE_DOC_SAVE_AS_RE = re.compile(
         r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|short|brief|quick|detailed|concise|simple)?\s*"
+        r"(?:a|an|the)?\s*(?:new|fresh|short|brief|quick|detailed|concise|simple|small|clean|"
+        r"nice|basic|professional|formal|mini|full|proper)?\s*"
         r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|ppt|"
         r"pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|essay|file|"
         r"article|email|letter|poem|summary|overview|guide|comparison|plan|outline)\s+"
@@ -1591,6 +1596,20 @@ class _IntentClassifier:
                     artifact = "spreadsheet"
                 elif dest in ("powerpoint", "slides", "pptx"):
                     artifact = "presentation"
+            # Leading-clause noun inference (same rule as the about-form):
+            # "make a spreadsheet comparing X and Y" names the artifact in the
+            # leading clause even without an "in Excel" tail — a spreadsheet
+            # request must build an .xlsx, never a comparison .docx. GENERIC
+            # container nouns (word/file/document/doc/text) are the destination
+            # container, not the format: "make a word file comparing A and B"
+            # stays a comparison (.docx) inside the Word container.
+            if artifact == "comparison":
+                nm = self._ARTIFACT_NOUNS.search(lower[: lower.find("comparing")])
+                if nm:
+                    noun = nm.group(1).lower().strip()
+                    mapped = self._ARTIFACT_KIND_MAP.get(noun, "")
+                    if mapped not in ("", "document", "file"):
+                        artifact = mapped
             # "... and make it concise" style tail.
             sm = self._STYLE_TAIL_RE.search(subject)
             if sm:

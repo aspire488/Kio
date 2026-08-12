@@ -2114,6 +2114,43 @@ class GenericArtifactCreationTest(unittest.TestCase):
                     if name.endswith((".xml", ".rels")):
                         xml.dom.minidom.parseString(zf.read(name))
 
+    def test_pre_noun_modifier_variants_route_create_document(self):
+        # Live-found (post-commit smoke): "make a SMALL spreadsheet comparing
+        # tea and coffee" fell through to conversation because the create
+        # regexes only allowed new/fresh/another before the artifact noun.
+        # Any bounded pre-noun modifier must keep artifact routing intact.
+        cases = [
+            ("make a small spreadsheet comparing tea and coffee in Excel", "spreadsheet"),
+            ("make a simple spreadsheet comparing tea and coffee", "spreadsheet"),
+            ("make a small spreadsheet comparing tea and coffee", "spreadsheet"),
+            ("create a small spreadsheet about my expenses", "spreadsheet"),
+            ("create a quick presentation about black holes", "presentation"),
+            ("write a short essay about renewable energy", "essay"),
+        ]
+        for text, artifact in cases:
+            d = self._classify(text)
+            self.assertEqual(d.action, "create_document", text)
+            self.assertEqual((d.metadata or {}).get("artifact"), artifact, text)
+
+    def test_compare_form_infers_artifact_from_leading_noun(self):
+        # "make a spreadsheet comparing X and Y" without an "in Excel" tail
+        # names the artifact in the LEADING clause: it must build an .xlsx,
+        # never a comparison .docx. A generic container ("word file") stays a
+        # comparison document inside the Word container.
+        d = self._classify("make a spreadsheet comparing tea and coffee")
+        self.assertEqual((d.metadata or {}).get("artifact"), "spreadsheet")
+        d2 = self._classify("make a presentation comparing linux and windows")
+        self.assertEqual((d2.metadata or {}).get("artifact"), "presentation")
+        d3 = self._classify("make a word file comparing messi and ronaldo")
+        self.assertEqual((d3.metadata or {}).get("artifact"), "comparison")
+
+    def test_creative_phrases_with_modifiers_stay_conversational(self):
+        # The modifier slot must not swallow non-artifact requests.
+        for text in ("make a paper airplane", "create a mess", "make a move",
+                     "write a letter to my mom", "make a quick trip to the store"):
+            d = self._classify(text)
+            self.assertNotEqual(d.action, "create_document", text)
+
 
 class CasualFragmentRoutingTest(unittest.TestCase):
     """Live-found: "Yoo" (message-initial capital) became an ENTITY_QUERY
