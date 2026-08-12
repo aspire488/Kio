@@ -725,6 +725,95 @@ class LLMBypassAuditTest(unittest.TestCase):
         self.assertEqual(d.intent_type.value, "operational")
         self.assertEqual(d.action, "app_running")
 
+    def test_whats_running_on_computer_is_desktop_state(self):
+        # Live-found (2026-08-12 revalidation): "what's running on my
+        # computer" fell through to web knowledge and described the Android
+        # app "WhatsRunning". The whole running-state family must route to the
+        # deterministic desktop-state owner (list_tabs), whatever the trailing
+        # location or the noun (apps/processes).
+        for phrase in (
+            "what's running on my computer",
+            "what's running on this pc",
+            "what is running on your system",
+            "what's running on the machine",
+            "what processes are running",
+            "which processes are running",
+            "what's running right now",
+            "what apps are running",
+            "what's currently running",
+        ):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "browser_tabs", phrase)
+            self.assertEqual(d.action, "list_tabs", phrase)
+        # Knowledge shapes that merely share a word must NOT be hijacked.
+        for phrase in ("what is running time", "what's open source",
+                       "how much does ram cost"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "information", phrase)
+
+    def test_system_healthy_wording_routes_system(self):
+        # "is the system healthy" must agree with "is my computer okay":
+        # deterministic system owner, never the conversation fallback.
+        for phrase in ("is the system healthy", "is my computer okay",
+                       "is the computer healthy"):
+            d = _classify(phrase)
+            self.assertEqual(d.intent_type.value, "operational", phrase)
+            self.assertEqual(d.action, "system", phrase)
+
+
+class NewWindowTruthfulnessTest(unittest.TestCase):
+    """Live-found (2026-08-12 revalidation): "open github in a new window"
+    replied "Opened Github: in a new Chrome window." — (1) the "::newwindow"
+    marker strip used [:-10] on an 11-char marker, leaving a trailing colon in
+    the friendly name, and (2) the new-window claim carried verification_mode
+    "noop" (no evidence). The canonical owner must strip the full marker and
+    only claim a separate window when one is actually observed."""
+
+    def test_newwindow_strip_and_window_verification(self):
+        from types import SimpleNamespace
+        from mini_kio.core import app_operator as ao
+        from mini_kio.core import routing_utils as ru
+        with mock.patch.object(ao, "_find_in_registry",
+                               return_value={"exe": "chrome.exe",
+                                             "process": "chrome.exe"}), \
+                mock.patch.object(ao, "_resolve_path",
+                                  return_value=r"C:\nonexistent\chrome.exe"), \
+                mock.patch.object(ao, "subprocess") as sp, \
+                mock.patch.object(ao, "_visible_browser_window_count",
+                                  side_effect=[0, 1]), \
+                mock.patch.object(ru, "register_browser_capability"):
+            sp.Popen.return_value = SimpleNamespace(pid=12345)
+            result = ao.execute_capability(
+                "chrome::open_url::https://github.com::github::newwindow"
+            )
+        # Full marker stripped: no "Github:" colon artifact, clean display.
+        self.assertNotIn("Github:", result["message"])
+        self.assertIn("GitHub", result["message"])
+        # New window actually observed (window count 0 -> 1): verified claim.
+        self.assertEqual(result.get("verification_mode"), "window_identity")
+
+    def test_newwindow_unconfirmed_is_truthful(self):
+        # If no extra window is observed, KIO must NOT claim a new window.
+        from types import SimpleNamespace
+        from mini_kio.core import app_operator as ao
+        from mini_kio.core import routing_utils as ru
+        with mock.patch.object(ao, "_find_in_registry",
+                               return_value={"exe": "chrome.exe",
+                                             "process": "chrome.exe"}), \
+                mock.patch.object(ao, "_resolve_path",
+                                  return_value=r"C:\nonexistent\chrome.exe"), \
+                mock.patch.object(ao, "subprocess") as sp, \
+                mock.patch.object(ao, "_visible_browser_window_count",
+                                  side_effect=[1, 1, 1, 1, 1]), \
+                mock.patch.object(ru, "register_browser_capability"):
+            sp.Popen.return_value = SimpleNamespace(pid=12345)
+            result = ao.execute_capability(
+                "chrome::open_url::https://github.com::github::newwindow"
+            )
+        self.assertEqual(result.get("verification_mode"), "window_unverified")
+        self.assertNotIn("new Chrome window", result["message"])
+        self.assertIn("couldn't confirm", result["message"])
+
     def test_knowledge_queries_stay_knowledge(self):
         # "what is notepad" must stay a KNOWLEDGE query, never an OS action.
         d = _classify("what is notepad")
@@ -754,6 +843,7 @@ class CompanionIntelligenceAuditTest(unittest.TestCase):
             d = _classify(phrase)
             self.assertEqual(d.intent_type.value, "identity", phrase)
 
+
     def test_preference_and_recommendation_route_conversation(self):
         for phrase in (
             "do you like jazz music",
@@ -766,6 +856,19 @@ class CompanionIntelligenceAuditTest(unittest.TestCase):
             d = _classify(phrase)
             self.assertEqual(d.intent_type.value, "conversation", phrase)
             self.assertEqual(d.action, "converse", phrase)
+
+    def test_converse_prompt_allows_reasoned_preferences(self):
+        # Live-found (2026-08-12): "do you like jazz music" deflected with
+        # "As an AI, I don't have personal preferences" — doctrine's Section 5
+        # forbids using "I'm an AI" as a substitute for truthful behavior. The
+        # converse system prompt must permit reasoned preferences/curiosity
+        # while still forbidding fabricated human experience.
+        from mini_kio.llm.llm_constants import _ASYSTEM_PROMPT
+        joined = _ASYSTEM_PROMPT.lower()
+        self.assertIn("i'd choose", joined)
+        self.assertIn("deflecting", joined)
+        self.assertIn("never fabricate human memories", joined)
+        self.assertIn("curiosity", joined)
 
     def test_disagreement_routes_conversation(self):
         d = _classify("i disagree with you")
@@ -821,6 +924,78 @@ class MCPStartupNonBlockingTest(unittest.TestCase):
         self.assertLess(elapsed, 0.3)
         self.assertEqual(blocked.call_count, 8)
         time.sleep(0.9)  # allow the daemon threads to finish
+
+
+class BrowserModalityGatingTest(unittest.TestCase):
+    """Live-found (2026-08-12 revalidation): "open youtube in comet" opened a
+    Chrome tab AND launched Comet — the Chrome extension connector served an
+    explicit non-default-browser request. The connector may only serve the
+    DEFAULT browser; explicit edge/comet/firefox/brave requests must go
+    straight to their own browser binary (never a silent Chrome substitution).
+    """
+
+    def _make_conn(self):
+        from types import SimpleNamespace
+        conn = mock.Mock()
+        conn.is_connected.return_value = True
+        conn.open_tab = mock.AsyncMock(return_value=SimpleNamespace(
+            success=True, tab_id="t1", url="https://youtube.com",
+            title="YouTube", window_id=1,
+        ))
+        return conn
+
+    def _patch_env(self, default_browser):
+        from mini_kio.core import app_operator as ao
+        from mini_kio.core import routing_utils as ru
+        from mini_kio.core import command_router as cr
+        from mini_kio.core import config as cfg
+        from unittest import mock
+        return [
+            mock.patch.object(ao, "_find_in_registry",
+                              return_value={"exe": "comet.exe",
+                                            "process": "comet.exe"}),
+            mock.patch.object(ao, "_resolve_path",
+                              return_value=r"C:\fake\comet.exe"),
+            mock.patch.object(ao, "subprocess"),
+            mock.patch.object(ao, "_refine_pid_windows", return_value=9876),
+            mock.patch.object(ru, "register_browser_capability"),
+            mock.patch.object(cr, "_get_connector"),
+            mock.patch.object(cfg, "DEFAULT_BROWSER", default_browser),
+        ]
+
+    def test_nondefault_browser_skips_connector(self):
+        # DEFAULT_BROWSER=chrome, request is comet: the Chrome connector must
+        # NOT be used (no Chrome tab side effect); Comet binary is launched.
+        from types import SimpleNamespace
+        from mini_kio.core import app_operator as ao
+        conn = self._make_conn()
+        patches = self._patch_env("chrome")
+        with patches[6], patches[5] as get_conn, patches[0], patches[1], \
+                patches[2] as sp, patches[3], patches[4]:
+            get_conn.return_value = conn
+            sp.Popen.return_value = SimpleNamespace(pid=999)
+            result = ao.execute_capability(
+                "comet::open_url::https://youtube.com::youtube"
+            )
+        conn.open_tab.assert_not_called()
+        self.assertIn("Comet", result["message"])
+        self.assertTrue(result["success"])
+
+    def test_default_browser_uses_connector(self):
+        # DEFAULT_BROWSER=chrome, request is chrome: the connector path runs
+        # (tab-level open with verification), no binary relaunch.
+        from mini_kio.core import app_operator as ao
+        conn = self._make_conn()
+        patches = self._patch_env("chrome")
+        with patches[6], patches[5] as get_conn, patches[0], patches[1], \
+                patches[2] as sp, patches[3], patches[4]:
+            get_conn.return_value = conn
+            result = ao.execute_capability(
+                "chrome::open_url::https://youtube.com::youtube"
+            )
+        conn.open_tab.assert_awaited_once()
+        self.assertIn("YouTube", result["message"])
+
 
 
 if __name__ == "__main__":

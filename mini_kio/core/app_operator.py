@@ -1364,6 +1364,50 @@ def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
         return False
 
 
+def _visible_browser_window_count(proc_name: str) -> int:
+    """Count visible top-level windows owned by the given browser process name.
+
+    Chrome/Edge/Firefox attach every window to ONE browser process, so a new
+    window is visible only as an extra top-level HWND — never as an extra PID.
+    Returns -1 when the platform cannot verify (callers must then avoid
+    claiming a new window). Bounded: one EnumWindows pass, no polling here.
+    """
+    if not _IS_WINDOWS or not proc_name:
+        return -1
+    try:
+        import psutil
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        owned: set[int] = set()
+        for p in psutil.process_iter(["pid", "name"]):
+            try:
+                if p.info["name"] and p.info["name"].lower() == proc_name.lower():
+                    owned.add(p.info["pid"])
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        if not owned:
+            return 0
+        count = 0
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
+        )
+
+        def _cb(hwnd, _lparam):
+            nonlocal count
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in owned:
+                count += 1
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
+        return count
+    except Exception:
+        return -1
+
+
 # System/shell/security binaries that must NEVER be terminated by the
 # close-all-applications scope. Same filtering philosophy as the desktop
 # observation layer plus the restricted-target gate. Browsers ARE user
@@ -2955,7 +2999,7 @@ def execute_capability(target: str) -> dict:
             if isinstance(friendly_name, str) and friendly_name.endswith("::newwindow"):
                 force_new = True
                 force_new_window = True
-                friendly_name = friendly_name[:-10]
+                friendly_name = friendly_name[:-11]  # "::newwindow" is 11 chars
             elif isinstance(friendly_name, str) and friendly_name.endswith("::new"):
                 force_new = True
                 friendly_name = friendly_name[:-5]
@@ -2977,6 +3021,13 @@ def execute_capability(target: str) -> dict:
                     # platform; only passing it on Windows would make the
                     # success message untruthful elsewhere (browser could reuse
                     # an existing window while we claim a new one was opened).
+                    # Bounded window-creation verification (truthfulness): only
+                    # claim a genuinely separate window when one is observed.
+                    # Chrome/Edge/Firefox all attach new windows to the browser
+                    # process, so window-HANDLE counts (never PID counts) are
+                    # the evidence. Poll briefly; never wait out a timeout.
+                    proc_name = str(info.get("process") or "chrome.exe")
+                    win_before = _visible_browser_window_count(proc_name)
                     chrome_args = [path, "--new-window", url]
                     proc = subprocess.Popen(
                         chrome_args, shell=False,
@@ -2988,11 +3039,29 @@ def execute_capability(target: str) -> dict:
                     from mini_kio.core.routing_utils import register_browser_capability
                     register_browser_capability(friendly_name, app_name, url, browser_pid=proc.pid)
                     from mini_kio.core.target_ref import display_target_name
+                    display = display_target_name(friendly_name)
+                    browser_display = display_target_name(app_name)
+                    confirmed = False
+                    if win_before >= 0:
+                        for _ in range(4):
+                            time.sleep(0.6)
+                            if _visible_browser_window_count(proc_name) > win_before:
+                                confirmed = True
+                                break
+                    if confirmed:
+                        message = f"Opened {display} in a new {browser_display} window."
+                        verification = "window_identity"
+                    else:
+                        message = (
+                            f"Opened {display} in {browser_display}; I couldn't confirm "
+                            f"it got its own window (it may have opened as a tab)."
+                        )
+                        verification = "window_unverified"
                     return _normalize_public_result(
                         "execute_capability", f"{app_name}::{friendly_name}",
-                        {"success": True, "message": f"Opened {display_target_name(friendly_name)} in a new {display_target_name(app_name)} window.",
+                        {"success": True, "message": message,
                          "pid": proc.pid, "canonical_name": app_name,
-                         "verification_mode": "noop", "capability_name": display_target_name(friendly_name),
+                         "verification_mode": verification, "capability_name": display,
                          "browser": app_name, "instance": "window"},
                         start_time)
                 except Exception as exc:
@@ -3001,11 +3070,18 @@ def execute_capability(target: str) -> dict:
                         {"success": False, "message": f"Couldn't open {friendly_name} in a new window.", "failure_class": "launch_failed"},
                         start_time)
 
-            # Prefer Browser Connector in production for user browser commands.
+            # Prefer Browser Connector ONLY for the browser it actually serves
+            # (the connector is the DEFAULT_BROWSER's extension). An explicit
+            # non-default browser (edge/comet/firefox/brave) must NEVER be
+            # silently opened in the default browser first (live-found
+            # 2026-08-12: "open youtube in comet" opened a Chrome tab AND
+            # launched Comet). Non-default browsers go straight to their own
+            # binary below.
             from mini_kio.core.async_utils import safe_run_async
             from mini_kio.core.command_router import _get_connector
+            from mini_kio.core.config import DEFAULT_BROWSER
             conn = _get_connector()
-            if conn and conn.is_connected():
+            if conn and conn.is_connected() and app_name.lower() == DEFAULT_BROWSER.lower():
                 # Duplicate prevention (canonical): a default "open X" must not
                 # create another equivalent web target when one already exists
                 # (active capability session or live tab with the same URL /

@@ -1152,13 +1152,20 @@ class _IntentClassifier:
         # the prefix ("what's open source", "what is running time") stay on
         # the knowledge path; "in/on chrome / my computer" live in the pattern
         # below.
-        re.compile(r"^what(?:'s|s| is| are)?\s+(?:currently\s+)?(?:open|running|active)(?:\s+right\s+now|\s+kio)?\s*$"),
+        re.compile(
+            r"^what(?:'s|s| is| are)?\s+(?:currently\s+)?(?:open|running|active)"
+            r"(?:\s+right\s+now|\s+kio)?"
+            r"(?:\s+on\s+(?:my|your|this|the)\s+(?:computer|pc|laptop|machine|system))?"
+            r"\s*$"
+        ),
         re.compile(r"^what\s+am\s+i\s+(?:currently\s+)?(?:using|running|controlling|working\s+(?:on|with))\b"),
         re.compile(r"^what\s+(?:are\s+you|is\s+kio)\s+(?:currently\s+)?(?:using|controlling|working\s+on)\b"),
         re.compile(r"^what\s+(?:browser\s+)?tabs\s+are\s+open\b"),
         re.compile(r"^which\s+(?:browser\s+)?tabs\s+are\s+open\b"),
         re.compile(r"^what\s+(?:apps|applications|windows)\s+are\s+(?:open|running|active)\b"),
         re.compile(r"^which\s+(?:apps|applications|windows)\s+are\s+(?:open|running|active)\b"),
+        re.compile(r"^what\s+processes?\s+are\s+(?:open|running|active)\b"),
+        re.compile(r"^which\s+processes?\s+are\s+(?:open|running|active)\b"),
         re.compile(r"^what\s+do\s+i\s+(?:currently\s+)?have\s+(?:open|running)\b"),
         # colloquial "what have I got open" / "what've I got open" family
         re.compile(r"^what(?:\s+have|'ve|\s+'ve)\s+i\s+got\s+(?:open|running|active)\b"),
@@ -1187,6 +1194,7 @@ class _IntentClassifier:
         (re.compile(r"^health\s*$"), "health", ""),
         (re.compile(r"^are\s+you\s+(?:feeling\s+)?(?:healthy|ok(?:ay)?|fine|alright|good)\b"), "health", ""),
         (re.compile(r"^is\s+everything\s+(?:working|ok(?:ay)?|fine|good)\b"), "health", ""),
+        (re.compile(r"^is\s+the\s+(?:system|computer|pc|laptop|machine)\s+(?:healthy|ok(?:ay)?|fine|good|alright|working)\b"), "system", ""),
         (re.compile(r"^how\s+is\s+(?:kio|everything)\b"), "health", ""),
         (re.compile(r"^what(?:'s|s| is)?\s+going\s+on\s*$"), "health", ""),
         (re.compile(r"^show\s+(?:me\s+)?(?:kio(?:'s)?\s+)?health\b"), "health", ""),
