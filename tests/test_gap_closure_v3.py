@@ -1084,9 +1084,11 @@ class CompanionPreferenceTest(unittest.TestCase):
         # Modeled preferences are injected from the canonical character layer.
         self.assertIn("resolve_modeled_preferences", src)
         self.assertIn("stable modeled preferences", src)
-        # The anti-fabrication boundary must survive alongside the allowance.
-        self.assertIn("never invent", src)
-        self.assertIn("a childhood, memories, or lived experience", src)
+        # The anti-fabrication boundary must survive alongside the allowance
+        # (assert on single source lines — the phrase spans a string split).
+        self.assertIn("never invent ", src)
+        self.assertIn("a childhood, ", src)
+        self.assertIn("memories, or lived experience", src)
 
     def test_preference_questions_route_to_converse(self):
         from mini_kio.core.pipeline import Pipeline
