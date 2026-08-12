@@ -473,10 +473,31 @@ class _IntentClassifier:
         # Document + save-as family runs BEFORE multi-step: "write a short
         # essay about renewable energy and save it as a Word document" is ONE
         # document-creation intent (the artifact operator saves to Documents
-        # itself) — never a two-step write-then-save chain.
+        # itself) — never a two-step write-then-save chain. The same rule
+        # covers "open Excel and make a tracker" (destination-app pins the
+        # format) and "write a Python program ... and open it in VS Code"
+        # (source artifact + open-in-editor), plus the camera capture
+        # compound ("open the camera and take a picture" is one capture).
         save_as = self._detect_document_save_as(lower, raw_text, text)
         if save_as:
             return save_as
+
+        open_make = self._detect_open_and_make(lower, raw_text, text)
+        if open_make:
+            return open_make
+
+        code_wf = self._detect_code_workflow(lower, raw_text, text)
+        if code_wf:
+            return code_wf
+
+        # Camera CAPTURE compound ("open the camera and take a picture") is ONE
+        # capture intent — must preempt multi-step. Camera OPEN alone ("open
+        # the camera") keeps its native-app route in the deterministic pass.
+        if self._CAMERA_CAPTURE_RE.match(lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "camera", "capture", text, lower,
+                confidence=1.0, metadata={"camera_action": "capture"},
+            )
 
         multi = self._classify_multi_step(lower, raw_text)
         if multi:
@@ -531,12 +552,14 @@ class _IntentClassifier:
             return cls
 
         # Camera capability (small, generic): "take a picture", "capture a
-        # photo", "open the camera and take a photo". Routes to the camera
-        # desktop capability whose executor resolves the NATIVE installed
-        # camera application (never a .com website) and — where the provider
-        # can genuinely trigger and verify a capture — does so truthfully.
-        # Detection runs after deterministic system/state families and before
-        # conversation so camera intent never leaks to the LLM or web.
+        # photo", "open the camera and take a photo" (capture compound already
+        # handled before multi-step; this also covers bare open-after capture
+        # forms). Routes to the camera desktop capability whose executor
+        # resolves the NATIVE installed camera application (never a .com
+        # website) and — where the provider can genuinely trigger and verify a
+        # capture — does so truthfully. Detection runs after deterministic
+        # system/state families and before conversation so camera intent never
+        # leaks to the LLM or web.
         camera_routing = self._detect_camera(lower, text)
         if camera_routing:
             return camera_routing
@@ -1187,6 +1210,23 @@ class _IntentClassifier:
             # Trailing artifact nouns: "notepad file", "editor window",
             # "word document" -> "notepad"/"editor".
             app_lower = re.sub(r"\s+(?:file|window|document|doc|tab|app)\s*$", "", app_lower)
+            # "put this into Excel" — a bare referent with an OFFICE
+            # destination is a document-creation request (the artifact
+            # operator builds a real file), not keystroke typing of the word
+            # "this". Ask what it should contain if the referent has no
+            # resolved content.
+            if app_lower in ("excel", "spreadsheet", "word", "powerpoint") \
+                    and payload.lower().strip() in ("this", "that", "it"):
+                doc_routing = self._detect_document_creation(lower, text)
+                if doc_routing:
+                    return doc_routing
+                kind = "spreadsheet" if app_lower in ("excel", "spreadsheet") else \
+                    ("presentation" if app_lower in ("powerpoint", "slides") else "document")
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "create_document", "", text, lower,
+                    confidence=1.0,
+                    metadata={"artifact": kind, "style": "", "subject": ""},
+                )
             if app_lower not in self._TYPE_TARGET_LANGUAGES:
                 metadata = {
                     "payload": payload,
@@ -1418,10 +1458,20 @@ class _IntentClassifier:
     # DESTINATION APPLICATION (word/excel/powerpoint) is a modality hint that
     # maps to an artifact FORMAT, never a hardcoded per-app branch. Never fake
     # typing into an office app.
+    # Generic natural-language coverage (2026-08-12 audit): optional "me/us"
+    # after the verb ("make me a presentation"), up to two leading modifiers
+    # ("write a proper short essay"), phrasal verbs ("put together",
+    # "write up") and "vs/versus" as topic separators — all family rules,
+    # never per-phrase aliases.
+    _CREATE_VERBS = r"(?:create|make|draft|generate|produce|build|write|prepare|put\s+together|write\s+up|give)"
+    _CREATE_MODIFIERS = (
+        r"(?:(?:new|fresh|another|small|short|quick|brief|detailed|concise|simple|clean|nice|"
+        r"basic|professional|formal|mini|full|proper|comprehensive|informative|compact|monthly|weekly|annual|personal)\s+){0,2}"
+    )
+    _CREATE_TOPIC = r"(?:about|on|regarding|for|of|vs|versus)"
     _CREATE_DOC_RE = re.compile(
-        r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|another|small|short|quick|brief|detailed|concise|"
-        r"simple|clean|nice|basic|professional|formal|mini|full|proper)?\s*"
+        _CREATE_VERBS + r"\s+"
+        r"(?:me|us)?\s*(?:a|an|the)?\s*" + _CREATE_MODIFIERS +
         r"(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
         r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
@@ -1429,13 +1479,12 @@ class _IntentClassifier:
         r"(?:document|doc|file|report|write-up|paper|essay|article|letter|email|"
         r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
         r"presentation|powerpoint|slides|deck|ppt|pptx|xlsx|budget|table|study|notes)?\s+"
-        r"(?:about|on|regarding|for|of)\s+(.+)$",
+        r"(?:about|on|regarding|for|of|vs|versus)\s+(.+)$",
         re.IGNORECASE,
     )
     _CREATE_DOC_COMPARE_RE = re.compile(
-        r"^(?:create|make|draft|generate|produce|build|write|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|another|small|short|quick|brief|detailed|concise|"
-        r"simple|clean|nice|basic|professional|formal|mini|full|proper)?\s*"
+        _CREATE_VERBS + r"\s+"
+        r"(?:me|us)?\s*(?:a|an|the)?\s*" + _CREATE_MODIFIERS +
         r"(?:word|microsoft\s+word|ms\s+word|text|"
         r"docx|document|doc|file|report|write-up|paper|essay|article|letter|email|"
         r"story|poem|summary|comparison|overview|guide|spreadsheet|excel|sheet|"
@@ -1461,7 +1510,7 @@ class _IntentClassifier:
         r"^(?:make|create|draft|write|prepare)\s+(?:a|an|the)?\s*"
         r"(?:clean|nice|quick|brief|detailed|concise|professional|formal|simple|short)?\s*"
         r"(spreadsheet|excel|sheet|presentation|slides|deck|report|summary|comparison|"
-        r"study\s+guide|notes?|table|budget|poem|essay|overview|guide|plan)\s+"
+        r"study\s+guide|notes?|table|budget|poem|essay|overview|guide|plan|document|doc|file)\s+"
         r"(?:from|out\s+of|based\s+on)\s+(.+)$",
         re.IGNORECASE,
     )
@@ -1505,6 +1554,9 @@ class _IntentClassifier:
         "email": "email", "letter": "letter", "poem": "poem",
         "summary": "summary", "overview": "overview", "guide": "guide",
         "comparison": "comparison", "plan": "plan", "outline": "outline",
+        "tracker": "tracker", "dataset": "dataset", "ledger": "ledger",
+        "inventory": "inventory", "schedule": "schedule", "roster": "roster",
+        "code": "code", "program": "code", "script": "code",
     }
     _ARTIFACT_NOUNS = re.compile(
         r"\b(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
@@ -1531,7 +1583,7 @@ class _IntentClassifier:
     # first word) and the executor asks/uses it; never fabricates a topic.
     _CREATE_BARE_ARTIFACT_RE = re.compile(
         r"^(?:create|make|draft|generate|produce|build|prepare)\s+"
-        r"(?:a|an|the)?\s*(?:new|fresh|another)?\s*"
+        r"(?:me|us)?\s*(?:a|an|the)?\s*(?:new|fresh|another)?\s*"
         r"(?:(?:budget|monthly|weekly|annual|expense|expenses|sales|project|simple|basic|clean|quick)"
         r"(?:\s+(?:budget|monthly|weekly|annual|expense|expenses|sales|project|travel|personal|home|kitchen|rent|food))?\s+)?"
         r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
@@ -1559,6 +1611,79 @@ class _IntentClassifier:
         re.IGNORECASE,
     )
 
+    # Trailing-artifact form: "make me a quick Messi vs Ronaldo comparison" /
+    # "make me a monthly budget" — the artifact noun is at the END, subject
+    # before it, with "vs/versus" as a plain separator. Family rule, not a
+    # phrase list: any bounded subject + any artifact noun converges.
+    _CREATE_TRAILING_ARTIFACT_RE = re.compile(
+        _CREATE_VERBS + r"\s+"
+        r"(?:me|us)?\s*(?:a|an|the)?\s*" + _CREATE_MODIFIERS +
+        r"(.+?)\s+(comparison|spreadsheet|sheet|presentation|slides|deck|ppt|pptx|essay|report|"
+        r"study\s+guide|notes?|budget|table|summary|overview|guide|plan|outline|email|letter|"
+        r"poem|document|doc|file|tracker|dataset|checklist)\s*"
+        r"(?:in|into)\s+(?:microsoft\s+)?(?:excel|word|powerpoint|notepad|spreadsheet|slides)\s*$",
+        re.IGNORECASE,
+    )
+    # "make a tracker" style trailing forms with NO subject before the
+    # artifact ("make me a monthly budget") — subject stays the descriptor.
+    _CREATE_TRAILING_ARTIFACT_RE2 = re.compile(
+        _CREATE_VERBS + r"\s+"
+        r"(?:me|us)?\s*(?:a|an|the)?\s*" + _CREATE_MODIFIERS +
+        r"(.+?)\s+(comparison|spreadsheet|sheet|presentation|slides|deck|ppt|pptx|essay|report|"
+        r"study\s+guide|notes?|budget|table|summary|overview|guide|plan|outline|email|letter|"
+        r"poem|document|doc|file|tracker|dataset|checklist)\s*$",
+        re.IGNORECASE,
+    )
+    # "put together something on X" / "write up what we discussed" — phrasal
+    # content verbs whose object is the SUBJECT (notes/summary document). A
+    # bare "something" with a topic becomes that topic; a clause object stays
+    # the subject when it is a real noun phrase.
+    _CREATE_PHRASAL_RE = re.compile(
+        r"^(?:put\s+together|write\s+up|jot\s+down)\s+"
+        r"(?:something\s+(?:on|about|regarding)\s+(.+)|(.+?))\s*$",
+        re.IGNORECASE,
+    )
+    # "draft an email to my professor explaining the delay" — CONTENT-side
+    # email drafting. Recipient + reason are extracted; the executor produces
+    # the complete professional email (no send infrastructure -> the draft is
+    # the truthful deliverable).
+    _EMAIL_DRAFT_RE = re.compile(
+        r"^(?:draft|write|compose|prepare)\s+(?:a|an|the)?\s*"
+        r"(?:email|e-mail|message)\s*"
+        r"(?:to\s+(.+?))?\s*"
+        r"(?:(?:explaining|about|regarding|concerning|re|regarding)\s+(.+))?\s*$",
+        re.IGNORECASE,
+    )
+    # Code-workflow family: "write a small Python program that calculates
+    # Fibonacci numbers and open it in VS Code" — a source-artifact task with
+    # an optional open-in-editor clause (ONE intent, never a multi-step
+    # type-into-editor chain). The generated code is written to a real source
+    # file with the language-appropriate extension.
+    _CODE_WORKFLOW_RE = re.compile(
+        r"^(?:write|create|make|build|generate)\s+(?:a|an|the|some)?\s*"
+        r"(?:small|simple|short|quick|basic|tiny)?\s*"
+        r"(python|javascript|typescript|java|js|py|c\+\+|c#|go|rust|ruby|php|bash|powershell|html|css|sql)?\s*"
+        r"(?:program|script|code|file|function|app|application)\s*"
+        r"(?:that\s+)?(.+?)?(?:\s+and\s+open\s+it\s+(?:in|with)\s+(.+?))?\s*$",
+        re.IGNORECASE,
+    )
+    # "open Excel and make a tracker" — an open-app-plus-make-artifact chain
+    # is ONE document-creation intent whose destination application pins the
+    # format (excel -> spreadsheet, powerpoint -> presentation, word/notepad ->
+    # document). Runs BEFORE multi-step.
+    _OPEN_AND_MAKE_RE = re.compile(
+        r"^open\s+(?:the\s+)?(excel|spreadsheet|powerpoint|slides|word|notepad|text\s+editor)\s+and\s+"
+        r"(?:make|create|build|prepare)\s+(?:a|an|the)?\s*(?:new|fresh)?\s*(.+?)\s*$",
+        re.IGNORECASE,
+    )
+    # "write this down" / "jot that down" / "write this up" — note-taking /
+    # write-up intent without a topic: the executor truthfully asks what to
+    # write down (never fabricates a note).
+    _WRITE_DOWN_RE = re.compile(
+        r"^(?:write|jot|note)\s+(?:this|that|it|the\s+following)?\s*(?:down|up)?\s*$",
+        re.IGNORECASE,
+    )
+
     def _detect_document_save_as(self, lower, raw_text, text):
         m = self._CREATE_DOC_SAVE_AS_RE.match(lower)
         if not m:
@@ -1579,10 +1704,169 @@ class _IntentClassifier:
             metadata={"artifact": artifact, "style": "", "subject": subject},
         )
 
+    def _detect_open_and_make(self, lower, raw_text, text):
+        """'open Excel and make a tracker' — ONE document-creation intent.
+
+        The destination application pins the FORMAT (excel/spreadsheet -> .xlsx,
+        powerpoint/slides -> .pptx, word/notepad/text editor -> .docx), and the
+        "make" clause provides the artifact description. Never a two-step open-
+        then-type chain.
+        """
+        m = self._OPEN_AND_MAKE_RE.match(lower)
+        if not m:
+            return None
+        app = m.group(1).lower().strip()
+        desc = (m.group(2) or "").strip().rstrip(".")
+        if app in ("excel", "spreadsheet"):
+            artifact = "spreadsheet"
+        elif app in ("powerpoint", "slides"):
+            artifact = "presentation"
+        else:
+            artifact = "document"
+        # The "make a tracker" clause can name a more specific artifact.
+        nm = self._ARTIFACT_NOUNS.search(desc.lower())
+        if nm:
+            noun = nm.group(1).lower().strip()
+            mapped = self._ARTIFACT_KIND_MAP.get(noun, "")
+            if mapped and mapped != "file":
+                artifact = mapped
+        # "make a tracker" -> subject "tracker" (the artifact is the subject
+        # when no topic is given); "make a monthly budget" -> subject "monthly".
+        subject = re.sub(r"^(?:a|an|the)\s+", "", desc, flags=re.IGNORECASE).strip()
+        subject = re.sub(r"\s+(?:spreadsheet|sheet|tracker|budget|table|presentation|slides|deck|report|document|doc|file|notes?)\s*$", "", subject, flags=re.IGNORECASE).strip()
+        if not subject:
+            subject = desc
+        return RoutingDecision(
+            IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+            confidence=1.0,
+            metadata={"artifact": artifact, "style": "", "subject": subject},
+        )
+
+    def _detect_code_workflow(self, lower, raw_text, text):
+        """'write a small Python program that ... and open it in VS Code'.
+
+        A SOURCE-ARTIFACT task: the code is generated and written to a real
+        file with the language-appropriate extension; the optional "and open it
+        in <editor>" clause selects the editor. One intent, never a multi-step
+        type-into-editor chain. The subject is the program description.
+        """
+        m = self._CODE_WORKFLOW_RE.match(lower)
+        if not m:
+            return None
+        lang = (m.group(1) or "").strip().lower()
+        desc = (m.group(2) or "").strip().rstrip(".,!?").strip()
+        editor = (m.group(3) or "").strip().lower()
+        # "write some code for this in VS Code" — a bare referent description
+        # ("for this" / "for it") leaves the subject empty so the executor
+        # truthfully asks what the program should do. Never generates code for
+        # a word like "this". A trailing " in <editor>" without "and open it"
+        # still names the editor ("... in VS Code").
+        m_editor = re.search(r"\s+in\s+(vs\s+code|vscode|visual\s+studio\s+code|notepad(?:\+\+)?|code)\s*$", desc, re.IGNORECASE)
+        if m_editor:
+            editor = editor or m_editor.group(1).strip()
+            desc = desc[: m_editor.start()].strip()
+        desc = re.sub(r"^for\s+(this|that|it)\s*$", "", desc, flags=re.IGNORECASE).strip()
+        if not desc:
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "create_document", "", text, lower,
+                confidence=1.0,
+                metadata={
+                    "artifact": "code", "style": "", "subject": "",
+                    "language": lang or "python", "editor": editor or "",
+                },
+            )
+        # A bare description that is just the language name ("write a python
+        # program") leaves the subject empty so the executor asks.
+        if desc.lower() == lang:
+            desc = ""
+        return RoutingDecision(
+            IntentType.DESKTOP_ACTION, "create_document", desc, text, lower,
+            confidence=1.0,
+            metadata={
+                "artifact": "code",
+                "style": "",
+                "subject": desc,
+                "language": lang or "python",
+                "editor": editor or "",
+            },
+        )
+
     def _detect_document_creation(self, lower, text):
         subject = None
         artifact = "document"
         style = ""
+        # "write this down" / "jot that down" — note-taking intent with no
+        # topic given: route with an EMPTY subject so the executor truthfully
+        # asks what to write down (never fabricates a note).
+        if self._WRITE_DOWN_RE.match(lower):
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "create_document", "", text, lower,
+                confidence=1.0,
+                metadata={"artifact": "notes", "style": "", "subject": ""},
+            )
+        # Email draft family (content-side): "draft an email to X explaining Y"
+        # -> email artifact with recipient metadata. Runs first so it is never
+        # captured as a generic document.
+        em = self._EMAIL_DRAFT_RE.match(lower)
+        if em:
+            recipient = (em.group(1) or "").strip()
+            reason = (em.group(2) or "").strip()
+            subject = reason or recipient or ""
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+                confidence=1.0,
+                metadata={
+                    "artifact": "email",
+                    "style": "",
+                    "subject": subject,
+                    "recipient": recipient,
+                    "draft_only": True,
+                },
+            )
+        # Trailing-artifact form: "make me a quick Messi vs Ronaldo comparison"
+        # / "give me a proper spreadsheet for this" — artifact at the END,
+        # optionally followed by a destination-app tail ("... in Excel").
+        tm = self._CREATE_TRAILING_ARTIFACT_RE.match(lower) or self._CREATE_TRAILING_ARTIFACT_RE2.match(lower)
+        if tm:
+            subject = (tm.group(1) or "").strip()
+            noun = (tm.group(2) or "").lower().strip()
+            artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+            subject = re.sub(r"\s+(?:for|about|on)\s+(this|that|it)\s*$", "", subject, flags=re.IGNORECASE).strip()
+            # Bounded guard: the trailing form only fires for a genuine
+            # comparison subject ("messi vs ronaldo") or an explicit
+            # destination-app tail. A bare "write a poem" / "create a study
+            # guide" / "make a monthly budget" must keep its richer route
+            # (conversation / bare-artifact), never be split as a phantom
+            # trailing noun.
+            if re.search(r"\b(vs|versus)\b", subject):
+                pass  # comparison subject — valid
+            elif self._DEST_APP_TAIL_RE.search(lower) or self._CREATE_DOC_COMPARE_RE.match(lower):
+                pass  # destination-app tail — valid
+            else:
+                # Rejected as a phantom trailing noun ("create a study guide"
+                # would split into subject="study"/noun="guide") — the guard
+                # MUST also clear the prematurely-extracted subject so it can
+                # never leak into a later branch (e.g. the bare-artifact path).
+                subject = ""
+                tm = None
+        if tm:
+            subject = (tm.group(1) or "").strip()
+            noun = (tm.group(2) or "").lower().strip()
+            artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+            subject = re.sub(r"\s+(?:for|about|on)\s+(this|that|it)\s*$", "", subject, flags=re.IGNORECASE).strip()
+            # Destination-app tail pins the FORMAT (generic, never per-app).
+            dm = self._DEST_APP_TAIL_RE.search(lower)
+            if dm:
+                dest = dm.group(1).lower()
+                if dest in ("excel", "spreadsheet", "xlsx"):
+                    artifact = "spreadsheet"
+                elif dest in ("powerpoint", "slides", "pptx"):
+                    artifact = "presentation"
+            return RoutingDecision(
+                IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+                confidence=1.0,
+                metadata={"artifact": artifact, "style": "", "subject": subject},
+            )
         m = self._CREATE_DOC_COMPARE_RE.match(lower)
         if m:
             subject = m.group(1).strip()
@@ -1647,6 +1931,11 @@ class _IntentClassifier:
                     if nm:
                         noun = nm.group(1).lower().strip()
                         artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
+                    # A leading clause ENDING in "table" ("make a comparison
+                    # table for X") is a TABLE request — the head noun wins
+                    # over a preceding modifier noun.
+                    if re.search(r"\btable\s*$", leading):
+                        artifact = "table"
                 # Style tail: "... and make it concise" -> style=concise.
                 sm = self._STYLE_TAIL_RE.search(subject)
                 if sm:
@@ -1696,7 +1985,10 @@ class _IntentClassifier:
                             if desc_m:
                                 desc = desc_m.group(1).strip().lower()
                             topic_words = ("budget", "monthly", "weekly", "annual", "expense", "expenses", "sales", "project", "travel")
-                            style_words = ("simple", "basic", "clean", "quick")
+                            # Style words describe the DELIVERY (concise,
+                            # professional, brief), never the topic — they must
+                            # never leak into the subject.
+                            style_words = ("simple", "basic", "clean", "quick", "short", "brief", "concise", "detailed", "mini", "full", "proper", "nice", "professional", "formal")
                             subj_bits = [w for w in desc.split() if w in topic_words]
                             style_bits = [w for w in desc.split() if w in style_words]
                             if subj_bits:
@@ -1713,8 +2005,36 @@ class _IntentClassifier:
                                 noun = (bf.group(2) or "").lower().strip()
                                 artifact = self._ARTIFACT_KIND_MAP.get(noun, "document")
                                 desc = (bf.group(1) or "").strip()
-                                subject = desc if desc else ""
+                                # Same style-vs-topic discipline as above:
+                                # topic-like words become the subject, style
+                                # words become the style, never the subject
+                                # ("create a detailed report" has NO topic).
+                                topic_words = ("budget", "monthly", "weekly", "annual", "expense", "expenses", "sales", "project", "travel")
+                                style_words = ("simple", "basic", "clean", "quick", "short", "brief", "concise", "detailed", "mini", "full", "proper", "nice", "professional", "formal")
+                                subj_bits = [w for w in desc.split() if w in topic_words]
+                                style_bits = [w for w in desc.split() if w in style_words]
+                                if subj_bits:
+                                    subject = " ".join(subj_bits)
+                                elif style_bits:
+                                    style = " ".join(style_bits)
+                                    subject = ""
+                                else:
+                                    subject = desc if desc else ""
         if not subject and artifact == "document":
+            # "write a short comparison of A and B and put it in a new
+            # document" / "make a document out of this" — a bare-pronoun
+            # SOURCE with a generic document target is still a document-
+            # creation request: route with an empty subject so the executor
+            # truthfully asks what the document should contain (never
+            # fabricates content).
+            if self._CREATE_FROM_RE.match(lower) and re.search(
+                r"\b(?:this|that|it|these|those)\b", lower
+            ):
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "create_document", "", text, lower,
+                    confidence=1.0,
+                    metadata={"artifact": "document", "style": "", "subject": ""},
+                )
             # "write a short comparison of A and B and put it in a new
             # document" — split on the "and put/place/type it in[to]" clause.
             split = re.split(r"\s+and\s+(?:put|place|write|type|drop|paste)\s+(?:it|this|that)\s+(?:in|into)\s+(?:a|an|the)?\s*(?:new\s+)?(?:document|file|doc|text\s+file)\s*$", lower, maxsplit=1)
@@ -1741,6 +2061,21 @@ class _IntentClassifier:
                 metadata={"artifact": artifact, "style": style, "subject": ""},
             )
         if not subject:
+            # Fallback: phrasal content verbs — "put together something on X" /
+            # "write up what we discussed". Runs LAST so artifact-first forms
+            # ("put together a comparison of A and B") keep the richer route.
+            pm = self._CREATE_PHRASAL_RE.match(lower)
+            if pm:
+                subject = (pm.group(1) or pm.group(2) or "").strip()
+                if re.search(r"\b(vs|versus)\b", subject):
+                    artifact = "comparison"
+                else:
+                    artifact = "notes"
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
+                    confidence=1.0,
+                    metadata={"artifact": artifact, "style": "", "subject": subject},
+                )
             return None
         return RoutingDecision(
             IntentType.DESKTOP_ACTION, "create_document", subject, text, lower,
@@ -2850,10 +3185,14 @@ class _ExecutionCoordinator:
             return result
 
         if action == "create_document":
-            from mini_kio.core.artifact_operator import create_artifact, open_artifact
+            from mini_kio.core.artifact_operator import (
+                create_artifact, open_artifact, open_in_editor,
+            )
             subject = str(target or meta.get("subject") or "").strip()
             artifact = str(meta.get("artifact") or "document")
             style = str(meta.get("style") or "")
+            language = str(meta.get("language") or "")
+            editor = str(meta.get("editor") or "")
             if not subject:
                 # Bare artifact request ("create a study guide") — ask what it
                 # should be about instead of fabricating a topic.
@@ -2861,30 +3200,72 @@ class _ExecutionCoordinator:
                     "success": False,
                     "message": f"Sure — what should the {artifact} be about?",
                 }
+            # Email draft: CONTENT-side only — no authenticated send provider,
+            # so the complete professional email IS the truthful deliverable.
+            if artifact == "email" and meta.get("draft_only"):
+                recipient = str(meta.get("recipient") or "")
+                content = self._generate_content(
+                    f"{subject}", "", artifact="email", style=style
+                )
+                if not content:
+                    return {"success": False, "message": "I couldn't draft that email."}
+                to_line = f" To: {recipient}." if recipient else ""
+                return {
+                    "success": True,
+                    "message": f"Here's your draft{to_line}\n\n{content}",
+                    "target": "email draft",
+                }
             content = self._generate_content(
-                f"{subject}", "", artifact=artifact, style=style
+                f"{subject}", "", artifact=artifact, style=style, language=language
             )
             if not content:
                 return {"success": False, "message": f"I couldn't generate content for that {artifact}."}
-            result = create_artifact(subject, content, artifact=artifact, style=style)
+            result = create_artifact(
+                subject, content, artifact=artifact, style=style, language=language
+            )
             if result.get("success"):
-                # Open the created artifact in its default application.
+                # Open the created artifact — in the requested editor for code,
+                # default application otherwise.
                 try:
                     import pathlib
-                    open_artifact(pathlib.Path(result["path"]))
+                    if result.get("artifact") in ("code", "program", "script"):
+                        open_in_editor(pathlib.Path(result["path"]), editor)
+                    else:
+                        open_artifact(pathlib.Path(result["path"]))
                 except Exception:
                     pass
                 if "word_count" in result:
                     detail, unit = result["word_count"], "word"
                 elif "row_count" in result:
                     detail, unit = result["row_count"], "row"
+                elif "line_count" in result:
+                    detail, unit = result["line_count"], "line"
                 else:
                     detail, unit = result.get("slide_count", 0), "slide"
                 if detail != 1:
                     unit += "s"
+                # Natural KIO voice — the confirmation states WHAT was created
+                # in plain language and keeps the truthful verification facts
+                # (filename + measured unit count) in a compact parenthetical.
+                # Never a bare execution log.
+                kind = result.get("artifact") or artifact
+                filename = result.get("filename", "")
+                if kind in ("code", "program", "script"):
+                    app = editor or "your editor"
+                    action_note = f"I wrote the {kind} and opened it in {app}."
+                elif kind in ("spreadsheet", "budget", "table", "sheet", "data", "ledger", "inventory", "tracker", "timetable", "roster", "schedule", "dataset"):
+                    action_note = "I made you a fresh spreadsheet and opened it."
+                elif kind in ("presentation", "slides", "deck", "ppt", "pptx", "powerpoint", "slideshow", "talk"):
+                    action_note = "I put the slides together and opened the deck."
+                elif kind == "email":
+                    action_note = "I drafted the email and left it ready for review."
+                elif kind == "notes":
+                    action_note = "I jotted that down for you and opened it."
+                else:
+                    action_note = "I wrote it up as a document and opened it."
                 return {
                     "success": True,
-                    "message": f"Created {result.get('filename')} — {detail} {unit}.",
+                    "message": f"Done — {action_note} ({filename} — {detail} {unit}).",
                     "target": result.get("filename", subject),
                 }
             return result
@@ -3756,7 +4137,7 @@ class _ExecutionCoordinator:
             logger.debug("[CONTENT_RESEARCH] research unavailable: %s", exc)
         return ""
 
-    def _generate_content(self, prompt: str, target_app: str = "", *, artifact: str = "", style: str = "") -> Optional[str]:
+    def _generate_content(self, prompt: str, target_app: str = "", *, artifact: str = "", style: str = "", language: str = "") -> Optional[str]:
         """Generate requested content with the LLM (content generation only).
 
         Used for generated-content TYPE tasks ("a short poem about space") and
@@ -3782,17 +4163,40 @@ class _ExecutionCoordinator:
         # Structured artifacts (spreadsheet/presentation) need their structure
         # preserved; editor typing needs plain prose. Make the instruction
         # artifact-aware instead of forcing plain prose onto everything.
-        if artifact in ("spreadsheet", "presentation", "table"):
+        if artifact == "email":
+            structure_rule = (
+                "Write a complete, professional email with a clear subject line, "
+                "a proper greeting, a polite body that explains the requested "
+                "reason, and a courteous sign-off. Return the full email text."
+            )
+        elif artifact in ("code", "program", "script"):
+            lang = language or "python"
+            structure_rule = (
+                f"Write a complete, working {lang} program. Include the necessary "
+                "imports, a main entry point, and clear logic. Return ONLY the "
+                "source code — no markdown fences, no explanation."
+            )
+        elif artifact in ("spreadsheet", "presentation", "table", "tracker", "dataset"):
             structure_rule = (
                 "For a spreadsheet: output actual tabular data with a header "
                 "row and one record per line, separated by tabs. "
-                "For a presentation: output slide titles as short lines followed "
-                "by concise bullet points for each slide."
+                "For a presentation: build a REAL deck — an opening title slide, "
+                "a logical progression of section slides each with a short title "
+                "line followed by 2-5 concise bullet points, and a closing "
+                "summary/conclusion slide. Separate every slide title and its "
+                "bullets by line breaks; put each slide title on its own line "
+                "followed immediately by its bullet lines, with each slide "
+                "starting on a new line. Aim for 5-8 slides unless the user asked "
+                "for a specific count. No giant paragraphs on slides."
             )
         else:
             structure_rule = (
-                "Plain readable prose with real paragraphs. "
-                "Do not output markdown."
+                "Write a well-structured document: a clear opening section, "
+                "logical sections with short descriptive headings on their own "
+                "lines, and a closing section. Use bullet or numbered points "
+                "where a list fits. Match the requested format — essay, report, "
+                "comparison, study guide, letter, notes, or poem. Do not output "
+                "markdown symbols (#, *, ---); use plain text headings."
             )
         system_prompt = (
             "You are KIO, generating content the user requested. "

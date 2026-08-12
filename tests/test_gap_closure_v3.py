@@ -311,7 +311,13 @@ class DesktopActionClassificationTest(unittest.TestCase):
 
     def test_write_a_poem_is_not_typing(self):
         d = _classify("write a poem")
-        self.assertNotEqual(d.intent_type.value, "desktop_action")
+        # "write a poem" is CONTENT creation — never literal typing. The
+        # modern classifier routes it to create_document (artifact=poem);
+        # the old assertion (intent != desktop_action) is stale because
+        # create_document IS a desktop_action and it is exactly the correct
+        # behavior. Assert the ACTION, which encodes the actual intent.
+        self.assertEqual(d.action, "create_document")
+        self.assertEqual((d.metadata or {}).get("artifact"), "poem")
 
     def test_type_into_running_app_launches_fresh_instance_by_default(self):
         # Capability-quality (live directive): typing ALWAYS goes into a NEW
@@ -2035,10 +2041,131 @@ class GenericArtifactCreationTest(unittest.TestCase):
         self.assertEqual((d.metadata or {}).get("artifact"), "study guide")
         self.assertEqual((d.metadata or {}).get("subject"), "")
 
+    def test_pptx_per_slide_notes_and_brace_safe_content(self):
+        # Capability-quality: speaker notes are native to the presentation
+        # format; each slide must reference ITS OWN notes slide (never a
+        # shared notesSlide1), and speaker-notes text containing literal { }
+        # braces must not crash the builder (.format() would misread them).
+        import pathlib, tempfile, zipfile
+        from mini_kio.core.artifact_operator import create_artifact, verify_pptx
+        content = (
+            "Intro\n- Uses {x} and {y} syntax\n- Second point\n"
+            "Why It Matters!\n- Point A\n- Point B\n"
+            "Conclusion\n- Wrap up\n"
+        )
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("brace test", content, artifact="presentation", out_dir=tmp)
+        self.assertTrue(r.get("success"), r.get("message"))
+        f = pathlib.Path(r["path"])
+        facts = verify_pptx(f)
+        self.assertEqual(facts.get("slide_count"), 3)
+        self.assertEqual(facts.get("notes_count"), 3)
+        with zipfile.ZipFile(str(f)) as z:
+            rel1 = z.read("ppt/slides/_rels/slide2.xml.rels").decode("utf-8")
+            self.assertIn("notesSlide2.xml", rel1)  # per-slide, not shared
+            n1 = z.read("ppt/notesSlides/notesSlide1.xml").decode("utf-8")
+            self.assertIn("{x}", n1)  # braces preserved, no crash
+
+    def test_xlsx_meaningful_sheet_name_and_header_style(self):
+        # Capability-quality: a spreadsheet is a REAL structured artifact —
+        # meaningful sheet name derived from the subject (no "Budget_Budget"
+        # duplication) and a bold header row (style s=1), not a text dump.
+        import pathlib, tempfile, zipfile
+        from mini_kio.core.artifact_operator import (
+            create_artifact, _sheet_name_from_subject,
+        )
+        self.assertEqual(_sheet_name_from_subject("budget", "budget"), "Budget")
+        self.assertEqual(
+            _sheet_name_from_subject("messi and ronaldo", "comparison"),
+            "Messi_And_Ronaldo",
+        )
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact(
+            "messi vs ronaldo",
+            "Player\tGoals\tAssists\nMessi\t700\t300\nRonaldo\t800\t250",
+            artifact="spreadsheet",
+            out_dir=tmp,
+        )
+        self.assertTrue(r.get("success"), r.get("message"))
+        f = pathlib.Path(r["path"])
+        with zipfile.ZipFile(str(f)) as z:
+            wb = z.read("xl/workbook.xml").decode("utf-8")
+            sheet = z.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn('name="Messi_Vs_Ronaldo"', wb)
+        header_row = sheet.split('<row r="1">')[1].split("</row>")[0]
+        self.assertIn('s="1"', header_row)  # bold header style applied
+
     def test_non_artifact_phrases_stay_conversational(self):
         for q in ("make a paper airplane", "create a mess", "make a move"):
             d = self._classify(q)
             self.assertNotEqual(d.action, "create_document", q)
+
+    def test_bare_artifact_subject_not_leaked_from_phantom_trailing_noun(self):
+        # Live-found regression: "create a study guide" was split as a phantom
+        # trailing noun (subject="study"/noun="guide") and the leaked subject
+        # survived the guard, so the bare-artifact route reported subject=
+        # "study" instead of "". A bare artifact has NO topic — the executor
+        # must ask. Same guard applies to other adjectives that are NOT topics.
+        from mini_kio.core.pipeline import Pipeline
+        p = Pipeline()
+        for q in ("create a study guide", "make a quick comparison",
+                  "write a short poem", "create a detailed report"):
+            d = p._classifier.classify(q, q)
+            self.assertEqual(d.action, "create_document", q)
+            md = d.metadata or {}
+            # "quick"/"short"/"detailed" are styles, never topics; a bare
+            # artifact with no topic marker keeps subject empty.
+            self.assertNotIn(
+                md.get("subject"), ("study", "quick", "short", "detailed"), q
+            )
+            self.assertEqual(md.get("subject"), "", q)
+
+    def test_create_document_response_is_natural_not_execution_log(self):
+        # Capability-quality (live directive): confirmations must read like
+        # KIO, not like a build log. The executor keeps the truthful facts but
+        # wraps them in plain language ("Done — I made you a fresh spreadsheet
+        # and opened it."). No bare "Created X — 3 rows." log string.
+        from unittest import mock
+        from mini_kio.core.pipeline import _ExecutionCoordinator
+        from mini_kio.core.pipeline.types import IntentType, RoutingDecision
+        coord = _ExecutionCoordinator()
+        decision = RoutingDecision(
+            intent_type=IntentType.DESKTOP_ACTION,
+            action="create_document",
+            target="tea and coffee",
+            raw_text="make a small spreadsheet comparing tea and coffee in Excel",
+            normalized_text="make a small spreadsheet comparing tea and coffee in Excel",
+            metadata={"artifact": "spreadsheet", "subject": "tea and coffee", "style": ""},
+        )
+        fake_result = {
+            "success": True,
+            "filename": "Tea_And_Coffee_Spreadsheet.xlsx",
+            "row_count": 3,
+            "cell_count": 12,
+            "path": "C:/fakepath/Tea_And_Coffee_Spreadsheet.xlsx",
+            "artifact": "spreadsheet",
+            "subject": "tea and coffee",
+        }
+        with mock.patch.object(
+            coord, "_generate_content", return_value="X\tY\n1\t2\n3\t4\n"), \
+                mock.patch(
+                    "mini_kio.core.artifact_operator.create_artifact",
+                    return_value=fake_result,
+                ), mock.patch(
+                    "mini_kio.core.artifact_operator.open_artifact", return_value=True
+                ):
+            out = coord.execute(
+                "desktop_action",
+                {
+                    "action": "create_document",
+                    "target": "tea and coffee",
+                    "metadata": {"artifact": "spreadsheet", "subject": "tea and coffee"},
+                },
+                decision,
+            )
+        msg = out.get("message", "")
+        self.assertIn("spreadsheet", msg.lower())
+        self.assertNotRegex(msg, r"^Created \S+ — \d+ (row|word|slide|line)s?\.$")
 
     def test_save_as_clause_is_single_document_intent(self):
         # Live-found: "write a short essay about X and save it as a Word

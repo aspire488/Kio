@@ -60,8 +60,20 @@ logger = logging.getLogger("mini_kio.core.artifact_operator")
 _SPREADSHEET_KINDS = frozenset({
     "spreadsheet", "sheet", "excel", "xlsx", "budget", "table", "data",
     "ledger", "inventory", "tracker", "timetable", "roster", "schedule",
-    "dataset",
+    "dataset", "plan",
 })
+
+# Source-code kinds: written as plain text files with language-appropriate
+# extensions (NOT OOXML) so they open in the user's editor.
+_CODE_KINDS = frozenset({"code", "program", "script"})
+# language -> file extension (generic, never per-app branches).
+_CODE_EXTENSIONS = {
+    "python": ".py", "py": ".py", "javascript": ".js", "js": ".js",
+    "typescript": ".ts", "ts": ".ts", "java": ".java",
+    "c++": ".cpp", "c#": ".cs", "cs": ".cs", "go": ".go",
+    "rust": ".rs", "ruby": ".rb", "php": ".php", "bash": ".sh",
+    "powershell": ".ps1", "html": ".html", "css": ".css", "sql": ".sql",
+}
 _PRESENTATION_KINDS = frozenset({
     "presentation", "slides", "slide", "deck", "ppt", "pptx", "powerpoint",
     "slideshow", "talk", "slide deck",
@@ -91,9 +103,11 @@ def _escape_xml(text: str) -> str:
 
 
 # ── filename ─────────────────────────────────────────────────────────────────
-def artifact_extension(artifact: str) -> str:
+def artifact_extension(artifact: str, language: str = "") -> str:
     """Resolve the file extension for an artifact kind (canonical, not per-app)."""
     kind = (artifact or "document").lower().strip()
+    if kind in _CODE_KINDS:
+        return _CODE_EXTENSIONS.get((language or "python").lower().strip(), ".py")
     if kind in _SPREADSHEET_KINDS:
         return ".xlsx"
     if kind in _PRESENTATION_KINDS:
@@ -174,23 +188,29 @@ def _column_letter(idx: int) -> str:
     return letters
 
 
-def _cell_xml(ref: str, value: str) -> str:
-    """Write a cell: inline string by default, numeric when clearly numeric."""
+def _cell_xml(ref: str, value: str, header: bool = False) -> str:
+    """Write a cell: inline string by default, numeric when clearly numeric.
+
+    header=True applies the bold header style (style index 1) — the first
+    row of a real spreadsheet is a readable header, not just another row.
+    """
     v = _sanitize_markdown(value)
+    style_attr = ' s="1"' if header else ""
     if v == "":
-        return f'<c r="{ref}"/>'
+        return f'<c r="{ref}"{style_attr}/>'
     # Numeric detection (int or float, no units).
     if re.fullmatch(r"-?\d+(?:\.\d+)?", v):
-        return f'<c r="{ref}"><v>{v}</v></c>'
-    return f'<c r="{ref}" t="inlineStr"><is><t>{_escape_xml(v)}</t></is></c>'
+        return f'<c r="{ref}"{style_attr}><v>{v}</v></c>'
+    return f'<c r="{ref}"{style_attr} t="inlineStr"><is><t>{_escape_xml(v)}</t></is></c>'
 
 
 def _build_worksheet_xml(rows: list[list[str]]) -> str:
     parts = []
     for r_idx, row in enumerate(rows, start=1):
+        header = r_idx == 1
         cells = []
         for c_idx, val in enumerate(row[:128], start=1):  # bounded width
-            cells.append(_cell_xml(f"{_column_letter(c_idx)}{r_idx}", val))
+            cells.append(_cell_xml(f"{_column_letter(c_idx)}{r_idx}", val, header=header))
         parts.append(f"<row r=\"{r_idx}\">{''.join(cells)}</row>")
     sheet_data = "".join(parts)
     return (
@@ -219,13 +239,39 @@ _XLSX_RELS = (
     "</Relationships>"
 )
 
-_XLSX_WORKBOOK = (
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-    '<sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets>'
-    "</workbook>"
-)
+def _sheet_name_from_subject(subject: str, artifact: str = "") -> str:
+    """Meaningful Excel sheet name derived from the subject.
+
+    Excel limits: max 31 chars, cannot contain []:*?/ and must not be
+    empty. "messi and ronaldo" + comparison -> "Messi_Ronaldo"; the
+    artifact word is only appended when the subject is very short and the
+    subject does not already name the artifact ("budget" -> "Budget",
+    never "Budget_Budget").
+    """
+    words = re.findall(r"[A-Za-z0-9]+", subject or "")
+    base = "_".join(w.capitalize() for w in words)
+    if not base:
+        base = "Data"
+    if len(words) <= 1:
+        kind = (artifact or "").lower().strip()
+        extra = {
+            "budget": "Budget", "table": "Table", "tracker": "Tracker",
+            "dataset": "Data", "ledger": "Ledger", "schedule": "Schedule",
+        }.get(kind, "")
+        if extra and base.lower() != extra.lower():
+            base = f"{base}_{extra}"
+    clean = re.sub(r"[\\/*?:\[\]]", "_", base)
+    return (clean[:31] or "Data")
+
+
+def _build_workbook_xml(sheet_name: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{_escape_xml(sheet_name)}" sheetId="1" r:id="rId1"/></sheets>'
+        "</workbook>"
+    )
 
 _XLSX_WORKBOOK_RELS = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -235,25 +281,28 @@ _XLSX_WORKBOOK_RELS = (
     "</Relationships>"
 )
 
+# Two cell styles: 0 = normal body, 1 = bold header (used for row 1).
 _XLSX_STYLES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>'
+    '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
     '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
     '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
+    '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
     "</styleSheet>"
 )
 
 
-def build_xlsx(path: Path, rows: list[list[str]]) -> bool:
+def build_xlsx(path: Path, rows: list[list[str]], sheet_name: str = "Data") -> bool:
     """Write a valid minimal .xlsx to `path`. Returns True on success."""
     try:
         with zipfile.ZipFile(str(path), "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("[Content_Types].xml", _XLSX_CONTENT_TYPES)
             zf.writestr("_rels/.rels", _XLSX_RELS)
-            zf.writestr("xl/workbook.xml", _XLSX_WORKBOOK)
+            zf.writestr("xl/workbook.xml", _build_workbook_xml(sheet_name))
             zf.writestr("xl/_rels/workbook.xml.rels", _XLSX_WORKBOOK_RELS)
             zf.writestr("xl/styles.xml", _XLSX_STYLES)
             zf.writestr("xl/worksheets/sheet1.xml", _build_worksheet_xml(rows))
@@ -314,11 +363,13 @@ def _parse_slides(raw_content: str) -> list[tuple[str, list[str]]]:
         if m:
             bullets.append(m.group(1).strip())
             continue
-        # A short line without terminal sentence punctuation is a new slide
-        # title; otherwise it's a prose bullet on the current slide.
+        # A short line is a new slide title unless it reads like sentence
+        # prose: long text, numbered items, or a line ending in a full stop
+        # (period = prose; a short question or exclamation "What Are Black
+        # Holes?" / "Why It Matters!" is a legitimate slide title).
         is_title = (
             len(line) <= 90
-            and not line.endswith((".", "!", "?"))
+            and not line.endswith(".")
             and not re.match(r"^\d+[.)]", line)
             and (line[0].isupper() or line[0].isdigit())
         )
@@ -352,6 +403,15 @@ def _pptx_content_types(slide_count: int) -> str:
         % i
         for i in range(1, slide_count + 1)
     ]
+    overrides += [
+        '<Override PartName="/ppt/notesSlides/notesSlide%d.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>'
+        % i
+        for i in range(1, slide_count + 1)
+    ]
+    overrides.append(
+        '<Override PartName="/ppt/notesMasters/notesMaster1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/>'
+    )
     return _PPTX_DEFAULT + "".join(overrides) + "</Types>"
 
 
@@ -435,12 +495,82 @@ _PPTX_LAYOUT_RELS = (
     "</Relationships>"
 )
 
-_SLIDE_RELS = (
+def _slide_rels(slide_index: int) -> str:
+    """Per-slide relationships: slide layout + THAT slide's own notes slide.
+
+    Generated per index so slide N links to notesSlideN (never a shared
+    notesSlide1), which keeps every slide's speaker notes correct.
+    """
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+        f'<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide{slide_index}.xml"/>'
+        "</Relationships>"
+    )
+
+# Speaker-notes parts: one notesMaster (referenced by every notesSlide) and
+# per-slide notesSlides. Optional but native to the presentation format —
+# PowerPoint opens decks with or without them.
+_NOTES_MASTER = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<p:notesMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+    '<p:cSld><p:spTree>'
+    '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+    "<p:grpSpPr/></p:spTree></p:cSld>"
+    '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" '
+    'accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>'
+    '<p:notesStyle><a:lvl1pPr algn="l"><a:defRPr sz="1400"/></a:lvl1pPr></p:notesStyle>'
+    "</p:notesMaster>"
+)
+
+_NOTES_MASTER_RELS = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>'
     "</Relationships>"
 )
+
+_NOTES_SLIDE = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+    '<p:cSld><p:spTree>'
+    '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+    "<p:grpSpPr/>"
+    '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>'
+    '<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="6858000"/></a:xfrm>'
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>'
+    '<p:txBody><a:bodyPr wrap="square"><a:normAutofit/></a:bodyPr>{body}</p:txBody></p:sp>'
+    "</p:spTree></p:cSld>"
+    '<p:clrMapOvr><a:overrideClrMapping bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" '
+    'accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" '
+    'accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr>'
+    "</p:notes>"
+)
+
+_NOTES_SLIDE_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="../notesMasters/notesMaster1.xml"/>'
+    "</Relationships>"
+)
+
+
+def _notes_body_xml(title: str, bullets: list[str]) -> str:
+    """Speaker notes = slide title + the slide's bullet points (always non-
+    empty, so PowerPoint never shows a blank notes pane)."""
+    paras = []
+    if title:
+        paras.append(f'<a:p><a:r><a:rPr lang="en-US" sz="1400" b="1"/><a:t>{_escape_xml(title)}</a:t></a:r></a:p>')
+    for b in bullets[:10]:
+        paras.append(f'<a:p><a:r><a:rPr lang="en-US" sz="1200"/><a:t>{_escape_xml(b)}</a:t></a:r></a:p>')
+    if not paras:
+        paras.append('<a:p/>')
+    return "".join(paras)
 
 
 def _slide_xml(title: str, bullets: list[str]) -> str:
@@ -491,6 +621,7 @@ def _presentation_xml(slide_count: int) -> str:
     rels += (
         '<Relationship Id="rIdL1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>'
         '<Relationship Id="rIdT1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>'
+        '<Relationship Id="rIdN1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="notesMasters/notesMaster1.xml"/>'
     )
     rels_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -502,6 +633,7 @@ def _presentation_xml(slide_count: int) -> str:
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
         'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
         f'<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdL1"/></p:sldMasterIdLst>'
+        f'<p:notesMasterIdLst><p:notesMasterId r:id="rIdN1"/></p:notesMasterIdLst>'
         f"<p:sldIdLst>{ids}</p:sldIdLst>"
         '<p:sldSz cx="12192000" cy="6858000" type="screen16x9"/>'
         '<p:notesSz cx="6858000" cy="9144000"/>'
@@ -525,9 +657,20 @@ def build_pptx(path: Path, title: str, slides: list[tuple[str, list[str]]]) -> b
             zf.writestr("ppt/slideMasters/_rels/slideMaster1.xml.rels", _PPTX_MASTER_RELS)
             zf.writestr("ppt/slideLayouts/slideLayout1.xml", _PPTX_LAYOUT)
             zf.writestr("ppt/slideLayouts/_rels/slideLayout1.xml.rels", _PPTX_LAYOUT_RELS)
+            zf.writestr("ppt/notesMasters/notesMaster1.xml", _NOTES_MASTER)
+            zf.writestr("ppt/notesMasters/_rels/notesMaster1.xml.rels", _NOTES_MASTER_RELS)
             for i, (stitle, bullets) in enumerate(slides, start=1):
                 zf.writestr(f"ppt/slides/slide{i}.xml", _slide_xml(stitle, bullets))
-                zf.writestr(f"ppt/slides/_rels/slide{i}.xml.rels", _SLIDE_RELS)
+                zf.writestr(f"ppt/slides/_rels/slide{i}.xml.rels", _slide_rels(i))
+                notes_body = _notes_body_xml(stitle, bullets)
+                zf.writestr(
+                    f"ppt/notesSlides/notesSlide{i}.xml",
+                    # replace() not .format(): speaker-notes text is user
+                    # content and may legitimately contain literal { } braces,
+                    # which .format() would misread as placeholders.
+                    _NOTES_SLIDE.replace("{body}", notes_body),
+                )
+                zf.writestr(f"ppt/notesSlides/_rels/notesSlide{i}.xml.rels", _NOTES_SLIDE_RELS)
         return True
     except Exception as exc:  # noqa: BLE001
         logger.exception("build_pptx failed for %s: %s", path, exc)
@@ -535,8 +678,8 @@ def build_pptx(path: Path, title: str, slides: list[tuple[str, list[str]]]) -> b
 
 
 def verify_pptx(path: Path) -> dict[str, Any]:
-    """Verify a real .pptx artifact: exists, valid ZIP, expected slide parts."""
-    facts: dict[str, Any] = {"exists": False, "valid_zip": False, "slide_count": 0}
+    """Verify a real .pptx artifact: exists, valid ZIP, expected slide + notes parts."""
+    facts: dict[str, Any] = {"exists": False, "valid_zip": False, "slide_count": 0, "notes_count": 0}
     try:
         if not path.exists():
             return facts
@@ -552,13 +695,41 @@ def verify_pptx(path: Path) -> dict[str, Any]:
                 return facts
             facts["valid_zip"] = True
             pres = zf.read("ppt/presentation.xml").decode("utf-8", errors="replace")
+            notes = [n for n in names if n.startswith("ppt/notesSlides/notesSlide") and n.endswith(".xml")]
         facts["slide_count"] = pres.count("p:sldId ")
+        facts["notes_count"] = len(notes)
     except Exception as exc:  # noqa: BLE001
         logger.warning("verify_pptx failed: %s", exc)
     return facts
 
 
 # ── generic open / create ────────────────────────────────────────────────────
+def build_code_file(path: Path, source: str) -> bool:
+    """Write a real source file (plain UTF-8 text, not OOXML)."""
+    try:
+        path.write_text(source or "", encoding="utf-8")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("build_code_file failed for %s: %s", path, exc)
+        return False
+
+
+def verify_code_file(path: Path) -> dict[str, Any]:
+    """Verify a real source artifact: exists, non-empty, lines of code."""
+    facts: dict[str, Any] = {"exists": False, "line_count": 0, "char_count": 0}
+    try:
+        if not path.exists():
+            return facts
+        facts["exists"] = True
+        facts["size_bytes"] = path.stat().st_size
+        text = path.read_text(encoding="utf-8", errors="replace")
+        facts["line_count"] = len([l for l in text.splitlines() if l.strip()])
+        facts["char_count"] = len(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("verify_code_file failed: %s", exc)
+    return facts
+
+
 def open_artifact(path: Path) -> bool:
     """Open the artifact in its default application (Word/Excel/PowerPoint)."""
     try:
@@ -573,12 +744,43 @@ def open_artifact(path: Path) -> bool:
         return False
 
 
+def open_in_editor(path: Path, editor: str = "") -> bool:
+    """Open a source artifact in the requested installed editor (VS Code etc.).
+
+    Falls back to the default handler when no editor is named or the named
+    editor cannot be located. Truthful: returns False only when nothing could
+    be launched.
+    """
+    import subprocess as _sp
+    editor = (editor or "").strip().lower()
+    candidates: list[str] = []
+    if editor in ("vs code", "vscode", "code", "visual studio code"):
+        candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            r"C:\Program Files\Microsoft VS Code\Code.exe",
+        ]
+    elif editor in ("notepad", "notepad++", "npp"):
+        candidates = [r"C:\Windows\System32\notepad.exe"]
+    for cand in candidates:
+        if os.path.exists(cand):
+            try:
+                _sp.Popen([cand, str(path)])
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("open_in_editor failed for %s: %s", cand, exc)
+                return False
+    # No named editor found -> default handler (honest best effort).
+    return open_artifact(path)
+
+
 def create_artifact(
     subject: str,
     raw_content: str,
     artifact: str = "document",
     style: str = "",
     out_dir: Optional[Path] = None,
+    language: str = "",
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Create a real artifact of the requested kind. THE canonical entry point.
 
@@ -604,16 +806,38 @@ def create_artifact(
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "message": f"Couldn't use the Documents folder: {exc}"}
 
-    ext = artifact_extension(kind)
+    language = kwargs.get("language", "")
+    ext = artifact_extension(kind, language)
     filename = generate_artifact_filename(subject, kind, style) + ext
     path = _ensure_unique(directory / filename)
     title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", subject)) or "Untitled"
+
+    if kind in _CODE_KINDS:
+        if not build_code_file(path, raw_content):
+            return {"success": False, "message": "The source file couldn't be written."}
+        facts = verify_code_file(path)
+        if not facts.get("exists") or facts.get("line_count", 0) == 0:
+            return {
+                "success": False,
+                "message": f"The source file was written but verification failed ({path.name}).",
+            }
+        return {
+            "success": True,
+            "message": f"Created {path.name} — {facts['line_count']} lines of code.",
+            "path": str(path),
+            "filename": path.name,
+            "line_count": facts["line_count"],
+            "artifact": kind,
+            "subject": subject,
+            "language": language,
+        }
 
     if kind in _SPREADSHEET_KINDS:
         rows = _parse_spreadsheet_rows(raw_content)
         if not rows:
             return {"success": False, "message": "I couldn't structure that into spreadsheet rows."}
-        if not build_xlsx(path, rows):
+        sheet_name = _sheet_name_from_subject(subject, kind)
+        if not build_xlsx(path, rows, sheet_name=sheet_name):
             return {"success": False, "message": "The spreadsheet couldn't be written."}
         facts = verify_xlsx(path)
         if not facts.get("valid_zip") or facts.get("cell_count", 0) == 0:
