@@ -1,0 +1,277 @@
+{
+  "run_timestamp": "2026-08-25T18:34:25.803847",
+  "user_id": 2146008061,
+  "user_name": "Joel ",
+  "total": 26,
+  "passed": 26,
+  "failed": 0,
+  "blocked": 0,
+  "latencies": {
+    "min": 2.28,
+    "median": 13.16,
+    "p95": 26.05,
+    "max": 36.91
+  },
+  "results": [
+    {
+      "suite": "DIRECT_MEDIA",
+      "id": 1,
+      "user_msg": "Play Space Song by Beach House",
+      "bot_reply": "Playing Space By Beach House.",
+      "latency": 13.16,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:29:40.678515"
+    },
+    {
+      "suite": "DIRECT_MEDIA",
+      "id": 2,
+      "user_msg": "Play Never Gonna Give You Up",
+      "bot_reply": "Playing Never Gonna Up.",
+      "latency": 15.25,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:29:55.933083"
+    },
+    {
+      "suite": "DIRECT_MEDIA",
+      "id": 3,
+      "user_msg": "Play the Interstellar trailer",
+      "bot_reply": "Playing Interstellar Trailer.",
+      "latency": 13.14,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:30:09.072794"
+    },
+    {
+      "suite": "DIRECT_MEDIA",
+      "id": 4,
+      "user_msg": "Play Cosmic Samson teaser",
+      "bot_reply": "Playing Cosmic Samson Teaser.",
+      "latency": 13.12,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:30:22.191086"
+    },
+    {
+      "suite": "DIRECT_MEDIA",
+      "id": 5,
+      "user_msg": "Play Bethlehem Kudumba Unit interview",
+      "bot_reply": "Playing Bethlehem Kudumba Unit Interview.",
+      "latency": 13.26,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:30:35.449171"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 6,
+      "user_msg": "Pick something to watch while I eat",
+      "bot_reply": "I couldn't reach while (PyPI) \u2014 nothing to watch yet.",
+      "latency": 2.4,
+      "status": "PASS",
+      "details": "classified=error",
+      "timestamp": "2026-08-25T18:30:37.848951"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 7,
+      "user_msg": "Give me something to listen to while I study",
+      "bot_reply": "Playing Something To Listen To While I Study.",
+      "latency": 17.42,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:30:55.267142"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 8,
+      "user_msg": "Put something on while I'm coding",
+      "bot_reply": "Playing Coding Music Instrumental.",
+      "latency": 17.41,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:31:12.676957"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 9,
+      "user_msg": "I'm bored",
+      "bot_reply": "Playing Feel Good Songs.",
+      "latency": 15.8,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:31:28.475930"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 10,
+      "user_msg": "Surprise me",
+      "bot_reply": "Playing Good Music To Listen To.",
+      "latency": 36.91,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:32:05.388112"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 11,
+      "user_msg": "Put something on",
+      "bot_reply": "Playing Good Music To Listen To.",
+      "latency": 13.37,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:32:18.759081"
+    },
+    {
+      "suite": "CONTEXTUAL",
+      "id": 12,
+      "user_msg": "Play something",
+      "bot_reply": "Playing Good Music To Listen To.",
+      "latency": 17.79,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:32:36.549837"
+    },
+    {
+      "suite": "AFFIRMATIVE",
+      "id": 13,
+      "user_msg": "yes start it",
+      "bot_reply": "The song opens with the spoken line \u201cLife, dance, stay free, we live and a big ghost,\u201d which then leads into Nujabes\u2019s smooth, lo\u2011fi beat. It sets a laid\u2011back, uplifting vibe right from the start.",
+      "latency": 26.05,
+      "status": "PASS",
+      "details": "classified=browser",
+      "timestamp": "2026-08-25T18:33:02.604288"
+    },
+    {
+      "suite": "AFFIRMATIVE",
+      "id": 14,
+      "user_msg": "yeah",
+      "bot_reply": "Alright.",
+      "latency": 4.72,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:33:07.319975"
+    },
+    {
+      "suite": "AFFIRMATIVE",
+      "id": 15,
+      "user_msg": "yes",
+      "bot_reply": "Ready\u2014just tell me what you\u2019d like to hear or work on.",
+      "latency": 4.55,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:33:11.873660"
+    },
+    {
+      "suite": "AFFIRMATIVE",
+      "id": 16,
+      "user_msg": "go with 1",
+      "bot_reply": "My language providers are having a rough moment right now and I couldn't finish that \u2014 give me a few seconds and ask again.",
+      "latency": 19.85,
+      "status": "PASS",
+      "details": "classified=error",
+      "timestamp": "2026-08-25T18:33:31.725047"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 17,
+      "user_msg": "nah",
+      "bot_reply": "okay, your call",
+      "latency": 2.29,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:33:34.018814"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 18,
+      "user_msg": "not this",
+      "bot_reply": "Understood\u2014what would you prefer instead?",
+      "latency": 13.72,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:33:47.743570"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 19,
+      "user_msg": "next",
+      "bot_reply": "Next track.",
+      "latency": 4.61,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:33:52.351539"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 20,
+      "user_msg": "another one",
+      "bot_reply": "Playing Popular Space By Beach House.",
+      "latency": 15.35,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:34:07.699837"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 21,
+      "user_msg": "something different",
+      "bot_reply": "Try \u201cTake Five\u201d by Dave\u202fBrubeck \u2013 its cool jazz swing should mix things up.",
+      "latency": 4.44,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:34:12.139820"
+    },
+    {
+      "suite": "REJECTION",
+      "id": 22,
+      "user_msg": "try another",
+      "bot_reply": "Sure\u2014give \u201cBlue in Green\u201d by Miles\u202fDavis a spin; its laid\u2011back vibe works well for focused work.",
+      "latency": 4.44,
+      "status": "PASS",
+      "details": "classified=conversation",
+      "timestamp": "2026-08-25T18:34:16.577240"
+    },
+    {
+      "suite": "TRANSPORT",
+      "id": 23,
+      "user_msg": "what's playing",
+      "bot_reply": "Playing Popular Space.",
+      "latency": 2.28,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:34:18.862021"
+    },
+    {
+      "suite": "TRANSPORT",
+      "id": 24,
+      "user_msg": "pause",
+      "bot_reply": "Paused.",
+      "latency": 2.32,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:34:21.181776"
+    },
+    {
+      "suite": "TRANSPORT",
+      "id": 25,
+      "user_msg": "resume",
+      "bot_reply": "I couldn't start playback.",
+      "latency": 2.29,
+      "status": "PASS",
+      "details": "classified=error",
+      "timestamp": "2026-08-25T18:34:23.473844"
+    },
+    {
+      "suite": "TRANSPORT",
+      "id": 26,
+      "user_msg": "stop",
+      "bot_reply": "Stopped.",
+      "latency": 2.33,
+      "status": "PASS",
+      "details": "classified=media",
+      "timestamp": "2026-08-25T18:34:25.803658"
+    }
+  ]
+}
