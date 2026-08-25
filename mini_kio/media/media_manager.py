@@ -21,9 +21,9 @@ from mini_kio.memory.memory_store import MemoryStore
 from mini_kio.media.intelligence.media_opportunity_engine import MediaOpportunityEngine
 from mini_kio.media.intelligence.media_offer_manager import MediaOfferManager
 from mini_kio.media.providers.youtube_provider import YouTubeProvider
-from mini_kio.media.providers.spotify_provider import SpotifyProvider
 from mini_kio.media.providers.browser_provider import BrowserProvider
 from mini_kio.media.providers.local_media_provider import LocalMediaProvider
+from mini_kio.core.media_contract import score_content_intent, CONTENT_TYPE_PRIORITY as _CONTRACT_PRIORITY
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ _ARTIFACT_KEYWORDS = [
 _TRANSPORT_PATTERNS: dict[re.Pattern, str] = {
     re.compile(r"\b(pause|hold on|wait|stop music for now)\b", re.I): "pause",
     re.compile(r"\b(resume|continue|unpause|play again|keep going)\b", re.I): "resume",
-    re.compile(r"\b(stop|stop music|stop playing|turn off music)\b", re.I): "stop",
+    re.compile(r"\b(stop (music|playing|the (?:music|song|video|audio|stream))|turn off (?:the )?(?:music|audio|video|stream))\b", re.I): "stop",
     re.compile(r"\b(next|next song|skip|skip this|next track)\b", re.I): "next",
     re.compile(r"\b(previous|prev|back|go back|last song)\b", re.I): "previous",
     re.compile(r"\b(shuffle|shuffle mode|random)\b", re.I): "shuffle",
@@ -97,30 +97,7 @@ _UI_NOISE_WORDS: set[str] = {
 }
 
 _CONTENT_TYPE_PRIORITY: dict[str, list[str]] = {
-    "music": ["youtube"],
-    "video": ["youtube", "browser"],
-    "educational": ["youtube", "browser"],
-    "trailer": ["youtube"],
-    "tutorial": ["youtube", "browser"],
-    "podcast": ["youtube"],
-    "audiobook": ["local", "youtube"],
-    "livestream": ["youtube"],
-    "sports": ["youtube"],
-    "news": ["youtube"],
-    "browser_media": ["browser"],
-    "local_media": ["local", "browser"],
-}
-
-_MEDIA_TYPE_KEYWORDS: dict[str, str] = {
-    "music": "music song album artist singer band playlist",
-    "video": "video watch movie film clip",
-    "trailer": "trailer preview coming soon",
-    "tutorial": "tutorial how to guide learn walkthrough",
-    "educational": "explain what is how does why is science history lesson",
-    "podcast": "podcast episode talk show interview",
-    "livestream": "live stream streaming",
-    "sports": "sports highlights match game nfl nba soccer",
-    "news": "news update announcement latest",
+    mt.value: providers for mt, providers in _CONTRACT_PRIORITY.items()
 }
 
 _SEEK_PATTERNS = [
@@ -266,15 +243,13 @@ def _detect_media_topic(query: str) -> Optional[str]:
 
 
 def _detect_media_type(query: str) -> str:
-    ql = query.lower()
-    scores: dict[str, int] = {}
-    for mt, keywords in _MEDIA_TYPE_KEYWORDS.items():
-        score = sum(1 for kw in keywords.split() if kw in ql)
-        if score > 0:
-            scores[mt] = score
-    if not scores:
-        return "music"
-    return max(scores, key=scores.get)
+    """Score content-type intent using the media contract's weighted scorer.
+
+    Returns a string media type for backward compatibility with providers
+    and _CONTENT_TYPE_PRIORITY lookups.
+    """
+    intent = score_content_intent(query)
+    return intent.media_type.value
 
 
 def _parse_seek(text: str) -> Optional[int]:
@@ -363,10 +338,21 @@ class MediaManager:
                 logger.info("[RETRIEVAL_ROUTER] no_results query=%s", q)
                 return None
 
+            def _adapter_evidence(q: str, topic: Optional[str] = None, max_results: int = 4) -> list:
+                # Multi-source evidence collection for currentness/verification:
+                # returns ALL healthy provider results (with dates when exposed)
+                # so the evidence layer ranks by freshness and reconciles
+                # contradictions instead of trusting the first provider hit.
+                try:
+                    return router.retrieve_evidence(q, topic_hint=None, max_results=max_results)
+                except Exception:
+                    return []
+
             self._intelligence_adapter = MediaIntelligenceAdapter(
                 retrieval_fn=_adapter_retrieval,
                 play_fn=lambda q: self.play(q),
-                pending_action_fn=lambda q: {"action": "search", "subject": self._context.entity} if self._context.pending_action == "play_media" and self._context.entity else None
+                pending_action_fn=lambda q: {"action": "search", "subject": self._context.entity} if self._context.pending_action == "play_media" and self._context.entity else None,
+                retrieve_evidence_fn=_adapter_evidence,
             )
 
             # Wire LLM summarization (optional — falls back to deterministic if unavailable)
@@ -381,13 +367,30 @@ class MediaManager:
                             # Bounded but generous enough to complete a 2-4
                             # sentence answer; the composer rejects truncated
                             # output and falls back to deterministic extract.
-                            return loop.run_until_complete(ask_llm(prompt, timeout=15.0, max_tokens=300))
+                            return loop.run_until_complete(ask_llm(prompt, timeout=20.0, max_tokens=450))
                         finally:
                             loop.close()
                             asyncio.set_event_loop(None)
                     except Exception:
                         return None
                 self._intelligence_adapter.set_llm_fn(_llm_summarize)
+
+                # Verification synthesis is a heavier task: multi-claim evidence
+                # plus a conversational register contract. The generic 15s/300
+                # token budget caused timeouts that fell back to a raw source
+                # dump. Give it a dedicated, longer budget.
+                def _llm_verify(prompt: str) -> Optional[str]:
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            return loop.run_until_complete(ask_llm(prompt, timeout=30.0, max_tokens=600))
+                        finally:
+                            loop.close()
+                            asyncio.set_event_loop(None)
+                    except Exception:
+                        return None
+                self._intelligence_adapter.set_verify_llm_fn(_llm_verify)
                 logger.info("[MM_INTELLIGENCE_ADAPTER] LLM summarization wired")
             except Exception:
                 logger.info("[MM_INTELLIGENCE_ADAPTER] LLM summarization unavailable (deterministic fallback active)")
@@ -407,10 +410,20 @@ class MediaManager:
             except Exception:
                 pass
 
+    # Active provider registry: ONLY YouTube-family + browser fallback.
+    # Spotify is DISABLED — must never participate in provider selection.
+    _ACTIVE_PROVIDERS = frozenset({"youtube", "browser", "local"})
+
+    # Media operation serialization lock: Play/Next/Previous are LONG-RUNNING
+    # operations that navigate and verify playback. Commands arriving during an
+    # active transition ("Play X" + "Stop" arriving quickly) must be serialized
+    # so the state machine completes before the next command acts on the result.
+    _media_op_lock = threading.Lock()
+
     def _init_providers(self):
         self._providers = {
             "youtube": YouTubeProvider,
-            "spotify": SpotifyProvider,
+            # "spotify": DISABLED — not in active provider set
             "browser": BrowserProvider,
             "local": LocalMediaProvider,
         }
@@ -446,16 +459,25 @@ class MediaManager:
 
     def _select_provider(self, query: str = "", platform: str = "", media_type: str = "") -> Optional[str]:
         if platform:
-            return platform
+            # Guard: platform must be an active provider
+            if platform not in self._ACTIVE_PROVIDERS:
+                logger.warning("[MM_PROVIDER_GUARD] platform=%s not in active set, ignoring", platform)
+                platform = ""
+            else:
+                return platform
 
         active = self._registry.get_active_by_player()
         if active:
-            return active[0]
+            pname = active[0]
+            if pname in self._ACTIVE_PROVIDERS:
+                return pname
 
         if not media_type:
             media_type = _detect_media_type(query)
 
         priority = _CONTENT_TYPE_PRIORITY.get(media_type, ["youtube"])
+        # Filter to active providers only
+        priority = [p for p in priority if p in self._ACTIVE_PROVIDERS]
         for pname in priority:
             prov = self._get_provider(pname)
             if prov and hasattr(prov, "check_active"):
@@ -500,6 +522,13 @@ class MediaManager:
             )
             self._context.set_current(candidate)
             self._context.last_query = result.session.query
+            # Track current media ID for rejection handling
+            self._context.current_media_id = (
+                result.session.url or result.session.title or ""
+            )
+            # Update rejection context with the original query for next rejection
+            if not self._context.current_rejection_query:
+                self._context.current_rejection_query = result.session.query or ""
             
             # Skip entity registration for generic/thematic play queries
             # (e.g. "play a song from that movie", "play something from Vaazha II")
@@ -534,7 +563,7 @@ class MediaManager:
                              MediaType.TRAILER: EntityType.MOVIE, MediaType.TUTORIAL: EntityType.YOUTUBER}
                     etype = m_map.get(result.session.media_type, EntityType.SONG)
                     
-                    p_map = {"youtube": MediaProvider.YOUTUBE, "spotify": MediaProvider.SPOTIFY, "browser": MediaProvider.BROWSER}
+                    p_map = {"youtube": MediaProvider.YOUTUBE, "browser": MediaProvider.BROWSER}
                     prov = p_map.get(provider_name, MediaProvider.UNKNOWN)
                     
                     # Extract base entity from query (strip artifact keywords).
@@ -599,17 +628,27 @@ class MediaManager:
                 except Exception as exc:
                     logger.warning("[MEDIA_ENTITY_REGISTER_FAILED] %s", exc)
 
+    # Internal tags that must never reach users
+    _INTERNAL_TAG_RE = re.compile(r"\s*\[[A-Z_]+\]\s*$")
+
     def _to_dict(self, result: MediaResult) -> dict:
         # A truthful failure may carry only `error` (no message). Surface it as
         # the user-facing message so the reply is the natural failure text, not
         # the generic "Command failed." fallback.
-        _message = result.message or result.error
+        _message = self._sanitize_media_message(result)
         d = {"success": result.success, "message": _message, "player": result.player}
         if result.error:
             d["error"] = result.error
         if result.session:
             d["session"] = result.session.to_dict()
         return d
+
+    def _sanitize_media_message(self, result: MediaResult) -> str:
+        """Strip internal tags and convert raw dicts to user-friendly text."""
+        msg = result.message or result.error or ""
+        if isinstance(msg, dict):
+            return "Done." if result.success else (result.error or "Operation failed.")
+        return self._INTERNAL_TAG_RE.sub("", str(msg)) or ("Done." if result.success else "Operation failed.")
 
     def _analyze_query_for_intelligence(self, query: str) -> None:
         ql = query.lower()
@@ -741,6 +780,47 @@ class MediaManager:
 
         ql = query.lower().strip()
 
+        # ── Step -3: Rejection / Next Candidate Handling ──
+        # When user says "nah" / "not this" / "next" / "another one",
+        # exclude the current candidate and play the next best.
+        _rejection_re = re.compile(
+            r"^(?:nah|nope|no|no,?\s*next|no,?\s*another|"
+            r"not\s+this|not\s+this\s+one|not\s+feeling\s+this|"
+            r"this\s+sucks|this\s+is\s+(?:bad|terrible|awful)|"
+            r"skip|skip\s+this|skip\s+it|"
+            r"next|another|another\s+one|another\s+please|"
+            r"try\s+another|try\s+something\s+(?:else|different)|"
+            r"play\s+(?:something\s+)?(?:else|different)|"
+            r"something\s+different|something\s+better|"
+            r"not\s+what\s+I\s+meant|not\s+what\s+i\s+meant|"
+            r"give\s+me\s+(?:something\s+)?(?:else|better|different)|"
+            r"that's\s+not\s+what\s+(?:i|we)\s+meant|"
+            r"change\s+it|switch\s+it|"
+            r"nah,?\s*(?:another|next|try)|"
+            r"nope,?\s*(?:another|next|try)"
+            r")$",
+            re.I,
+        )
+        if _rejection_re.match(ql) and (self._context.last_query or self._context.current_media_id):
+            # Track rejection
+            if self._context.current_media_id:
+                self._context.rejected_media_ids.append(self._context.current_media_id)
+            original_query = self._context.current_rejection_query or self._context.last_query
+            original_mood = self._context.current_rejection_mood or self._context.get_mood() or ""
+            original_activity = self._context.current_rejection_activity or self._context.get_activity() or ""
+            if original_query:
+                # Build a broader query to get different results
+                broader_query = f"popular {original_query}"
+                logger.info("[MM_REJECTION] rejecting current=%s searching=%s rejected_ids=%s",
+                            self._context.current_media_id, broader_query, self._context.rejected_media_ids)
+                self._context.current_rejection_query = original_query
+                self._context.current_rejection_mood = original_mood
+                self._context.current_rejection_activity = original_activity
+                query = broader_query
+                ql = query.lower().strip()
+            else:
+                return {"success": True, "message": "What would you like to play?"}
+
         # R5: ordinal selection of a pending offer ("play the second one" → index 1).
         # The offer engine's parse_response already maps ordinals; only route here
         # when an offer is actually pending, otherwise fall through to normal play.
@@ -836,10 +916,27 @@ class MediaManager:
                 return {"success": True, "message": "Nothing to replay — no previous media."}
 
         # ── Step -1: Intelligence / Continuity / Recommendation Resolution ──
-        _skip_intel = _pronoun_resolved or not self._intelligence_adapter or not ql
+        # Candidate execution must receive the caller's resolved target.  The
+        # intelligence adapter is a research/continuity layer and previously
+        # reinterpreted ordinary explicit media queries before search, adding
+        # network/LLM latency and occasionally replacing the requested entity.
+        # Pronouns and bare artifacts are resolved above from canonical media
+        # state; discovery is resolved by the pipeline's contextual planner.
+        _skip_intel = True
         if not _skip_intel:
             # Skip intelligence re-resolution for explicitly enriched queries
             _skip_intel = any(p in ql for p in (" audiobook", " interview", " behind the scenes", " behind-the-scenes"))
+        # Skip intelligence for discovery queries — they should use their own
+        # discovery strategy, not be resolved to a previous entity.
+        if not _skip_intel:
+            _discovery_bare = frozenset({
+                "something random", "something", "anything", "surprise me",
+                "surprise", "whatever", "i'm bored", "im bored", "bored",
+                "entertain me", "play something", "put something on",
+                "find something", "give me something", "show me something",
+            })
+            if ql in _discovery_bare or ql.startswith(("play something ", "play anything ", "play random ", "put on something ")):
+                _skip_intel = True
         if not _skip_intel:
             try:
                 _saved_subject = self._intelligence_adapter.context.recent_subject()
@@ -898,7 +995,7 @@ class MediaManager:
 
         # ── Step 1: Media type detection ───────────────────────
         mt = _detect_media_type(query)
-        logger.info("[MM_TRACE] media_type=%s", mt)
+        logger.info("[MEDIA_INTENT] query=%s content_type=%s platform=%s", query, mt, platform or "default")
 
         # ── Step 2: Platform-specific path ─────────────────────
         if platform:
@@ -927,7 +1024,9 @@ class MediaManager:
 
         # ── Step 3: Automatic selection — priority chain ───────
         priority = _CONTENT_TYPE_PRIORITY.get(mt, ["youtube"])
-        logger.info("[MM_TRACE] auto_selection priority=%s", priority)
+        # Filter to active providers only
+        priority = [p for p in priority if p in self._ACTIVE_PROVIDERS]
+        logger.info("[PROVIDER_SELECTION] content_type=%s provider_chain=%s", mt, priority)
         last_result = None
         last_provider = ""
 
@@ -985,7 +1084,10 @@ class MediaManager:
                 try:
                     _mt = _detect_media_type(query)
                     _result = _prov.play(query, media_type=_mt, platform="youtube")
-                    if _result and _result.success and _result.session and _result.session.state == MediaState.PLAYING:
+                    # Surface any truthful provider outcome with a session —
+                    # incl. the no-connector fallback that opened the actual
+                    # video in the default browser (state=IDLE, can't verify).
+                    if _result and _result.success and _result.session:
                         self._register_session("youtube", _result)
                         return self._to_dict(_result)
                 except Exception:
@@ -994,7 +1096,7 @@ class MediaManager:
             # A user-supplied URL is parsed as input; the response uses a
             # natural label instead.
             _label = user_facing_media_label(query_clean) or "the requested media"
-            return {"success": False, "message": f"I couldn't start {_label}."}
+            return {"success": False, "message": f"I found {_label}, but playback could not be verified."}
         return {"success": False, "message": "Nothing to play."}
 
     def now_playing(self) -> dict:
@@ -1012,8 +1114,19 @@ class MediaManager:
         from mini_kio.media.media_session import user_facing_media_label
         display = user_facing_media_label(label) if label else "media"
         state = session.state.value
+        _mt_label = session.media_type.value if hasattr(session, 'media_type') and session.media_type else "media"
+        _LABEL_MAP = {
+            "music": "Playing", "music_video": "Playing",
+            "video": "Playing", "movie_trailer": "Playing",
+            "tv_trailer": "Playing", "podcast": "Playing",
+            "audiobook": "Playing", "interview": "Playing",
+            "educational": "Playing", "tutorial": "Playing",
+            "livestream": "Playing", "sports": "Playing",
+            "news": "Playing",
+        }
+        _prefix = _LABEL_MAP.get(_mt_label, "Playing")
         if state == MediaState.PLAYING.value:
-            return {"success": True, "message": f"Playing {display}."}
+            return {"success": True, "message": f"{_prefix} {display}."}
         if state == MediaState.PAUSED.value:
             return {"success": True, "message": f"Paused on {display}."}
         return {"success": True, "message": f"Loaded {display} (ready to play)."}
@@ -1023,10 +1136,11 @@ class MediaManager:
     # operation is never converted into "Paused." / "Resumed.".
     @_serialize_media_op
     def pause(self, domain_hint: str = "") -> dict:
-        logger.info("[MM] action=pause")
+        logger.info("[MEDIA_INTENT] action=pause")
         active = self._registry.get_active_by_player()
         if active:
-            pname, _ = active
+            pname, session = active
+            logger.info("[PLAYER_STATE_BEFORE] player=%s state=%s", pname, session.state.value)
             prov = self._get_provider(pname)
             if prov:
                 result = prov.pause()
@@ -1035,6 +1149,7 @@ class MediaManager:
                     if result.session:
                         state = result.session.state
                     self._registry.update_state(pname, state)
+                    logger.info("[PLAYER_STATE_AFTER] action=pause state=%s verified=%s", state.value, state == MediaState.PAUSED)
                     self._log_media_state("pause")
                     d = self._to_dict(result)
                     d["message"] = "Paused."
@@ -1056,10 +1171,11 @@ class MediaManager:
 
     @_serialize_media_op
     def resume(self, domain_hint: str = "") -> dict:
-        logger.info("[MM] action=resume")
+        logger.info("[MEDIA_INTENT] action=resume")
         active = self._registry.get_active_by_player()
         if active:
             pname, session = active
+            logger.info("[PLAYER_STATE_BEFORE] player=%s state=%s", pname, session.state.value)
             prov = self._get_provider(pname)
             if prov:
                 result = prov.resume()
@@ -1068,6 +1184,7 @@ class MediaManager:
                     if result.session:
                         state = result.session.state
                     self._registry.update_state(pname, state)
+                    logger.info("[PLAYER_STATE_AFTER] action=resume state=%s verified=%s", state.value, state == MediaState.PLAYING)
                     self._log_media_state("resume")
                     d = self._to_dict(result)
                     d["message"] = "Resumed."
@@ -1089,10 +1206,11 @@ class MediaManager:
 
     @_serialize_media_op
     def stop(self, domain_hint: str = "") -> dict:
-        logger.info("[MM] action=stop")
+        logger.info("[MEDIA_INTENT] action=stop")
         active = self._registry.get_active_by_player()
         if active:
-            pname, _ = active
+            pname, session = active
+            logger.info("[PLAYER_STATE_BEFORE] player=%s state=%s", pname, session.state.value)
             prov = self._get_provider(pname)
             if prov:
                 result = prov.stop()
@@ -1101,39 +1219,69 @@ class MediaManager:
                     if result.session:
                         state = result.session.state
                     self._registry.update_state(pname, state)
+                    logger.info("[PLAYER_STATE_AFTER] action=stop state=%s verified=%s", state.value, state == MediaState.STOPPED)
                     self._log_media_state("stop")
-                    return self._to_dict(result)
+                    d = self._to_dict(result)
+                    d["message"] = "Stopped."
+                    return d
                 return {"success": False, "message": result.error or "Stop failed."}
         return {"success": False, "message": "No media to stop."}
 
     @_serialize_media_op
     def next_track(self) -> dict:
-        logger.info("[MM] action=next")
+        logger.info("[MEDIA_INTENT] action=next")
         active = self._registry.get_active_by_player()
         if active:
-            pname, _ = active
+            pname, session_before = active
+            logger.info("[PROVIDER_SELECTION] player=%s media_id_before=%s",
+                        pname, (session_before.url or session_before.title or "")[:80])
             prov = self._get_provider(pname)
             if prov:
                 result = prov.next_track()
                 if result.success:
+                    # Ensure playback actually resumes after navigation.
+                    # The provider verified URL change; now verify play state.
+                    if result.session and result.session.state != MediaState.PLAYING:
+                        try:
+                            prov.resume()
+                        except Exception:
+                            pass
+                    media_after = (result.session.url or result.session.title or "") if result.session else ""
+                    logger.info("[MEDIA_STATE] action=next media_id_after=%s player_state=%s",
+                                media_after[:80], result.session.state.value if result.session else "unknown")
                     self._log_media_state("next")
-                    return self._to_dict(result)
-                return {"success": False, "message": result.error}
+                    d = self._to_dict(result)
+                    d["message"] = "Next track."
+                    return d
+                return {"success": False, "message": result.error or "Couldn't switch to next track."}
         return {"success": False, "message": "No active media session for next track."}
 
     @_serialize_media_op
     def previous_track(self) -> dict:
-        logger.info("[MM] action=previous")
+        logger.info("[MEDIA_INTENT] action=previous")
         active = self._registry.get_active_by_player()
         if active:
-            pname, _ = active
+            pname, session_before = active
+            logger.info("[PROVIDER_SELECTION] player=%s media_id_before=%s",
+                        pname, (session_before.url or session_before.title or "")[:80])
             prov = self._get_provider(pname)
             if prov:
                 result = prov.previous_track()
                 if result.success:
+                    # Ensure playback actually resumes after navigation.
+                    if result.session and result.session.state != MediaState.PLAYING:
+                        try:
+                            prov.resume()
+                        except Exception:
+                            pass
+                    media_after = (result.session.url or result.session.title or "") if result.session else ""
+                    logger.info("[MEDIA_STATE] action=previous media_id_after=%s player_state=%s",
+                                media_after[:80], result.session.state.value if result.session else "unknown")
                     self._log_media_state("previous")
-                    return self._to_dict(result)
-                return {"success": False, "message": result.error}
+                    d = self._to_dict(result)
+                    d["message"] = "Previous track."
+                    return d
+                return {"success": False, "message": result.error or "Couldn't switch to previous track."}
         return {"success": False, "message": "No active media session for previous track."}
 
     # BUG 3: mute/unmute route through the ACTIVE provider (which owns the
@@ -1307,7 +1455,6 @@ class MediaManager:
             etype = m_map.get(cand.media_type, EntityType.SONG)
             p_map = {
                 "youtube": MediaProvider.YOUTUBE,
-                "spotify": MediaProvider.SPOTIFY,
                 "browser": MediaProvider.BROWSER,
             }
             entity = ResolvedEntity(
@@ -1329,6 +1476,12 @@ class MediaManager:
         return self._context.resolve_reference(text)
 
     def _detect_transport(self, text: str) -> Optional[dict]:
+        text_stripped = text.strip()
+        # Standalone "stop" (short message) is a media command.
+        # Longer messages containing "stop" as a word are NOT media commands.
+        is_short = len(text_stripped) < 20
+        is_standalone_stop = is_short and text_stripped.lower() in ("stop", "stop.", "stop!", "stop it", "stop that")
+
         for pattern, command in _TRANSPORT_PATTERNS.items():
             if pattern.search(text):
                 dispatch = {
@@ -1343,6 +1496,9 @@ class MediaManager:
                 if fn:
                     return fn()
                 return {"success": True, "message": f"{command}."}
+        # Standalone short "stop" without media context words
+        if is_standalone_stop:
+            return self.stop()
         return None
 
     def _detect_volume(self, text: str) -> Optional[dict]:
@@ -2063,7 +2219,7 @@ class MediaManager:
 
     def _is_platform_choice(self, result: dict) -> bool:
         msg = (result.get("message") or "").lower()
-        return "youtube" in msg or "spotify" in msg or "what would you like" in msg
+        return "youtube" in msg or "what would you like" in msg
 
     def _build_offer_line(self) -> str:
         try:
@@ -2154,7 +2310,7 @@ class MediaManager:
         return updates
 
     @_serialize_media_op
-    def process_information_query(self, query: str) -> dict:
+    def process_information_query(self, query: str, session_id: str = "") -> dict:
         self._analyze_query_for_intelligence(query)
 
         topic_query = query.strip()
@@ -2163,10 +2319,11 @@ class MediaManager:
 
         self._context.last_query = topic_query
         
-        # Phase C4: Delegate to Intelligence Adapter
+        # Phase C4: Delegate to Intelligence Adapter (session-scoped so the
+        # verification claim store stays isolated per conversation)
         if self._intelligence_adapter:
             try:
-                result = self._intelligence_adapter.handle(topic_query)
+                result = self._intelligence_adapter.handle(topic_query, session_id=session_id)
                 
                 # Sync context
                 self._context.topic = result.topic.name if hasattr(result.topic, "name") else str(result.topic)

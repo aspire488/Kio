@@ -27,6 +27,7 @@ class FollowUpType(str, Enum):
     ORDINAL_SELECTION    = "ordinal_selection"    # "play the second one"
     CONTINUATION         = "continuation"         # "another one"
     REPLAY               = "replay"               # "play that again"
+    REJECTION            = "rejection"            # "nah", "not this", "next"
     VARIANT              = "variant"              # "play the remix"
     VOLUME               = "volume"               # "louder"
     TRANSPORT            = "transport"            # "pause", "next", "stop"
@@ -112,6 +113,30 @@ _CONTINUATION_PATTERNS = re.compile(
     r"\b(another one|next one|one more|play more|more like (this|that)|another song|another track)\b", re.I
 )
 
+# Rejection patterns: user wants to skip the current media and try the next candidate.
+# These are conversational rejections, NOT literal search queries.
+# "nah" / "not this" / "next" / "another one" / "skip this" / "try another"
+# must preserve the original media intent/context, exclude the current candidate,
+# and automatically play the next best candidate.
+_REJECTION_PATTERNS = re.compile(
+    r"^(?:nah|nope|no|no,?\s*next|no,?\s*another|"
+    r"not\s+this|not\s+this\s+one|not\s+feeling\s+this|"
+    r"this\s+sucks|this\s+is\s+(?:bad|terrible|awful)|"
+    r"skip|skip\s+this|skip\s+it|"
+    r"next|another|another\s+one|another\s+please|"
+    r"try\s+another|try\s+something\s+(?:else|different)|"
+    r"play\s+(?:something\s+)?(?:else|different)|"
+    r"something\s+different|something\s+better|"
+    r"not\s+what\s+I\s+meant|not\s+what\s+i\s+meant|"
+    r"give\s+me\s+(?:something\s+)?(?:else|better|different)|"
+    r"that's\s+not\s+what\s+(?:i|we)\s+meant|"
+    r"change\s+it|switch\s+it|"
+    r"nah,?\s*(?:another|next|try)|"
+    r"nope,?\s*(?:another|next|try)"
+    r")$",
+    re.I,
+)
+
 _ORDINAL_PATTERNS: Dict[re.Pattern, int] = {
     re.compile(r"\b(first( one)?|number (one|1)|#?1|the first)\b",  re.I): 0,
     re.compile(r"\b(second( one)?|number (two|2)|#?2|the second)\b",re.I): 1,
@@ -193,6 +218,25 @@ class MediaFollowUpEngine:
             offer_result = self._try_offer_response(text)
             if offer_result:
                 return offer_result
+
+        # 1b. Rejection patterns — user wants to skip current media.
+        # Must check BEFORE transport because "nah" / "next" / "skip" / "another"
+        # are rejections in media context, NOT transport commands.
+        if _REJECTION_PATTERNS.search(text):
+            # Only treat as rejection if there IS a media context to reject from.
+            # A bare "nah" with no prior media should fall through to other handlers.
+            has_media_context = (
+                self._media_context.get_last_entity() is not None
+                or self._media_context.get_last_artist() is not None
+                or self._get_recent_turn() is not None
+            )
+            if has_media_context:
+                return FollowUpResolution(
+                    follow_up_type=FollowUpType.REJECTION,
+                    is_follow_up=True,
+                    confidence=0.92,
+                    reason="media rejection: skip current",
+                )
 
         # 2. Transport commands
         transport_result = self._try_transport(text)

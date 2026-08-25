@@ -240,6 +240,54 @@ class MediaIntelligence:
                     display_text="OK, skipping.",
                 )
 
+        if fu.follow_up_type == FollowUpType.REJECTION:
+            # User rejected the current media. Find and play the next candidate.
+            ctx = self._media_context
+            current_id = ctx.current_media_id
+            rejected = list(ctx.rejected_media_ids)
+            if current_id and current_id not in rejected:
+                rejected.append(current_id)
+            ctx.rejected_media_ids = rejected
+            # Preserve the original query context for re-search
+            original_query = ctx.current_rejection_query or ctx.pending_media_query or ctx.last_query
+            original_mood = ctx.current_rejection_mood or ctx.get_mood() or ""
+            original_activity = ctx.current_rejection_activity or ctx.get_activity() or ""
+            # Check if we have available candidates to try next
+            if ctx.available_candidates and not ctx.candidate_pool_exhausted:
+                for candidate in ctx.available_candidates:
+                    cid = getattr(candidate, 'video_id', '') or getattr(candidate, 'name', '') or str(candidate)
+                    if cid not in rejected:
+                        # Play this next candidate
+                        entity = candidate if isinstance(candidate, type(ctx.get_last_entity())) else None
+                        if entity:
+                            return MediaIntelligenceResult(
+                                action=IntelligenceAction.PLAY_ENTITY,
+                                entity=entity,
+                                confidence=0.90,
+                                display_text=f"Playing {entity.name}.",
+                                source_utterance=utterance,
+                            )
+                        # If not a ResolvedEntity, use search
+                        break
+            # No more candidates — do a broader search
+            if original_query:
+                # Broader query: add "popular" or "best" to get different results
+                broader_query = f"popular {original_query}" if original_query else ""
+                return MediaIntelligenceResult(
+                    action=IntelligenceAction.SEARCH_AND_PLAY,
+                    search_query=broader_query or original_query,
+                    confidence=0.80,
+                    display_text="Finding something else...",
+                    source_utterance=utterance,
+                )
+            return MediaIntelligenceResult(
+                action=IntelligenceAction.SEARCH_AND_PLAY,
+                search_query="popular trending",
+                confidence=0.60,
+                display_text="Finding something else...",
+                source_utterance=utterance,
+            )
+
         if fu.follow_up_type == FollowUpType.TRANSPORT:
             return MediaIntelligenceResult(
                 action=IntelligenceAction.TRANSPORT,

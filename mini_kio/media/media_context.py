@@ -57,6 +57,17 @@ class MediaContext:
     artifact_type: Optional[str] = None
     pending_media_topic: str = ""
 
+    # Rejection tracking: when user says "nah" / "not this" / "next",
+    # exclude the current candidate and play the next best.
+    rejected_media_ids: list[str] = field(default_factory=list)
+    played_media_ids: list[str] = field(default_factory=list)
+    current_media_id: str = ""
+    current_rejection_query: str = ""  # the original query context for re-rejection
+    current_rejection_mood: str = ""
+    current_rejection_activity: str = ""
+    available_candidates: list = field(default_factory=list)
+    candidate_pool_exhausted: bool = False
+
     def set_current(self, candidate: MediaCandidate):
         self.last_selected_candidate = candidate
         mt = candidate.media_type
