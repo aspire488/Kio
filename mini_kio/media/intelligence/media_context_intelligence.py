@@ -464,6 +464,11 @@ class MediaContextIntelligence:
     def __init__(self) -> None:
         self._recommendations: Optional[RecommendationSet] = None
         self._last_intent: Optional[MediaIntent] = None
+        self._preference_model: Optional[object] = None  # MediaPreferenceModel
+
+    def set_preference_model(self, model) -> None:
+        """Inject the preference model for personalized discovery queries."""
+        self._preference_model = model
     
     def extract_intent(self, text: str) -> MediaIntent:
         """Extract structured media intent from natural language."""
@@ -605,17 +610,34 @@ class MediaContextIntelligence:
         if parts:
             return " ".join(parts)
         
-        # Fallback: build from whatever signals we have, never hardcode "trending music"
+        # Fallback: use preference model for personalized discovery
+        if self._preference_model:
+            try:
+                prefs = self._preference_model.get_summary()
+                # Build query from top preference signals
+                _pf = []
+                if prefs.top_channels:
+                    _pf.append(prefs.top_channels[0][0])  # top channel/creator
+                elif prefs.top_artists:
+                    _pf.append(prefs.top_artists[0][0])   # top artist
+                if prefs.top_genres:
+                    _pf.append(prefs.top_genres[0][0])    # top genre
+                if prefs.top_languages:
+                    _pf.append(prefs.top_languages[0][0]) # preferred language
+                if _pf:
+                    return " ".join(_pf[:3])
+            except Exception:
+                pass
+        # No preference data — use mode-appropriate generic query
         if intent.media_mode == MediaMode.WATCH:
             return "interesting video to watch"
         if intent.media_mode == MediaMode.LISTEN:
             return "popular music"
         if intent.media_mode == MediaMode.BACKGROUND:
             return "background music"
-        # Completely bare discovery — vary by mood if available
         if intent.mood != Mood.UNKNOWN:
             return _MOOD_SEARCH.get(intent.mood, ["popular music"])[0]
-        return "popular music"
+        return ""
     
     def store_recommendations(
         self,

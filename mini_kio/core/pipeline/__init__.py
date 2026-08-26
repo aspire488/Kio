@@ -7255,6 +7255,26 @@ class _ExecutionCoordinator:
                 logger.info("[MEDIA_CTX] rejection detected, routing directly to play: %s", target)
                 return mm.play(target, platform=params.get("platform"))
 
+            # ── Extract media preferences from explicit requests ──────
+            # When user says "play something from Karikku" or "play FilterCopy",
+            # extract the channel/creator as a preference signal.
+            _FROM_RE = re.compile(r"(?:from|by|on|channel)\s+(.+?)$", re.I)
+            _from_match = _FROM_RE.search(target)
+            if _from_match:
+                _channel = _from_match.group(1).strip()
+                if len(_channel) >= 2:
+                    try:
+                        from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
+                        from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel
+                        _mem = getattr(mm, '_intelligence_adapter', None)
+                        if _mem and hasattr(_mem, '_mem'):
+                            if not hasattr(mm, '_pref_model'):
+                                mm._pref_model = MediaPreferenceModel(_mem._mem)
+                            mm._pref_model.add_explicit_pref(_channel, "like")
+                            logger.info("[PREF_EXTRACT] channel=%s from query=%s", _channel, target)
+                    except Exception:
+                        pass
+
             # ── Context-aware media intelligence ──────────────────────────
             # Use MediaContextIntelligence to extract structured intent from
             # natural language. This handles:
@@ -7271,6 +7291,16 @@ class _ExecutionCoordinator:
                 if _ctx_intel is None:
                     _ctx_intel = MediaContextIntelligence()
                     mm._context_intelligence = _ctx_intel
+                    # Wire preference model for personalized discovery
+                    try:
+                        from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
+                        from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel
+                        _mem = getattr(mm, '_intelligence_adapter', None)
+                        if _mem and hasattr(_mem, '_mem'):
+                            _pref_model = MediaPreferenceModel(_mem._mem)
+                            _ctx_intel.set_preference_model(_pref_model)
+                    except Exception:
+                        pass
 
                 # Check if this is a user choice resolution ("1", "2", "the documentary")
                 if _ctx_intel.has_pending_recommendations():

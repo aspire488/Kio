@@ -69,12 +69,14 @@ class MediaPreferenceModel:
     """
 
     # Weight config
-    ARTIST_WEIGHT   = 0.35
-    GENRE_WEIGHT    = 0.20
-    MOOD_WEIGHT     = 0.15
-    ACTIVITY_WEIGHT = 0.15
+    ARTIST_WEIGHT   = 0.25
+    GENRE_WEIGHT    = 0.15
+    MOOD_WEIGHT     = 0.10
+    ACTIVITY_WEIGHT = 0.10
     PROVIDER_WEIGHT = 0.05
-    TYPE_WEIGHT     = 0.10
+    TYPE_WEIGHT     = 0.05
+    CHANNEL_WEIGHT  = 0.20  # YouTube channels / creators
+    LANGUAGE_WEIGHT = 0.10  # preferred languages
 
     # Scoring blend: preference vs relevance
     PREFERENCE_BLEND = 0.4
@@ -88,6 +90,9 @@ class MediaPreferenceModel:
         self._activities: Dict[str, PreferenceScore] = {}
         self._providers:  Dict[str, PreferenceScore] = {}
         self._etypes:     Dict[str, PreferenceScore] = {}
+        self._channels:   Dict[str, PreferenceScore] = {}  # YouTube channels/creators
+        self._languages:  Dict[str, PreferenceScore] = {}  # preferred languages
+        self._explicit_prefs: Dict[str, str] = {}  # user-stated preferences
         self._total_sessions = 0
         self.rebuild_from_history()
 
@@ -101,10 +106,14 @@ class MediaPreferenceModel:
         self._activities.clear()
         self._providers.clear()
         self._etypes.clear()
+        self._channels.clear()
+        self._languages.clear()
         self._total_sessions = 0
 
         for session in self._mem.get_recent_sessions(500):
             self._ingest_session(session)
+        # Load explicit preferences from memory store
+        self._load_explicit_prefs()
         self._normalize_all()
 
     def ingest_session(self, session: HistoricalMediaSession) -> None:
@@ -144,6 +153,16 @@ class MediaPreferenceModel:
         # Entity type
         self._bump(self._etypes, e.entity_type.value, now, weight=1.0)
 
+        # Channel / creator (YouTube-specific)
+        channel = e.metadata.get("channel") or e.metadata.get("creator") or ""
+        if channel:
+            self._bump(self._channels, channel, now, weight=1.5)  # channels are strong signals
+
+        # Language
+        lang = e.metadata.get("language") or e.metadata.get("lang") or ""
+        if lang:
+            self._bump(self._languages, lang, now, weight=1.0)
+
     def _bump(self, store: Dict[str, PreferenceScore], key: str,
               ts: float, weight: float = 1.0) -> None:
         key = key.lower().strip()
@@ -157,7 +176,8 @@ class MediaPreferenceModel:
 
     def _normalize_all(self) -> None:
         for store in (self._artists, self._genres, self._moods,
-                      self._activities, self._providers, self._etypes):
+                      self._activities, self._providers, self._etypes,
+                      self._channels, self._languages):
             self._normalize(store)
 
     @staticmethod
@@ -231,6 +251,33 @@ class MediaPreferenceModel:
 
     # ── query helpers ─────────────────────────────────────────
 
+    # ── explicit preferences (from conversation) ───────────────
+
+    def add_explicit_pref(self, key: str, value: str = "like") -> None:
+        """Record a user-stated preference (e.g. 'Karikku' = 'like')."""
+        self._explicit_prefs[key.lower().strip()] = value.lower().strip()
+        # Also bump as a channel signal if it looks like a creator/channel
+        self._bump(self._channels, key, time.time(), weight=2.0)
+        self._normalize_all()
+
+    def _load_explicit_prefs(self) -> None:
+        """Load explicit preferences from the memory store."""
+        try:
+            from mini_kio.memory.memory_store import MemoryStore
+            store = MemoryStore(session_id="media_intelligence")
+            facts = store.get_all_facts()
+            for k, v in facts.items():
+                if k.startswith("preference_") or k.startswith("favorite_"):
+                    pref_key = k.replace("preference_", "").replace("favorite_", "")
+                    self._explicit_prefs[pref_key] = v
+                    self._bump(self._channels, pref_key, time.time(), weight=2.0)
+        except Exception:
+            pass
+
+    def get_explicit_prefs(self) -> Dict[str, str]:
+        """Return user-stated preferences as {key: 'like'/'dislike'}."""
+        return dict(self._explicit_prefs)
+
     def get_preferred_provider(self) -> Optional[MediaProvider]:
         if not self._providers:
             return None
@@ -245,6 +292,60 @@ class MediaPreferenceModel:
         ranked = sorted(self._artists.items(),
                         key=lambda kv: kv[1].decayed_score(now), reverse=True)
         return [(k, v.decayed_score(now)) for k, v in ranked[:n]]
+
+    def get_top_channels(self, n: int = 5) -> List[Tuple[str, float]]:
+        """Top preferred YouTube channels/creators."""
+        now = time.time()
+        ranked = sorted(self._channels.items(),
+                        key=lambda kv: kv[1].decayed_score(now), reverse=True)
+        return [(k, v.decayed_score(now)) for k, v in ranked[:n]]
+
+    def get_top_languages(self, n: int = 3) -> List[Tuple[str, float]]:
+        """Top preferred languages."""
+        now = time.time()
+        ranked = sorted(self._languages.items(),
+                        key=lambda kv: kv[1].decayed_score(now), reverse=True)
+        return [(k, v.decayed_score(now)) for k, v in ranked[:n]]
+
+    def generate_personalized_query(self, context: str = "") -> str:
+        """Generate a personalized search query from learned preferences.
+
+        Uses preference signals (channels, artists, languages, explicit prefs)
+        to build a query that reflects what the user actually enjoys.
+        Returns a search-ready query string.
+        """
+        now = time.time()
+        parts: List[str] = []
+
+        # 1. Top channel/creator (strongest signal)
+        top_channels = self.get_top_channels(3)
+        if top_channels:
+            parts.append(top_channels[0][0])
+
+        # 2. Top artist
+        top_artists = self.get_top_artists(2)
+        if top_artists and not parts:
+            parts.append(top_artists[0][0])
+
+        # 3. Top genre
+        top_genres = sorted(self._genres.items(),
+                           key=lambda kv: kv[1].decayed_score(now), reverse=True)
+        if top_genres:
+            parts.append(top_genres[0][0])
+
+        # 4. Language preference
+        top_langs = self.get_top_languages(1)
+        if top_langs:
+            parts.append(top_langs[0][0])
+
+        if parts:
+            return " ".join(parts[:3])  # e.g. "Karikku comedy Malayalam"
+
+        # No preference data — use context if available
+        if context:
+            return context
+
+        return ""  # caller should handle empty string
 
     def get_summary(self) -> PreferenceSummary:
         def top(store: Dict[str, PreferenceScore], n: int = 5):

@@ -511,6 +511,8 @@ class MediaManager:
     def _register_session(self, provider_name: str, result: MediaResult):
         if result.success and result.session:
             self._registry.set(provider_name, result.session)
+            # Learn from playback: record this as a positive preference signal
+            self._learn_from_playback(result.session, provider_name)
             candidate = MediaCandidate(
                 title=result.session.query or result.session.title,
                 url=result.session.url,
@@ -631,6 +633,67 @@ class MediaManager:
 
     # Internal tags that must never reach users
     _INTERNAL_TAG_RE = re.compile(r"\s*\[[A-Z_]+\]\s*$")
+
+    def _learn_from_playback(self, session: 'MediaSession', provider_name: str) -> None:
+        """Record playback as a positive preference signal.
+
+        Called after every successful play. Feeds the preference model
+        so future discovery queries reflect what the user actually plays.
+        """
+        try:
+            from mini_kio.media.intelligence.media_entity_memory import (
+                MediaEntityMemory, ResolvedEntity, EntityType, MediaProvider,
+                HistoricalMediaSession,
+            )
+            from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel
+            from mini_kio.media.media_state import MediaType as _MT
+
+            # Get or create the entity memory used by the intelligence adapter
+            _mem = None
+            if self._intelligence_adapter and hasattr(self._intelligence_adapter, '_mem'):
+                _mem = self._intelligence_adapter._mem
+            else:
+                return  # no memory available, skip learning
+
+            # Map provider name to MediaProvider enum
+            _prov_map = {"youtube": MediaProvider.YOUTUBE, "browser": MediaProvider.BROWSER}
+            prov = _prov_map.get(provider_name, MediaProvider.UNKNOWN)
+
+            # Map media type
+            _mt_map = {_MT.MUSIC: EntityType.SONG, _MT.VIDEO: EntityType.YOUTUBER,
+                       _MT.TRAILER: EntityType.MOVIE, _MT.MUSIC_VIDEO: EntityType.SONG}
+            etype = _mt_map.get(session.media_type, EntityType.SONG)
+
+            # Build entity from session
+            entity = ResolvedEntity(
+                name=session.title or session.query or "",
+                entity_type=etype,
+                provider=prov,
+                url=session.url,
+                metadata={
+                    "artist": session.artist or "",
+                    "channel": session.artist or "",  # YouTube channel
+                    "query": session.query or "",
+                },
+            )
+
+            # Record as a historical session
+            hist = HistoricalMediaSession(
+                session_id=str(int(time.time())),
+                entity=entity,
+                started_at=time.time(),
+            )
+            _mem.push_session(hist)
+
+            # Update preference model
+            if not hasattr(self, '_pref_model'):
+                self._pref_model = MediaPreferenceModel(_mem)
+            self._pref_model.ingest_session(hist)
+
+            logger.info("[LEARN] recorded playback: entity=%s type=%s provider=%s",
+                        entity.name, etype.value, provider_name)
+        except Exception as exc:
+            logger.debug("[LEARN] failed to record playback: %s", exc)
 
     def _to_dict(self, result: MediaResult) -> dict:
         # A truthful failure may carry only `error` (no message). Surface it as
