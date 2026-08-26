@@ -7,11 +7,14 @@ Feeds into recommendation engine and intelligence routing.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
 from mini_kio.media.media_intelligence_models import (
@@ -261,16 +264,75 @@ class MediaPreferenceModel:
         self._normalize_all()
 
     def _load_explicit_prefs(self) -> None:
-        """Load explicit preferences from the memory store."""
+        """Load explicit preferences from ALL memory stores.
+
+        Searches both the media_intelligence session AND the main conversation
+        session for preference/favorite facts. This ensures that when the user
+        says "I like Karikku" in conversation, the preference model picks it up
+        even though it stores in the conversation session, not media_intelligence.
+        """
         try:
             from mini_kio.memory.memory_store import MemoryStore
-            store = MemoryStore(session_id="media_intelligence")
-            facts = store.get_all_facts()
-            for k, v in facts.items():
-                if k.startswith("preference_") or k.startswith("favorite_"):
-                    pref_key = k.replace("preference_", "").replace("favorite_", "")
-                    self._explicit_prefs[pref_key] = v
-                    self._bump(self._channels, pref_key, time.time(), weight=2.0)
+            now = time.time()
+
+            # Search across known session IDs for preference facts
+            _session_ids = ["media_intelligence", "local_0", "default"]
+            for sid in _session_ids:
+                try:
+                    store = MemoryStore(session_id=sid)
+                    facts = store.get_all_facts()
+                    for k, v in facts.items():
+                        if k.startswith("preference_") or k.startswith("favorite_"):
+                            pref_key = k.replace("preference_", "").replace("favorite_", "")
+                            if pref_key and len(pref_key) > 1:
+                                self._explicit_prefs[pref_key] = v
+                                if v == "like":
+                                    self._bump(self._channels, pref_key, now, weight=2.0)
+                                elif v == "dislike":
+                                    # Record as negative preference
+                                    if pref_key in self._channels:
+                                        self._channels[pref_key].decay_factor *= 0.3
+                except Exception:
+                    continue
+
+            # Also scan recent conversation history for preference patterns
+            # This catches "I like Karikku" statements that may not have been
+            # extracted by the pattern memory extractor
+            for sid in _session_ids:
+                try:
+                    store = MemoryStore(session_id=sid)
+                    history = store.last_n_messages(50)
+                    for entry in history:
+                        if entry.role != "user":
+                            continue
+                        msg = (entry.message or "").lower().strip()
+                        # Direct preference patterns
+                        import re as _re
+                        _like_match = _re.match(
+                            r"^\s*i\s+(?:really\s+|also\s+|just\s+)?(?:like|love|enjoy)\s+(.+?)\s*$",
+                            msg,
+                        )
+                        if _like_match:
+                            pref_key = _like_match.group(1).strip().rstrip(".,!?;:")
+                            if pref_key and len(pref_key) > 1:
+                                self._explicit_prefs[pref_key] = "like"
+                                self._bump(self._channels, pref_key, now, weight=2.0)
+                                logger.info("[PREF_SEED] extracted preference from conversation: %s", pref_key)
+                        # "my favorite X is Y" pattern
+                        _fav_match = _re.match(
+                            r"^\s*my\s+favorite\s+(.+?)\s+is\s+(.+?)\s*$",
+                            msg,
+                        )
+                        if _fav_match:
+                            fav_value = _fav_match.group(2).strip().rstrip(".,!?;:")
+                            if fav_value and len(fav_value) > 1:
+                                self._explicit_prefs[fav_value] = "like"
+                                self._bump(self._channels, fav_value, now, weight=2.5)
+                                logger.info("[PREF_SEED] extracted favorite from conversation: %s", fav_value)
+                except Exception:
+                    continue
+
+            logger.info("[PREF_SEED] loaded %d explicit preferences", len(self._explicit_prefs))
         except Exception:
             pass
 
@@ -307,12 +369,109 @@ class MediaPreferenceModel:
                         key=lambda kv: kv[1].decayed_score(now), reverse=True)
         return [(k, v.decayed_score(now)) for k, v in ranked[:n]]
 
+    # ── rejection learning ──────────────────────────────────
+
+    def record_rejection(self, entity: ResolvedEntity, strength: float = 0.3) -> None:
+        """Lower preference scores for rejected content.
+
+        strength: 0.0–1.0, how much to penalize.
+          - Single rejection: 0.2–0.3 (mild)
+          - Repeated rejection of same creator: 0.4–0.5 (moderate)
+          - Explicit "I don't like this": 0.6–0.8 (strong)
+
+        Does NOT permanently blacklist — the decay_factor ensures
+        the penalty fades over time.
+        """
+        now = time.time()
+
+        # Penalize the channel/creator
+        channel = entity.metadata.get("channel") or entity.metadata.get("creator") or ""
+        if channel:
+            key = channel.lower().strip()
+            if key in self._channels:
+                ps = self._channels[key]
+                ps.decay_factor *= (1.0 - strength)
+                ps.decay_factor = max(0.1, ps.decay_factor)  # floor: never zero
+                logger.info("[REJECT_LEARN] channel=%s decay_factor=%.2f", key, ps.decay_factor)
+
+        # Penalize the artist
+        artist = entity.metadata.get("artist") or ""
+        if artist:
+            key = artist.lower().strip()
+            if key in self._artists:
+                ps = self._artists[key]
+                ps.decay_factor *= (1.0 - strength)
+                ps.decay_factor = max(0.1, ps.decay_factor)
+                logger.info("[REJECT_LEARN] artist=%s decay_factor=%.2f", key, ps.decay_factor)
+
+        # Penalize genres if available
+        for genre in entity.metadata.get("genres", []):
+            key = genre.lower().strip()
+            if key in self._genres:
+                ps = self._genres[key]
+                ps.decay_factor *= (1.0 - strength * 0.5)  # lighter penalty for genre
+                ps.decay_factor = max(0.2, ps.decay_factor)
+
+    def get_diversity_bonus(self, entity: ResolvedEntity,
+                           recent_channels: List[str],
+                           recent_titles: List[str]) -> float:
+        """Calculate a diversity bonus for a candidate.
+
+        Returns 0.0–1.0:
+          - 0.0 if the candidate is very similar to recently played
+          - 1.0 if the candidate is completely novel
+        """
+        bonus = 1.0
+
+        # Channel novelty
+        channel = (entity.metadata.get("channel") or entity.metadata.get("creator") or "").lower()
+        if channel and channel in [c.lower() for c in recent_channels]:
+            bonus *= 0.5  # same channel recently played
+
+        # Title novelty
+        if entity.name.lower() in [t.lower() for t in recent_titles]:
+            bonus *= 0.2  # same title recently played
+
+        # Genre novelty (if we have genre info)
+        # This is lighter — we don't want to penalize genre loyalty
+
+        return bonus
+
+    def record_playback(self, entity: ResolvedEntity) -> None:
+        """Record a successful playback as a positive signal.
+
+        This is the complement of record_rejection — it increases
+        affinity for the played content's characteristics.
+        """
+        now = time.time()
+
+        # Boost channel
+        channel = entity.metadata.get("channel") or entity.metadata.get("creator") or ""
+        if channel:
+            self._bump(self._channels, channel, now, weight=1.5)
+
+        # Boost artist
+        artist = entity.metadata.get("artist") or ""
+        if artist:
+            self._bump(self._artists, artist, now, weight=1.0)
+
+        # Boost language
+        lang = entity.metadata.get("language") or entity.metadata.get("lang") or ""
+        if lang:
+            self._bump(self._languages, lang, now, weight=1.0)
+
+        self._normalize_all()
+
     def generate_personalized_query(self, context: str = "") -> str:
         """Generate a personalized search query from learned preferences.
 
         Uses preference signals (channels, artists, languages, explicit prefs)
         to build a query that reflects what the user actually enjoys.
         Returns a search-ready query string.
+
+        CRITICAL: Never returns an empty string when there is ANY signal.
+        Cold start uses the user's own words (context) rather than generic
+        fallbacks like "Popular Songs".
         """
         now = time.time()
         parts: List[str] = []
@@ -341,11 +500,16 @@ class MediaPreferenceModel:
         if parts:
             return " ".join(parts[:3])  # e.g. "Karikku comedy Malayalam"
 
-        # No preference data — use context if available
+        # 5. No preference data — use context if available
+        # The user's own words are the BEST cold-start signal.
+        # Never fall back to generic "Popular Songs" etc.
         if context:
             return context
 
-        return ""  # caller should handle empty string
+        # 6. Truly cold start with no context — return empty string.
+        # Callers MUST handle this by using the original user request
+        # as the search query, not by inserting a hardcoded fallback.
+        return ""
 
     def get_summary(self) -> PreferenceSummary:
         def top(store: Dict[str, PreferenceScore], n: int = 5):

@@ -68,6 +68,24 @@ class MediaContext:
     available_candidates: list = field(default_factory=list)
     candidate_pool_exhausted: bool = False
 
+    # ── Discovery state: tracks the full discovery lifecycle ──
+    # The semantic intent of the discovery request (e.g., "funny", "Malayalam comedy")
+    discovery_intent: str = ""
+    # The personalized query that was actually sent to the provider
+    discovery_query_used: str = ""
+    # All candidates that have been presented to the user this session
+    discovery_candidate_history: list[str] = field(default_factory=list)
+    # Candidates that were rejected (by video_id or title)
+    discovery_rejected_candidates: list[str] = field(default_factory=list)
+    # How many times the user has rejected in this discovery session
+    discovery_rejection_count: int = 0
+    # The original user request that started this discovery session
+    discovery_original_request: str = ""
+    # Timestamp of the last discovery action
+    discovery_last_action_time: float = 0.0
+    # Discovery session active flag
+    discovery_active: bool = False
+
     def set_current(self, candidate: MediaCandidate):
         self.last_selected_candidate = candidate
         mt = candidate.media_type

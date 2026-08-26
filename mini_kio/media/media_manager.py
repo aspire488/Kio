@@ -410,6 +410,25 @@ class MediaManager:
             except Exception:
                 pass
 
+        # DiscoveryEngine: unified discovery pipeline
+        self._discovery_engine: Optional[object] = None
+        try:
+            from mini_kio.media.intelligence.discovery_engine import DiscoveryEngine
+            from mini_kio.media.intelligence.media_entity_memory import MediaEntityMemory
+            from mini_kio.media.intelligence.media_preference_model import MediaPreferenceModel
+
+            _mem = None
+            if self._intelligence_adapter and hasattr(self._intelligence_adapter, '_mem'):
+                _mem = self._intelligence_adapter._mem
+            else:
+                _mem = MediaEntityMemory()
+
+            _prefs = MediaPreferenceModel(_mem)
+            self._discovery_engine = DiscoveryEngine(_mem, _prefs, self._context)
+            logger.info("[MM_DISCOVERY] DiscoveryEngine initialized")
+        except Exception as exc:
+            logger.warning("[MM_DISCOVERY] Failed to initialize DiscoveryEngine: %s", exc)
+
     # Active provider registry: ONLY YouTube-family + browser fallback.
     # Spotify is DISABLED — must never participate in provider selection.
     _ACTIVE_PROVIDERS = frozenset({"youtube", "browser", "local"})
@@ -513,6 +532,18 @@ class MediaManager:
             self._registry.set(provider_name, result.session)
             # Learn from playback: record this as a positive preference signal
             self._learn_from_playback(result.session, provider_name)
+            # Record in DiscoveryEngine for diversity tracking
+            if self._discovery_engine:
+                try:
+                    from mini_kio.media.intelligence.discovery_engine import DiscoveryCandidate
+                    _disc_cand = DiscoveryCandidate(
+                        title=result.session.title or result.session.query or "",
+                        channel=result.session.artist or "",
+                        url=result.session.url or "",
+                    )
+                    self._discovery_engine.record_playback(_disc_cand)
+                except Exception:
+                    pass
             candidate = MediaCandidate(
                 title=result.session.query or result.session.title,
                 url=result.session.url,
@@ -881,26 +912,75 @@ class MediaManager:
                 _is_rejection_candidate = True
 
         if _is_rejection_candidate:
-            # Track rejection
+            # Track rejection in both legacy context and discovery engine
             if self._context.current_media_id:
                 self._context.rejected_media_ids.append(self._context.current_media_id)
-            original_query = self._context.current_rejection_query or self._context.last_query
-            original_mood = self._context.current_rejection_mood or self._context.get_mood() or ""
-            original_activity = self._context.current_rejection_activity or self._context.get_activity() or ""
-            if original_query:
-                # Use original query but with exclusion of rejected IDs
-                # The YouTube provider will handle candidate exclusion
-                logger.info("[MM_REJECTION] rejecting current=%s query=%s rejected_ids=%s",
-                            self._context.current_media_id, original_query, self._context.rejected_media_ids)
-                self._context.current_rejection_query = original_query
-                self._context.current_rejection_mood = original_mood
-                self._context.current_rejection_activity = original_activity
-                query = original_query
-                ql = query.lower().strip()
-                # Flag this as a rejection so providers can exclude rejected IDs
-                _is_rejection = True
+
+            # Record rejection in preference model (negative learning)
+            if self._discovery_engine and self._context.last_selected_candidate:
+                try:
+                    from mini_kio.media.media_intelligence_models import ResolvedEntity, EntityType, MediaProvider
+                    _rej_entity = ResolvedEntity(
+                        name=self._context.last_selected_candidate.title or "",
+                        entity_type=EntityType.SONG,
+                        provider=MediaProvider.YOUTUBE,
+                        metadata={
+                            "channel": self._context.last_selected_candidate.artist or "",
+                            "artist": self._context.last_selected_candidate.artist or "",
+                        },
+                    )
+                    # Escalating rejection penalty: more rejections = stronger penalty
+                    _rej_strength = min(0.5, 0.2 + 0.1 * self._context.discovery_rejection_count)
+                    self._discovery_engine._prefs.record_rejection(_rej_entity, strength=_rej_strength)
+                    logger.info("[REJECT_LEARN] recorded rejection strength=%.2f count=%d",
+                                _rej_strength, self._context.discovery_rejection_count)
+                except Exception as exc:
+                    logger.debug("[REJECT_LEARN] failed: %s", exc)
+
+            # Use DiscoveryEngine to build re-discovery query
+            if self._discovery_engine and self._context.discovery_active:
+                try:
+                    result = self._discovery_engine.handle_rejection()
+                    if result.query_used:
+                        query = result.query_used
+                        ql = query.lower().strip()
+                        _is_rejection = True
+                        logger.info("[MM_REJECTION] discovery_engine query=%s intent=%s",
+                                    query, result.intent.semantic_intent if result.intent else "")
+                    else:
+                        # Fallback to original query
+                        original_query = self._context.current_rejection_query or self._context.last_query
+                        if original_query:
+                            query = original_query
+                            ql = query.lower().strip()
+                            _is_rejection = True
+                        else:
+                            return {"success": True, "message": "What would you like to play?"}
+                except Exception as exc:
+                    logger.warning("[MM_REJECTION] discovery_engine failed: %s", exc)
+                    original_query = self._context.current_rejection_query or self._context.last_query
+                    if original_query:
+                        query = original_query
+                        ql = query.lower().strip()
+                        _is_rejection = True
+                    else:
+                        return {"success": True, "message": "What would you like to play?"}
             else:
-                return {"success": True, "message": "What would you like to play?"}
+                # No discovery engine — use legacy rejection handling
+                original_query = self._context.current_rejection_query or self._context.last_query
+                original_mood = self._context.current_rejection_mood or self._context.get_mood() or ""
+                original_activity = self._context.current_rejection_activity or self._context.get_activity() or ""
+                if original_query:
+                    logger.info("[MM_REJECTION] legacy rejecting current=%s query=%s rejected_ids=%s",
+                                self._context.current_media_id, original_query, self._context.rejected_media_ids)
+                    self._context.current_rejection_query = original_query
+                    self._context.current_rejection_mood = original_mood
+                    self._context.current_rejection_activity = original_activity
+                    query = original_query
+                    ql = query.lower().strip()
+                    _is_rejection = True
+                else:
+                    return {"success": True, "message": "What would you like to play?"}
 
         # R5: ordinal selection of a pending offer ("play the second one" → index 1).
         # The offer engine's parse_response already maps ordinals; only route here
@@ -1062,6 +1142,43 @@ class MediaManager:
         if ql in ("previous video", "play previous video"):
             logger.info("[MM_ROUTING] Routing '%s' directly to previous_track", ql)
             return self.previous_track()
+
+        # ── Guard: bare discovery phrases must never reach YouTube literally ──
+        # Searching "play something" on YouTube finds a video literally called
+        # "Play Something" — that's not personalization. Strip these phrases
+        # and route through intelligent discovery instead.
+        _BARE_DISCOVERY_PHRASES = {
+            "play something", "play anything", "play random",
+            "put something on", "put on something", "put on some music",
+            "give me something", "give me something good",
+            "give me something to watch", "give me something to listen to",
+            "find something", "find me something", "find me something good",
+            "show me something", "show me something good",
+            "entertain me", "amuse me",
+            "what should i watch", "what should i listen to",
+            "what's good", "whats good",
+            "recommend something", "suggest something",
+            "something random", "something", "anything", "anything random",
+            "surprise me", "surprise", "whatever",
+            "i'm bored", "im bored", "i am bored", "bored",
+        }
+        if ql in _BARE_DISCOVERY_PHRASES:
+            # Try intelligence adapter for personalized discovery
+            if self._intelligence_adapter:
+                try:
+                    rec_result = self._intelligence_adapter._handle_recommendation(ql)
+                    if rec_result and hasattr(rec_result, 'subject') and rec_result.subject:
+                        _resolved = str(rec_result.subject)
+                        if self._is_sane_media_query(_resolved) and _resolved.lower() != ql:
+                            query = _resolved
+                            ql = query.lower().strip()
+                            logger.info("[DISCOVERY_INTEL] bare '%s' resolved to '%s'", ql, query)
+                except Exception:
+                    pass
+            # If still a bare discovery phrase, ask user what they want
+            if ql in _BARE_DISCOVERY_PHRASES:
+                logger.info("[DISCOVERY_BARE] no resolution for '%s' — asking user", ql)
+                return {"success": True, "message": "What would you like to play?"}
 
         # ── Step 0: Resume active ──────────────────────────────
         if not query and not platform:

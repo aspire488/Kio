@@ -7369,51 +7369,67 @@ class _ExecutionCoordinator:
             except Exception as exc:
                 logger.debug("[MEDIA_CTX] intelligence error: %s", exc)
 
-            # ── Fallback: existing discovery logic ──────────────────────────
+            # ── Discovery: use DiscoveryEngine for personalized queries ──
             if action == "play_discovery":
-                # Only try intelligence-based resolution when the context
-                # intelligence did NOT already produce a valid target — otherwise
-                # the adapter's entity-memory can override a fresh comedy/music
-                # request with an old cached entity (live: "I feel like watching
-                # a comedy" extracted "comedy" correctly but the adapter resolved
-                # it to "feel good songs" from memory).
-                if target and target not in _DISCOVERY_TARGETS:
-                    logger.info("[DISCOVERY] using context intelligence target: %s", target)
-                else:
+                # Try DiscoveryEngine first — it combines intent + preferences
+                # without hardcoded fallbacks.
+                if mm._discovery_engine:
+                    try:
+                        intent = mm._discovery_engine.start_discovery_session(params.get("target", ""))
+                        disc_query = mm._discovery_engine.build_discovery_query(intent)
+                        if disc_query:
+                            target = disc_query
+                            logger.info("[DISCOVERY] engine query=%s intent=%s",
+                                        target, intent.semantic_intent)
+                        else:
+                            # Discovery engine returned empty (cold start, no prefs).
+                            # Try intelligence adapter for intent derivation —
+                            # NEVER use raw user words as a search query
+                            # (searching "play something" literally is stupid).
+                            logger.info("[DISCOVERY] engine empty, trying intelligence adapter")
+                    except Exception as exc:
+                        logger.debug("[DISCOVERY] engine failed: %s", exc)
+                # Fallback: use context intelligence for intent derivation
+                # This handles cold-start by leveraging the LLM to understand
+                # what the user might want based on conversation context.
+                if not target or target in _DISCOVERY_TARGETS:
                     try:
                         if mm._intelligence_adapter:
-                            rec_result = mm._intelligence_adapter._handle_recommendation(target)
+                            _disc_target = (params.get("target") or params.get("query") or "").strip()
+                            rec_result = mm._intelligence_adapter._handle_recommendation(_disc_target)
                             if rec_result and hasattr(rec_result, 'subject') and rec_result.subject:
                                 target = str(rec_result.subject)
                                 logger.info("[DISCOVERY] intelligence resolved: %s -> %s", params.get('target'), target)
                     except Exception as exc:
                         logger.debug("[DISCOVERY] intelligence fallback: %s", exc)
-                    # Fallback: derive a discovery-friendly query from context.
-                    # Never hardcode "good music to listen to" — use the user's
-                    # actual words or a context-aware default.
-                    if not target or target in _DISCOVERY_TARGETS:
-                        _raw = (params.get("target") or params.get("query") or "").strip()
-                        if _raw and _raw not in _DISCOVERY_TARGETS:
-                            target = _raw
+                # If still no query, use the raw user words ONLY if they are
+                # not bare discovery phrases. Searching "play something" literally
+                # finds a video called "Play Something" — that's not personalization.
+                if not target or target in _DISCOVERY_TARGETS:
+                    _raw = (params.get("target") or params.get("query") or "").strip()
+                    # Only use raw words if they contain actual search content
+                    # (e.g., "play something funny" → use "funny" context)
+                    # Bare discovery phrases must NOT become search queries
+                    if _raw and _raw not in _DISCOVERY_TARGETS:
+                        # Strip the bare discovery prefix to get any remaining content
+                        _content = _raw.lower().strip()
+                        for prefix in ("play something", "play anything", "put something on",
+                                       "give me something", "find something", "show me something",
+                                       "play random", "put on something"):
+                            if _content.startswith(prefix):
+                                _content = _content[len(prefix):].strip()
+                                break
+                        if _content:
+                            target = _content
+                            logger.info("[DISCOVERY] stripped content: %s -> %s", _raw, target)
                         else:
-                            # Use conversation context for a better default
-                            try:
-                                from mini_kio.core.context_manager import get_context_manager as _gcm
-                                _ctx = _gcm(getattr(decision, "session_id", "") or "")
-                                _hist = _ctx.get_history_window(4) if hasattr(_ctx, "get_history_window") else []
-                                # Look for a recent topic in conversation
-                                _topic_hint = ""
-                                for _entry in reversed(_hist or []):
-                                    _msg = _entry.get("text", "") if isinstance(_entry, dict) else ""
-                                    if _msg and _entry.get("role") == "user" and len(_msg) > 5:
-                                        _topic_hint = _msg.strip()
-                                        break
-                                target = f"something related to {_topic_hint}" if _topic_hint else ""
-                            except Exception:
-                                target = ""
-                            if not target:
-                                target = "something interesting"
-                        logger.info("[DISCOVERY] using fallback query: %s", target)
+                            # Pure bare discovery with no content words.
+                            # Use empty string — the play method will handle it
+                            # via context intelligence. NEVER insert a hardcoded query.
+                            target = ""
+                            logger.info("[DISCOVERY] bare discovery with no content, using empty")
+                    else:
+                        logger.info("[DISCOVERY] final: no raw content available")
             return mm.play(target, platform=params.get("platform"))
         if action == "search":
             return mm.search(
