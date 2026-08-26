@@ -65,7 +65,7 @@ _ARTIFACT_KEYWORDS = [
 
 _TRANSPORT_PATTERNS: dict[re.Pattern, str] = {
     re.compile(r"\b(pause|hold on|wait|stop music for now)\b", re.I): "pause",
-    re.compile(r"\b(resume|continue|unpause|play again|keep going)\b", re.I): "resume",
+    re.compile(r"\b(resume|continue|unpause|play again|keep going|carry on|keep playing|resume it|continue playing)\b", re.I): "resume",
     re.compile(r"\b(stop (music|playing|the (?:music|song|video|audio|stream))|turn off (?:the )?(?:music|audio|video|stream))\b", re.I): "stop",
     re.compile(r"\b(next|next song|skip|skip this|next track)\b", re.I): "next",
     re.compile(r"\b(previous|prev|back|go back|last song)\b", re.I): "previous",
@@ -526,9 +526,10 @@ class MediaManager:
             self._context.current_media_id = (
                 result.session.url or result.session.title or ""
             )
-            # Update rejection context with the original query for next rejection
-            if not self._context.current_rejection_query:
-                self._context.current_rejection_query = result.session.query or ""
+            # Update rejection context with the original query for next rejection.
+            # MUST update every time (not just on first play) so "nah" after
+            # "Play Weeknd" uses the Weeknd query, not a stale earlier query.
+            self._context.current_rejection_query = result.session.query or ""
             
             # Skip entity registration for generic/thematic play queries
             # (e.g. "play a song from that movie", "play something from Vaazha II")
@@ -779,29 +780,44 @@ class MediaManager:
         logger.info("[MM_TRACE] enter query=%s platform=%s", query, platform)
 
         ql = query.lower().strip()
+        _is_rejection = False  # Flag: set True when user rejects current media
 
         # ── Step -3: Rejection / Next Candidate Handling ──
-        # When user says "nah" / "not this" / "next" / "another one",
-        # exclude the current candidate and play the next best.
-        _rejection_re = re.compile(
-            r"^(?:nah|nope|no|no,?\s*next|no,?\s*another|"
-            r"not\s+this|not\s+this\s+one|not\s+feeling\s+this|"
-            r"this\s+sucks|this\s+is\s+(?:bad|terrible|awful)|"
-            r"skip|skip\s+this|skip\s+it|"
-            r"next|another|another\s+one|another\s+please|"
-            r"try\s+another|try\s+something\s+(?:else|different)|"
-            r"play\s+(?:something\s+)?(?:else|different)|"
-            r"something\s+different|something\s+better|"
-            r"not\s+what\s+I\s+meant|not\s+what\s+i\s+meant|"
-            r"give\s+me\s+(?:something\s+)?(?:else|better|different)|"
-            r"that's\s+not\s+what\s+(?:i|we)\s+meant|"
-            r"change\s+it|switch\s+it|"
-            r"nah,?\s*(?:another|next|try)|"
-            r"nope,?\s*(?:another|next|try)"
-            r")$",
-            re.I,
-        )
-        if _rejection_re.match(ql) and (self._context.last_query or self._context.current_media_id):
+        # Context-aware rejection: when media is active, short negative/
+        # continuation phrases are interpreted as media rejections — no giant
+        # regex needed. The active session IS the context.
+        _is_rejection_candidate = False
+        if self._context.last_query or self._context.current_media_id:
+            # Short negative/continuation signals — interpreted as rejection
+            # BECAUSE there is an active media session (context provides meaning)
+            _NEGATIVE_SIGNALS = {
+                "nah", "nope", "no", "nahh", "nahhh", "naw", "naww",
+                "nah bro", "no bro", "nah man", "no man",
+            }
+            _CHANGE_SIGNALS = {
+                "not this", "not this one", "not feeling this", "not it",
+                "this ain't it", "this isn't it", "this sucks", "this is bad",
+                "skip", "skip this", "skip it", "skip that",
+                "next", "next one", "another", "another one", "another please",
+                "something different", "something better", "play something else",
+                "play something different", "try another", "try something else",
+                "try something different", "give me another", "give me something else",
+                "change it", "switch it",
+                "not what i meant", "not what we meant",
+                "that's not what i meant", "thats not what i meant",
+            }
+            if ql in _NEGATIVE_SIGNALS or ql in _CHANGE_SIGNALS:
+                _is_rejection_candidate = True
+            # Also match compound patterns: "nah, next" / "nah, another"
+            elif ql.startswith("nah") and any(w in ql for w in ("next", "another", "try")):
+                _is_rejection_candidate = True
+            elif ql.startswith("no") and any(w in ql for w in ("next", "another", "try")):
+                _is_rejection_candidate = True
+            # Catch-all: short negative that doesn't look like a new play request
+            elif len(ql.split()) <= 3 and any(ql.startswith(n) for n in ("nah", "no", "not ")) and "play" not in ql:
+                _is_rejection_candidate = True
+
+        if _is_rejection_candidate:
             # Track rejection
             if self._context.current_media_id:
                 self._context.rejected_media_ids.append(self._context.current_media_id)
@@ -809,15 +825,17 @@ class MediaManager:
             original_mood = self._context.current_rejection_mood or self._context.get_mood() or ""
             original_activity = self._context.current_rejection_activity or self._context.get_activity() or ""
             if original_query:
-                # Build a broader query to get different results
-                broader_query = f"popular {original_query}"
-                logger.info("[MM_REJECTION] rejecting current=%s searching=%s rejected_ids=%s",
-                            self._context.current_media_id, broader_query, self._context.rejected_media_ids)
+                # Use original query but with exclusion of rejected IDs
+                # The YouTube provider will handle candidate exclusion
+                logger.info("[MM_REJECTION] rejecting current=%s query=%s rejected_ids=%s",
+                            self._context.current_media_id, original_query, self._context.rejected_media_ids)
                 self._context.current_rejection_query = original_query
                 self._context.current_rejection_mood = original_mood
                 self._context.current_rejection_activity = original_activity
-                query = broader_query
+                query = original_query
                 ql = query.lower().strip()
+                # Flag this as a rejection so providers can exclude rejected IDs
+                _is_rejection = True
             else:
                 return {"success": True, "message": "What would you like to play?"}
 
@@ -916,24 +934,28 @@ class MediaManager:
                 return {"success": True, "message": "Nothing to replay — no previous media."}
 
         # ── Step -1: Intelligence / Continuity / Recommendation Resolution ──
-        # Candidate execution must receive the caller's resolved target.  The
-        # intelligence adapter is a research/continuity layer and previously
-        # reinterpreted ordinary explicit media queries before search, adding
-        # network/LLM latency and occasionally replacing the requested entity.
-        # Pronouns and bare artifacts are resolved above from canonical media
-        # state; discovery is resolved by the pipeline's contextual planner.
-        _skip_intel = True
+        # The intelligence adapter can resolve contextual references ("that one",
+        # "something from that movie") and provide continuity. It should NOT
+        # override an explicit query ("play Interstellar") but SHOULD help
+        # with ambiguous/contextual queries.
+        _skip_intel = False
+        # Skip for explicit named queries (user said a specific title/entity)
+        if query and len(query.split()) >= 2 and not any(p in ql for p in (
+            "give me", "find me", "show me", "put on", "play something",
+            "play anything", "play random", "entertain", "surprise",
+        )):
+            # Has enough words to be a specific request — skip intel override
+            _skip_intel = True
+        # Skip for explicitly enriched artifact queries
         if not _skip_intel:
-            # Skip intelligence re-resolution for explicitly enriched queries
             _skip_intel = any(p in ql for p in (" audiobook", " interview", " behind the scenes", " behind-the-scenes"))
-        # Skip intelligence for discovery queries — they should use their own
-        # discovery strategy, not be resolved to a previous entity.
+        # Skip intelligence for discovery queries — they use their own strategy
         if not _skip_intel:
             _discovery_bare = frozenset({
                 "something random", "something", "anything", "surprise me",
-                "surprise", "whatever", "i'm bored", "im bored", "bored",
-                "entertain me", "play something", "put something on",
-                "find something", "give me something", "show me something",
+                "surprise", "whatever", "entertain me", "play something",
+                "put something on", "find something", "give me something",
+                "show me something",
             })
             if ql in _discovery_bare or ql.startswith(("play something ", "play anything ", "play random ", "put on something ")):
                 _skip_intel = True
@@ -1006,7 +1028,8 @@ class MediaManager:
                 return {"success": False, "message": f"No provider available: {platform}"}
             try:
                 logger.info("[MM_TRACE] invoking provider.play() platform=%s", platform)
-                result = prov.play(query, media_type=mt, platform=platform)
+                _rej_kw = {"rejected_ids": self._context.rejected_media_ids} if _is_rejection and self._context.rejected_media_ids else {}
+                result = prov.play(query, media_type=mt, platform=platform, **_rej_kw)
                 logger.info("[MM_TRACE] provider returned success=%s state=%s", result.success, result.session.state if result.session else "no_session")
                 if self._playing(result):
                     self._last_execution_query = ql
@@ -1048,7 +1071,8 @@ class MediaManager:
             logger.info("[MM_TRACE] provider_obj=%s", type(prov).__name__)
             try:
                 logger.info("[MM_TRACE] invoking provider.play()")
-                result = prov.play(query, media_type=mt)
+                _rej_kw2 = {"rejected_ids": self._context.rejected_media_ids} if _is_rejection and self._context.rejected_media_ids else {}
+                result = prov.play(query, media_type=mt, **_rej_kw2)
                 logger.info("[MM_TRACE] provider returned=%s success=%s state=%s", type(result).__name__, result.success, result.session.state if result and result.session else "no_session")
                 if self._playing(result):
                     self._last_execution_query = ql
@@ -1083,7 +1107,8 @@ class MediaManager:
             if _prov:
                 try:
                     _mt = _detect_media_type(query)
-                    _result = _prov.play(query, media_type=_mt, platform="youtube")
+                    _rej_kw3 = {"rejected_ids": self._context.rejected_media_ids} if _is_rejection and self._context.rejected_media_ids else {}
+                    _result = _prov.play(query, media_type=_mt, platform="youtube", **_rej_kw3)
                     # Surface any truthful provider outcome with a session —
                     # incl. the no-connector fallback that opened the actual
                     # video in the default browser (state=IDLE, can't verify).

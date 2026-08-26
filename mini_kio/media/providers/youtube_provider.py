@@ -84,6 +84,25 @@ def _video_id_from_url(url: str) -> str:
         return ""
 
 
+def _resolve_search_to_watch_url(query: str) -> str:
+    """No-connector best-effort: scrape the first real videoId from the
+    YouTube search results page and return its watch URL, or "" when
+    unresolvable. Used ONLY by the honest browser-fallback play path — with
+    the connector, candidate selection is the richer controlled path."""
+    try:
+        encoded = urllib.parse.quote_plus(query)
+        req = urllib.request.Request(
+            "https://www.youtube.com/results?search_query=" + encoded,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        with urllib.request.urlopen(req, timeout=6.0) as r:
+            html = r.read().decode("utf-8", "replace")
+        m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', html)
+        return "https://www.youtube.com/watch?v=" + m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 def _score_candidate(
     title: str,
     url: str,
@@ -91,6 +110,7 @@ def _score_candidate(
     channel: str = "",
     description: str = "",
     media_type: str = "",
+    view_count: int = 0,
 ) -> int:
     """Relevance score of a YouTube result against the requested query.
 
@@ -287,15 +307,128 @@ def _score_candidate(
         if is_audio_channel or is_audio_title:
             score -= 14
 
+    # ── RC10b: semantic content-type boost ─────────────────────────────────
+    # When the user explicitly requests a content type (interview, trailer,
+    # documentary, etc.), videos whose titles or descriptions contain that
+    # exact content type get a strong boost. This prevents "Bethlehem
+    # documentary" from returning an interview, or "Messi interview" from
+    # returning a highlight reel.
+    _CONTENT_TYPE_KEYWORDS = {
+        "interview": ("interview", "conversation with", "talks with", "sits down with"),
+        "trailer": ("trailer", "teaser", "official preview"),
+        "teaser": ("teaser", "first look", "sneak peek"),
+        "documentary": ("documentary", "full documentary", "feature documentary"),
+        "review": ("review", "reviewing", "verdict", "analysis"),
+        "gameplay": ("gameplay", "lets play", "playthrough", "walkthrough"),
+        "highlights": ("highlights", "best moments", "top plays"),
+        "music video": ("music video", "official video", "mv"),
+        "podcast": ("podcast", "episode", "pod"),
+        "live": ("live performance", "live concert", "live session", "acoustic"),
+    }
+    if media_type in _CONTENT_TYPE_KEYWORDS:
+        _ct_markers = _CONTENT_TYPE_KEYWORDS[media_type]
+        _ct_match = any(m in tl for m in _ct_markers)
+        if _ct_match:
+            score += 18  # strong boost: title explicitly matches requested type
+        elif media_type in ql and media_type not in tl:
+            # User asked for type X but title doesn't mention it — penalize
+            score -= 10
+
+    # RC10b-cross: extract ALL explicit content-type words from the query.
+    # "Bethlehem interview" → media_type might be "podcast" but the query
+    # explicitly says "interview". Any mismatched content-type word in the
+    # query that is MISSING from the title gets a strong penalty — this is
+    # the primary mechanism preventing "interview" from resolving to
+    # "trailer".
+    _EXPLICIT_CONTENT_TYPES = {
+        "interview": ("interview", "conversation with", "talks with", "sits down with"),
+        "trailer": ("trailer", "teaser", "official preview"),
+        "teaser": ("teaser", "first look", "sneak peek"),
+        "documentary": ("documentary", "full documentary", "feature documentary"),
+        "review": ("review", "reviewing", "verdict", "analysis"),
+        "gameplay": ("gameplay", "lets play", "playthrough", "walkthrough"),
+        "highlights": ("highlights", "best moments", "top plays"),
+        "music video": ("music video", "official video", "mv"),
+        "podcast": ("podcast", "episode", "pod"),
+        "song": ("song", "track", "single"),
+        "live": ("live performance", "live concert", "live session", "acoustic"),
+        "official": ("official", "studio"),
+        "full movie": ("full movie", "full film", "full version", "full episode"),
+        "tutorial": ("tutorial", "how to", "guide", "walkthrough"),
+    }
+    for _ct_word, _ct_markers in _EXPLICIT_CONTENT_TYPES.items():
+        if _ct_word in ql:
+            _ct_match = any(m in tl for m in _ct_markers)
+            if _ct_match:
+                score += 18  # strong boost: title matches requested content type
+            else:
+                # Content-type MISMATCH: user asked for X but title doesn't
+                # contain any X marker — strong penalty to prevent type confusion.
+                # "Bethlehem interview" must not select a trailer; penalty
+                # must be large enough to overcome entity-name match bonuses.
+                score -= 22
+            break  # only the FIRST explicit content type matters
+
     # ── RC10: emoji / clickbait reupload penalty ─────────────────────────
     # "I'm Game - Trailer 🥵🔥 Latest Update | ..." is a fan reupload; the
     # emoji is a clickbait signature. Generic — no entity or channel names.
     if re.search(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B50\u2764\uFE0F]", title):
         score -= 8
 
-    if "/shorts/" in url:
-        score -= 5
+    # ── Shorts / short-form penalty ─────────────────────────────────────
+    # Normal "play X" requests must NEVER select a Short unless the user
+    # explicitly asks for one. The URL path and title are both checked;
+    # the penalty is large enough to overcome a full phrase match (+30).
+    _wants_short = "short" in ql or "shorts" in ql
+    if not _wants_short:
+        if "/shorts/" in url:
+            score -= 28  # Shorts URL: almost always wrong for normal play
+        # Title-level short-form markers (vertical video metadata)
+        if re.search(r"\b#shorts?\b", tl) or re.search(r"\b(shorts?\s*video|vertical)\b", tl):
+            score -= 18
+
+    # ── Edit / reaction / compilation / fan-upload penalty ──────────────
+    # Edits, reactions, compilations, fan remixes, and "vs" mashups should
+    # not beat an exact/canonical result unless the user explicitly asked
+    # for them. Generic morphology, never per-entity.
+    if not any(kw in ql for kw in ("edit", "reaction", "compilation", "remix", "vs")):
+        _WEAK_UPLOAD_MARKERS = (
+            "fan edit", "edit ", " edits", "reaction to", " reacts to",
+            "compilation", "remix", "mashup", "vs ", " vs",
+            "best of", "top 10", "top 20",
+        )
+        for _wm in _WEAK_UPLOAD_MARKERS:
+            if _wm in tl:
+                score -= 12
+                break
+
+    # ── Exact title match bonus ────────────────────────────────────────
+    # For an exact named request ("Play Cosmic Samson"), a title that IS
+    # the requested entity gets a strong bonus over a title that merely
+    # contains the words. "Cosmic Samson" == title vs "Cosmic Samson | Fan
+    # Edit" which only contains it.
+    _title_norm = tl.strip()
+    _query_norm = ql.strip()
+    if _title_norm == _query_norm:
+        score += 20  # exact title == query: strongest possible match
+    elif len(terms) >= 2 and all(t in _title_norm for t in terms):
+        # All query terms present in title: partial exact match.
+        score += 8
+
+    # ── View count / popularity signal ──────────────────────────────────
+    # Popularity is ONE weak signal — it must NEVER dominate relevance.
+    # A semantically perfect match with 1K views beats a viral unrelated
+    # video with 100M views. Logarithmic scaling: 1M views ≈ +3, 10M ≈ +4,
+    # 100M ≈ +5. Never exceeds +5 to keep relevance dominant.
+    if view_count > 0:
+        import math
+        _log_views = math.log10(max(view_count, 1))
+        # 1M = 6.0, 10M = 7.0, 100M = 8.0 → normalize to 0-5 range
+        _pop_bonus = max(0, min(5, int(_log_views - 3)))
+        score += _pop_bonus
+
     return score
+
 
 
 class YouTubeProvider(MediaProvider):
@@ -337,16 +470,16 @@ class YouTubeProvider(MediaProvider):
     def _api_search_candidates(self, query: str) -> list[dict]:
         """Discover candidates via the YouTube Data API when a key exists.
 
-        Returns [{title, url, video_id, channel}]. Any failure (missing key,
-        network, quota) degrades silently to the browser-scrape path — the
-        API enhances discovery but never becomes a hard dependency.
+        Returns [{title, url, video_id, channel, view_count}]. Any failure
+        (missing key, network, quota) degrades silently to the browser-scrape
+        path — the API enhances discovery but never becomes a hard dependency.
         """
         key = (getattr(config, "YOUTUBE_API_KEY", "") or "").strip()
         if not key:
             return []
         try:
             params = urllib.parse.urlencode({
-                "part": "snippet",
+                "part": "snippet,statistics",
                 "type": "video",
                 "maxResults": 15,
                 "q": query,
@@ -362,15 +495,23 @@ class YouTubeProvider(MediaProvider):
             for item in data.get("items", []):
                 vid = (item.get("id") or {}).get("videoId")
                 sn = item.get("snippet") or {}
+                st = item.get("statistics") or {}
                 title = (sn.get("title") or "").strip()
                 if not vid or not title:
                     continue
+                view_count = 0
+                try:
+                    view_count = int(st.get("viewCount", 0))
+                except (ValueError, TypeError):
+                    pass
                 out.append({
                     "title": title,
                     "url": f"https://www.youtube.com/watch?v={vid}",
                     "video_id": vid,
                     "channel": (sn.get("channelTitle") or "").strip(),
                     "description": (sn.get("description") or "").strip(),
+                    "view_count": view_count,
+                    "published_at": (sn.get("publishedAt") or "").strip(),
                 })
             logger.info("[YT_API_SEARCH] query=%s results=%d", query, len(out))
             return out
@@ -389,7 +530,8 @@ class YouTubeProvider(MediaProvider):
             return []
 
     def _select_best_candidate(self, tab_id: int, query: str,
-                               media_type: str = "") -> Optional[dict]:
+                               media_type: str = "",
+                               rejected_ids: Optional[list] = None) -> Optional[dict]:
         """RC7/RC8: choose the best-matching YouTube result instead of the first.
 
         Discovery source order:
@@ -404,23 +546,67 @@ class YouTubeProvider(MediaProvider):
         RC10: media_type (the caller's detected requested content type) is
         forwarded into the scorer so content-type validation runs BEFORE
         selection — an official trailer beats its own soundtrack upload.
+
+        Rejection: when rejected_ids is provided, candidates whose video_id
+        or URL matches any rejected ID are excluded from selection.  This
+        prevents "nah" → re-search → same candidate from being picked again.
         """
         conn = self._get_conn()
         if not conn:
             return None
+        _rej_raw = set(rejected_ids or [])
+        # Build a unified rejection set: extract video_ids from URLs so that
+        # a rejected URL like "https://www.youtube.com/watch?v=XYZ&list=..."
+        # correctly excludes candidates with video_id "XYZ" even when the
+        # URL strings differ (query params, etc.).
+        _rej_vids: set[str] = set()
+        _rej_urls: set[str] = set()
+        for r in _rej_raw:
+            r = str(r).strip()
+            if not r:
+                continue
+            _rej_urls.add(r.lower())
+            # Extract video_id from URL
+            vid = _video_id_from_url(r)
+            if vid:
+                _rej_vids.add(vid)
+            else:
+                # Might be a bare video_id or title
+                _rej_vids.add(r)
         candidates: list[dict] = []
-        candidates.extend(self._api_search_candidates(query))
-        for _attempt in range(4):
+        def _is_rejected(vid: str, curl: str) -> bool:
+            if vid and vid in _rej_vids:
+                return True
+            if curl and curl.lower() in _rej_urls:
+                return True
+            # Also check if the URL contains a rejected video_id
+            if curl and vid:
+                curl_vid = _video_id_from_url(curl)
+                if curl_vid and curl_vid in _rej_vids:
+                    return True
+            return False
+        for c in self._api_search_candidates(query):
+            vid = c.get("video_id", "")
+            curl = c.get("url", "")
+            if _is_rejected(vid, curl):
+                logger.info("[YT_CANDIDATE] excluded (rejected) vid=%s title=%s", vid, c.get("title", ""))
+                continue
+            candidates.append(c)
+        for _attempt in range(3):
             scrape = safe_run_async(conn.execute_script(tab_id, "search_results"))
             if scrape.success and isinstance(scrape.message, list):
                 for item in scrape.message:
                     if isinstance(item, dict) and item.get("title") and item.get("url"):
+                        vid = item.get("video_id", "")
+                        curl = item.get("url", "")
+                        if _is_rejected(vid, curl):
+                            continue
                         candidates.append(item)
                 if candidates:
                     break
-            time.sleep(1.0)
+            time.sleep(0.8)
         if not candidates:
-            logger.info("[YT_CANDIDATE] no candidates scraped for query=%s", query)
+            logger.info("[YT_CANDIDATE] no candidates scraped for query=%s (rejected=%d)", query, len(_rej_raw))
             return None
 
         # RC9: deterministic selection. max() alone returns the FIRST candidate
@@ -435,57 +621,77 @@ class YouTubeProvider(MediaProvider):
                     channel=c.get("channel", "") or "",
                     description=c.get("description", "") or "",
                     media_type=media_type,
+                    view_count=c.get("view_count", 0) or 0,
                 ),
                 -len(c.get("title", "") or ""),
             )
 
         best = max(candidates, key=_candidate_key)
         score, _ = _candidate_key(best)
-        if score <= 0:
+        # Allow weak-but-relevant candidates (score > -5) rather than
+        # rejecting everything at score <= 0 which causes blind bootstrap.
+        # A score of -5 means the candidate has SOME relevance signal.
+        if score <= -5:
             logger.info("[YT_CANDIDATE] best score=%d too weak for query=%s title=%s",
                         score, query, best.get("title", ""))
             return None
-        logger.info("[YT_CANDIDATE] query=%s selected=%s score=%d video_id=%s",
-                    query, best.get("title", ""), score, best.get("video_id", ""))
+        logger.info("[YT_CANDIDATE] query=%s selected=%s score=%d video_id=%s rejected_count=%d",
+                    query, best.get("title", ""), score, best.get("video_id", ""), len(_rej_raw))
         return best
+
+    def _browser_fallback(self, query: str) -> MediaResult:
+        """Open the ACTUAL best video in the default browser and report truthfully.
+
+        Without the connector KIO cannot verify playback, so it must never claim
+        PLAYING (that claim was a lie: the old fallback opened a search page and
+        said 'Playing X.').
+        """
+        from mini_kio.core.browser_operator import open_url
+        encoded = urllib.parse.quote_plus(query.strip())
+        watch_url = _resolve_search_to_watch_url(query.strip())
+        opened = open_url(watch_url) if watch_url else open_url(_YOUTUBE_SEARCH_URL.format(encoded=encoded))
+        if not opened.get("success"):
+            return MediaResult(success=False, error=opened.get("message", "Couldn't open YouTube"), player="youtube")
+        display = query.strip()
+        if display.startswith(("http://", "https://", "www.")):
+            display = "the requested media"
+        self._session = MediaSession(
+            player=PlayerType.YOUTUBE,
+            tab_id=None,
+            state=MediaState.IDLE,
+            query=query.strip(),
+            title=query.strip(),
+            url=watch_url or _YOUTUBE_SEARCH_URL.format(encoded=encoded),
+            domain_hint="youtube.com",
+            media_type=self._detect_type(query),
+        )
+        self._session.touch()
+        _display_label = user_facing_media_label(display) or "the requested media"
+        _verdict = f"Opened {_display_label} in your browser."
+        if not watch_url:
+            _verdict = f"Opened YouTube search results for {_display_label} in your browser."
+        _verdict += " I can't verify playback without the browser extension."
+        return MediaResult(success=True, message=_verdict, session=self._session, player="youtube")
 
     def play(self, query: str, **kwargs) -> MediaResult:
         logger.info("[ROOT_YT] ENTER query=%s kwargs=%s", query, kwargs)
         conn = self._get_conn()
         if not conn:
-            logger.info("[ROOT_YT] RETURN=R1 conn=None")
-            return MediaResult(success=False, error="Browser Connector not available", player="youtube")
+            # No connector object at all (disabled / failed to construct).
+            if config.BROWSER_CONNECTOR_ENABLED:
+                logger.info("[ROOT_YT] RETURN=R1 conn=None -> configured connector unavailable")
+                return MediaResult(success=False, error="Browser Connector not available", player="youtube")
+            return self._browser_fallback(query)
         if not conn.is_connected():
             if config.BROWSER_CONNECTOR_ENABLED:
                 logger.info("[ROOT_YT] RETURN=R2 conn_not_connected -> configured connector unavailable")
                 return MediaResult(success=False, error="Browser Connector not connected", player="youtube")
-            # No Chrome extension attached to the connector. Fall back to opening
-            # the YouTube search page in BrowserRuntime / default browser only
-            # when connector support is disabled in the current environment.
-            logger.info("[ROOT_YT] RETURN=R2 conn_not_connected -> browser fallback")
-            from mini_kio.core.browser_operator import play_youtube
-            fb = play_youtube(query)
-            if not fb.get("success"):
-                return MediaResult(success=False, error=fb.get("message", "Couldn't open YouTube"), player="youtube")
-            display = query.strip()
-            if display.startswith(("http://", "https://", "www.")):
-                display = "the requested media"
-            self._session = MediaSession(
-                player=PlayerType.YOUTUBE,
-                tab_id=None,
-                state=MediaState.PLAYING,
-                query=query.strip(),
-                title=query.strip(),
-                url=_YOUTUBE_SEARCH_URL.format(encoded=urllib.parse.quote_plus(query.strip())),
-                domain_hint="youtube.com",
-                media_type=self._detect_type(query),
-            )
-            self._session.touch()
-            # Media contract: the user-facing reply is natural language
-            # ("Playing X."), never a platform/provider-qualified string.
-            # Reuse the shared label helper (title-cased, URL-safe).
-            _display_label = user_facing_media_label(display) or "the requested media"
-            return MediaResult(success=True, message=f"Playing {_display_label}.", session=self._session, player="youtube")
+            # No Chrome extension attached and connector support is disabled.
+            # Open the ACTUAL best video in the default browser and report
+            # truthfully — without the connector KIO cannot verify playback, so
+            # it must never claim PLAYING (that claim was a lie: the old
+            # fallback opened a search page and said 'Playing X.').
+            return self._browser_fallback(query)
 
         clean_query = query.strip()
         if not clean_query:
@@ -531,7 +737,7 @@ class YouTubeProvider(MediaProvider):
                 logger.info("[ROOT_YT] tab_id is None — no tab returned by connector")
             else:
                 # Brief pause for the page to render
-                time.sleep(0.5)
+                time.sleep(0.3)
 
                 # ── INSTRUMENTATION: URL before bootstrap ──────────────
                 try:
@@ -564,7 +770,10 @@ class YouTubeProvider(MediaProvider):
                         "channel": "",
                     } if _direct_vid else None
                 else:
-                    _selected = self._select_best_candidate(tab_id, clean_query, media_type=_mt_hint)
+                    _selected = self._select_best_candidate(
+                        tab_id, clean_query, media_type=_mt_hint,
+                        rejected_ids=kwargs.get("rejected_ids") or [],
+                    )
                 _selected_video_id = (_selected or {}).get("video_id", "") or ""
                 _selected_title = (_selected or {}).get("title", "") or ""
                 # Media contract: an exact video was resolved (user URL parsed
@@ -587,7 +796,8 @@ class YouTubeProvider(MediaProvider):
                     # timing signal on a fresh results page, not a verdict.
                     _bootstrap_msg = "not attempted"
                     if not _navigated:
-                        for _ba in range(3):
+                        _BOOTSTRAP_DELAYS = (1.0, 1.5, 2.0)  # staged waits
+                        for _ba, _bs_delay in enumerate(_BOOTSTRAP_DELAYS):
                             logger.info("[ROOT_YT] invoking bootstrap attempt=%d", _ba + 1)
                             bootstrap_result = safe_run_async(conn.execute_script(tab_id, "youtube_bootstrap"))
                             logger.info("[ROOT_YT] bootstrap result success=%s message=%s msg_type=%s",
@@ -599,7 +809,7 @@ class YouTubeProvider(MediaProvider):
                                 break
                             if bootstrap_result.success and bootstrap_result.message == "not found":
                                 logger.info("[ROOT_YT] bootstrap not_found attempt=%d — retrying", _ba + 1)
-                                time.sleep(1.5)
+                                time.sleep(_bs_delay)
                                 continue
                             break
                     if _navigated:
@@ -635,15 +845,17 @@ class YouTubeProvider(MediaProvider):
                                     f"(id={_selected_video_id}) but Chrome loaded id={_loaded_id}"
                                 )
 
-                        # Poll for video element with shorter intervals since
-                        # bootstrap already verified the URL transition.
+                        # Poll for video element with staged readiness polling.
+                        # Warm paths resolve fast (0.5s); cold YouTube SPA loads
+                        # get progressively longer waits. Total budget: ~8s.
                         # RC8: when the identity gate already failed, do NOT
                         # attempt play on the wrong video — fail fast.
-                        for attempt in range(5):
+                        _PLAY_POLL_DELAYS = (0.5, 0.7, 1.0, 1.5, 2.0)  # staged waits
+                        for attempt, _poll_delay in enumerate(_PLAY_POLL_DELAYS):
                             if _identity_fail is not None:
                                 logger.info("[ROOT_YT] skipping play attempts (identity_fail)")
                                 break
-                            time.sleep(1.0)
+                            time.sleep(_poll_delay)
 
                             # ── INSTRUMENTATION: URL before each play attempt ──
                             try:
@@ -703,6 +915,12 @@ class YouTubeProvider(MediaProvider):
                                 elif _status == "playing" and not _paused:
                                     _is_playing = True
                                     _accepted_reason = "legacy_status_playing"
+                                elif _status == "ad_playing" and not _paused and _rs and _rs >= 3:
+                                    # YouTube player sometimes misreports actual video as ad_playing
+                                    # when readyState>=3 (have future data) and paused=False,
+                                    # the video IS playing despite the misleading status label.
+                                    _is_playing = True
+                                    _accepted_reason = "ad_playing_but_playing"
 
                                 # (stabilization removed: the 0.3.3+ script already
                                 # stabilizes in-page and re-verifies playback after
@@ -721,6 +939,47 @@ class YouTubeProvider(MediaProvider):
                                         self._session.duration = msg.get("duration")
                                         self._session.volume = msg.get("volume")
                                         self._session.muted = msg.get("muted")
+                                    break
+                                elif msg.get("status") == "ad_playing":
+                                    # An advertisement is playing instead of the
+                                    # target video. Wait briefly for the ad to
+                                    # finish, then re-check. Bounded: max 2 ad
+                                    # cycles to avoid infinite wait on long ads.
+                                    logger.info("[ROOT_YT] AD_WAIT attempt=%d", attempt + 1)
+                                    if attempt < 4:
+                                        time.sleep(3.0)
+                                        continue
+                                    # Ad persisted through retry budget — re-verify
+                                    # the TARGET video is now playing (not still an
+                                    # ad). Do NOT blindly accept as PLAYING.
+                                    _recheck = safe_run_async(play_conn.execute_script(tab_id, "play"))
+                                    if _recheck.success and isinstance(_recheck.message, dict):
+                                        _rc_status = _recheck.message.get("status")
+                                        _rc_paused = _recheck.message.get("paused", True)
+                                        _rc_player = -1
+                                        _rc_ps = safe_run_async(play_conn.execute_script(tab_id, "get_player_state"))
+                                        if _rc_ps.success and isinstance(_rc_ps.message, dict):
+                                            _rc_player = _rc_ps.message.get("playerState", -1)
+                                        _rc_playing = (
+                                            (_rc_player == 1 and not _rc_paused) or
+                                            (_rc_status == "playing" and not _rc_paused)
+                                        )
+                                        logger.info("[ROOT_YT] AD_REVERIFY status=%s paused=%s playerState=%s playing=%s",
+                                                    _rc_status, _rc_paused, _rc_player, _rc_playing)
+                                        if _rc_playing and _rc_status != "ad_playing":
+                                            playback_state = MediaState.PLAYING
+                                            if self._session:
+                                                self._session.current_time = _recheck.message.get("currentTime")
+                                                self._session.duration = _recheck.message.get("duration")
+                                            break
+                                        # Still an ad or not playing — report as
+                                        # degraded (user needs to know the ad is
+                                        # still running, not fabricate success).
+                                        logger.info("[ROOT_YT] AD_PERSISTED after retry budget")
+                                        playback_state = MediaState.READY
+                                        break
+                                    # Re-verify script failed — degrade honestly.
+                                    playback_state = MediaState.READY
                                     break
                                 elif msg.get("status") == "blocked":
                                     logger.info("[ROOT_YT] PLAY_LOOP_EXIT=blocked")
@@ -856,7 +1115,7 @@ class YouTubeProvider(MediaProvider):
                 except Exception:
                     pass
 
-            if playback_state in (MediaState.PLAYING, MediaState.READY, MediaState.PAUSED):
+            if playback_state == MediaState.PLAYING:
                 _label = user_facing_media_label(clean_query) or _page_title or "the requested media"
                 self._session = MediaSession(
                     player=PlayerType.YOUTUBE,
@@ -873,15 +1132,28 @@ class YouTubeProvider(MediaProvider):
 
                 # Media contract: natural titled replies, never platform-
                 # qualified or URL-bearing. Playback is already verified above
-                # (PLAY_VERIFY_FINAL), so "Playing X." is a verified claim.
-                message = (
-                    f"Playing {_label}." if playback_state == MediaState.PLAYING else
-                    "The video is ready." if playback_state == MediaState.READY else
-                    f"Opened {_label}."
-                )
-                logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True message=%s",
+                # (PLAY_VERIFY_FINAL), so the response is a verified claim.
+                _mt = self._detect_type(clean_query)
+                _RESPONSE_PREFIXES = {
+                    MediaType.VIDEO: "Playing",
+                    MediaType.MUSIC: "Playing",
+                    MediaType.MOVIE_TRAILER: "Playing",
+                    MediaType.TV_TRAILER: "Playing",
+                    MediaType.PODCAST: "Playing",
+                    MediaType.AUDIOBOOK: "Playing",
+                    MediaType.INTERVIEW: "Playing",
+                    MediaType.EDUCATIONAL: "Playing",
+                    MediaType.TUTORIAL: "Playing",
+                    MediaType.LIVESTREAM: "Playing",
+                    MediaType.SPORTS: "Playing",
+                    MediaType.NEWS: "Playing",
+                    MediaType.MUSIC_VIDEO: "Playing",
+                }
+                _prefix = _RESPONSE_PREFIXES.get(_mt, "Playing")
+                message = f"{_prefix} {_label}." if _label else f"{_prefix} the video."
+                logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True media_type=%s message=%s",
                             playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
-                            message)
+                            _mt.value, message)
                 return MediaResult(
                     success=True,
                     message=message,
@@ -952,6 +1224,41 @@ class YouTubeProvider(MediaProvider):
             pass
         return False
 
+    def _verify_playback_after_navigation(self) -> bool:
+        """After navigation (next/prev), verify the new video is actually playing.
+        Bounded: one wait + one play attempt, never a loop."""
+        conn = self._get_raw_conn() or self._get_conn()
+        tab_id = self._resolve_tab_id()
+        if not conn or not tab_id:
+            return False
+        try:
+            # Wait briefly for the new page to render
+            time.sleep(1.5)
+            # Check player state
+            status = safe_run_async(conn.execute_script(tab_id, "status"))
+            if status.success and isinstance(status.message, dict):
+                ps = status.message.get("playerState")
+                paused = status.message.get("paused", True)
+                # playerState 1 = PLAYING, 3 = BUFFERING (transient → will play)
+                if ps in (1, 3) and not paused:
+                    return True
+                # If paused or idle, try to play
+                play_res = safe_run_async(conn.execute_script(tab_id, "play"))
+                if play_res.success and isinstance(play_res.message, dict):
+                    ps2 = play_res.message.get("status")
+                    if ps2 == "playing":
+                        return True
+            # One more brief check
+            time.sleep(0.5)
+            status2 = safe_run_async(conn.execute_script(tab_id, "status"))
+            if status2.success and isinstance(status2.message, dict):
+                ps3 = status2.message.get("playerState")
+                paused3 = status2.message.get("paused", True)
+                return ps3 in (1, 3) and not paused3
+        except Exception as exc:
+            logger.warning("[PLAYBACK_VERIFY] failed: %s", exc)
+        return False
+
     def next_track(self) -> MediaResult:
         res = self._transport("next_track")
         if res.success and isinstance(res.message, dict):
@@ -964,7 +1271,14 @@ class YouTubeProvider(MediaProvider):
             if not url_changed:
                 url_changed = self._probe_url_changed(url_before)
             if url_changed:
-                res.message = "next_track_verified [NEXT_TRACK_VERIFY]"
+                # Verify playback actually started on the new video.
+                playback_ok = self._verify_playback_after_navigation()
+                if playback_ok:
+                    res.message = "Next track."
+                else:
+                    # Navigation happened but playback didn't start —
+                    # partial success with honest caveat.
+                    res.message = "Navigated to next video, but playback didn't start automatically."
             else:
                 # Truthfulness: never claim 'next' when the video did not change.
                 return MediaResult(
@@ -986,7 +1300,11 @@ class YouTubeProvider(MediaProvider):
             if not url_changed:
                 url_changed = self._probe_url_changed(url_before)
             if url_changed:
-                res.message = "previous_track_verified [PREVIOUS_TRACK_VERIFY]"
+                playback_ok = self._verify_playback_after_navigation()
+                if playback_ok:
+                    res.message = "Previous track."
+                else:
+                    res.message = "Navigated to previous video, but playback didn't start automatically."
             else:
                 return MediaResult(
                     success=False,
@@ -1197,17 +1515,22 @@ class YouTubeProvider(MediaProvider):
             if current_tab_info:
                 if current_tab_info.audible:
                     # Media is still playing or audible in the tab
-                    # Set state to PLAYING, even if it was PAUSED, as audible implies activity.
-                    # KIO will need to check the exact script status for PLAYING vs PAUSED if more granular control is needed.
                     self._session.state = MediaState.PLAYING
                     self._session.touch()
                     return self._session
                 else:
-                    # Tab exists but is not audible. If it was playing, it's now stopped/paused
-                    if self._session.state in (MediaState.PLAYING, MediaState.PAUSED):
-                        self._session.state = MediaState.STOPPED # Assume stopped if not audible
+                    # Tab exists but is not audible. A paused video is NOT audible —
+                    # do NOT override PAUSED to STOPPED (this was the root cause of
+                    # resume failure: the registry lost track of the paused session).
+                    # Only override PLAYING→STOPPED (the user may have stopped playback
+                    # externally). PAUSED stays PAUSED so resume can find it.
+                    if self._session.state == MediaState.PLAYING:
+                        self._session.state = MediaState.STOPPED
                         self._session.touch()
-                    return None
+                        return None
+                    # PAUSED or READY: tab exists, session is valid — return it.
+                    self._session.touch()
+                    return self._session
             else:
                 # Tab no longer exists or is not found.
                 if self._session.state in (MediaState.PLAYING, MediaState.PAUSED):
@@ -1250,13 +1573,96 @@ class YouTubeProvider(MediaProvider):
                     # must be a truthful failure, never a success that Media
                     # Manager would echo as "Resumed.".
                     if action in ("play", "resume") and msg.get("status") != "playing":
-                        logger.info("[MM_TRANSPORT] play/resume not observed: status=%s", msg.get("status"))
-                        return MediaResult(
-                            success=False,
-                            error="I couldn't resume playback." if action == "resume" else "I couldn't start playback.",
-                            session=self._session,
-                            player="youtube",
-                        )
+                        # After pause, the player may briefly report 'paused'
+                        # while transitioning to 'playing'. Retry with increasing
+                        # delays (resume is a state-transition, not a fresh search).
+                        # Also handle ad_playing: the extension may detect residual
+                        # ad DOM elements even when the content is actually playing.
+                        _original_status = msg.get("status")
+                        logger.info("[MM_TRANSPORT] play/resume not immediately observed: status=%s -- retrying", _original_status)
+
+                        # Accept ad_playing when the element is clearly not paused
+                        # and has progress (currentTime > 0) — this means the content
+                        # IS playing despite the ad DOM residual. Live proof: after
+                        # pause→resume, the extension's ad detectors fire on stale
+                        # DOM elements while the actual video resumes.
+                        if _original_status == "ad_playing" and not msg.get("paused", True) and msg.get("currentTime", 0) > 0:
+                            logger.info("[MM_TRANSPORT] ad_playing but content confirmed playing (currentTime=%s)", msg.get("currentTime"))
+                            msg["status"] = "playing"
+                            msg["paused"] = False
+
+                        if msg.get("status") != "playing":
+                            for _retry_delay in (0.5, 1.0, 1.5):
+                                time.sleep(_retry_delay)
+                                # Use sample_media for retries — it's more reliable
+                                # than get_player_state which returns -1 during
+                                # YouTube SPA transitions.
+                                _retry = safe_run_async(conn.execute_script(tab_id, "sample_media"))
+                                if _retry.success and isinstance(_retry.message, dict):
+                                    _rm = _retry.message
+                                    _retry_status = _rm.get("status", "")
+                                    _retry_paused = _rm.get("paused", True)
+                                    _retry_ct = _rm.get("currentTime", 0)
+                                    # Playing: not paused AND has progress OR reports playing
+                                    if (_retry_status == "playing" and not _retry_paused and _retry_ct > 0):
+                                        logger.info("[MM_TRANSPORT] sample_media confirmed playing (status=%s, paused=%s, ct=%s) after %ss",
+                                                    _retry_status, _retry_paused, _retry_ct, _retry_delay)
+                                        msg["status"] = "playing"
+                                        msg["paused"] = False
+                                        break
+                                    # Also accept: not paused with playerState=1
+                                    _ps = _rm.get("playerState", -1)
+                                    if _ps == 1 and not _retry_paused:
+                                        logger.info("[MM_TRANSPORT] sample_media playerState=1 confirmed playing after %ss", _retry_delay)
+                                        msg["status"] = "playing"
+                                        msg["paused"] = False
+                                        break
+                                    logger.info("[MM_TRANSPORT] retry sample_media status=%s paused=%s ct=%s ps=%s after %ss",
+                                                _retry_status, _retry_paused, _retry_ct, _ps, _retry_delay)
+
+                        # Second pass: if still not playing, try get_player_state
+                        # (some YouTube pages only expose the Iframe API, not sample_media)
+                        if msg.get("status") != "playing":
+                            for _retry_delay2 in (0.5, 1.0):
+                                time.sleep(_retry_delay2)
+                                _retry2 = safe_run_async(conn.execute_script(tab_id, "get_player_state"))
+                                if _retry2.success and isinstance(_retry2.message, dict):
+                                    _ps2 = _retry2.message.get("playerState", -1)
+                                    if _ps2 == 1:
+                                        logger.info("[MM_TRANSPORT] playerState=1 confirmed playing after %ss", _retry_delay2)
+                                        msg["status"] = "playing"
+                                        msg["paused"] = False
+                                        break
+                                    logger.info("[MM_TRANSPORT] retry get_player_state=%s after %ss", _ps2, _retry_delay2)
+
+                        if msg.get("status") != "playing":
+                            # Final attempt: re-run the full play script (not just
+                            # get_player_state) to trigger the extension's play logic.
+                            try:
+                                _final_retry = safe_run_async(play_conn.execute_script(tab_id, "play"))
+                                if _final_retry.success and isinstance(_final_retry.message, dict):
+                                    _fr_msg = _final_retry.message
+                                    _fr_status = _fr_msg.get("status", "")
+                                    _fr_paused = _fr_msg.get("paused", True)
+                                    _fr_ct = _fr_msg.get("currentTime", 0)
+                                    if _fr_status == "playing" and not _fr_paused:
+                                        msg.update(_fr_msg)
+                                        logger.info("[MM_TRANSPORT] final play script retry succeeded")
+                                    elif _fr_status == "ad_playing" and not _fr_paused and _fr_ct > 0:
+                                        msg["status"] = "playing"
+                                        msg["paused"] = False
+                                        logger.info("[MM_TRANSPORT] final play retry: ad_playing but content playing")
+                            except Exception:
+                                pass
+
+                        if msg.get("status") != "playing":
+                            logger.info("[MM_TRANSPORT] all retries exhausted for %s", action)
+                            return MediaResult(
+                                success=False,
+                                error="I couldn't resume playback." if action == "resume" else "I couldn't start playback.",
+                                session=self._session,
+                                player="youtube",
+                            )
                     if msg.get("status") == "playing":
                         new_state = MediaState.PLAYING
                     elif msg.get("status") == "paused":
@@ -1306,7 +1712,7 @@ class YouTubeProvider(MediaProvider):
         ql = query.lower()
         if any(kw in ql for kw in ("tutorial", "how to", "guide", "learn")):
             return MediaType.TUTORIAL
-        if any(kw in ql for kw in ("trailer",)):
+        if any(kw in ql for kw in ("trailer", "teaser")):
             return MediaType.MOVIE_TRAILER
         if any(kw in ql for kw in ("podcast", "episode")):
             return MediaType.PODCAST

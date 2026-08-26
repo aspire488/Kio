@@ -7226,6 +7226,35 @@ class _ExecutionCoordinator:
             target = params.get("target", "")
             raw_text = decision.raw_text if hasattr(decision, 'raw_text') else target
 
+            # ── Short-circuit: rejection/contextual follow-ups ───────────
+            # Rejection phrases ("nah", "not this", etc.) and contextual
+            # media requests must go DIRECTLY to MediaManager.play() where
+            # the rejection handler, pronoun resolver, and bare-artifact
+            # resolver live. The MediaContextIntelligence would incorrectly
+            # treat "nah" as a literal topic query.
+            _ql = target.lower().strip()
+            _is_media_rejection = False
+            if mm._context.last_query or mm._context.current_media_id:
+                _REJECT = {"nah", "nope", "no", "nahh", "nahhh", "naw",
+                           "not this", "not this one", "not feeling this",
+                           "skip", "skip this", "skip it", "skip that",
+                           "next", "next one", "another", "another one",
+                           "something different", "something better",
+                           "play something else", "play something different",
+                           "try another", "try something else",
+                           "change it", "switch it"}
+                if _ql in _REJECT:
+                    _is_media_rejection = True
+                elif _ql.startswith("nah") and any(w in _ql for w in ("next", "another", "try")):
+                    _is_media_rejection = True
+                elif _ql.startswith("no") and any(w in _ql for w in ("next", "another", "try")):
+                    _is_media_rejection = True
+                elif len(_ql.split()) <= 3 and any(_ql.startswith(n) for n in ("nah", "no", "not ")) and "play" not in _ql:
+                    _is_media_rejection = True
+            if _is_media_rejection:
+                logger.info("[MEDIA_CTX] rejection detected, routing directly to play: %s", target)
+                return mm.play(target, platform=params.get("platform"))
+
             # ── Context-aware media intelligence ──────────────────────────
             # Use MediaContextIntelligence to extract structured intent from
             # natural language. This handles:
@@ -7257,7 +7286,7 @@ class _ExecutionCoordinator:
 
                 if intent.selection_mode == SelectionMode.RECOMMENDATION:
                     # Generate recommendations and present options
-                    query = intent.search_query or "good music to listen to"
+                    query = intent.search_query or ""
                     logger.info("[MEDIA_CTX] recommendation query: %s", query)
 
                     # Search for candidates
@@ -7299,7 +7328,7 @@ class _ExecutionCoordinator:
 
                 elif intent.selection_mode == SelectionMode.AUTO:
                     # Auto mode: use the generated query
-                    target = intent.search_query or "good music to listen to"
+                    target = intent.search_query or ""
                     logger.info("[MEDIA_CTX] auto mode query: %s", target)
 
                 elif intent.topic:
@@ -7318,7 +7347,7 @@ class _ExecutionCoordinator:
                 # request with an old cached entity (live: "I feel like watching
                 # a comedy" extracted "comedy" correctly but the adapter resolved
                 # it to "feel good songs" from memory).
-                if target and target not in _DISCOVERY_TARGETS and target != "good music to listen to":
+                if target and target not in _DISCOVERY_TARGETS:
                     logger.info("[DISCOVERY] using context intelligence target: %s", target)
                 else:
                     try:
@@ -7329,11 +7358,31 @@ class _ExecutionCoordinator:
                                 logger.info("[DISCOVERY] intelligence resolved: %s -> %s", params.get('target'), target)
                     except Exception as exc:
                         logger.debug("[DISCOVERY] intelligence fallback: %s", exc)
-                    # Fallback: use a discovery-friendly query derived from the
-                    # user's utterance, never hardcode "trending music"
+                    # Fallback: derive a discovery-friendly query from context.
+                    # Never hardcode "good music to listen to" — use the user's
+                    # actual words or a context-aware default.
                     if not target or target in _DISCOVERY_TARGETS:
                         _raw = (params.get("target") or params.get("query") or "").strip()
-                        target = _raw if _raw and _raw not in _DISCOVERY_TARGETS else "good music to listen to"
+                        if _raw and _raw not in _DISCOVERY_TARGETS:
+                            target = _raw
+                        else:
+                            # Use conversation context for a better default
+                            try:
+                                from mini_kio.core.context_manager import get_context_manager as _gcm
+                                _ctx = _gcm(getattr(decision, "session_id", "") or "")
+                                _hist = _ctx.get_history_window(4) if hasattr(_ctx, "get_history_window") else []
+                                # Look for a recent topic in conversation
+                                _topic_hint = ""
+                                for _entry in reversed(_hist or []):
+                                    _msg = _entry.get("text", "") if isinstance(_entry, dict) else ""
+                                    if _msg and _entry.get("role") == "user" and len(_msg) > 5:
+                                        _topic_hint = _msg.strip()
+                                        break
+                                target = f"something related to {_topic_hint}" if _topic_hint else ""
+                            except Exception:
+                                target = ""
+                            if not target:
+                                target = "something interesting"
                         logger.info("[DISCOVERY] using fallback query: %s", target)
             return mm.play(target, platform=params.get("platform"))
         if action == "search":

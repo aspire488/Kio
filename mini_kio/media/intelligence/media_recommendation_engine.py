@@ -244,10 +244,13 @@ class MediaRecommendationEngine:
                 provider_hint=self._prefs.get_preferred_provider(),
             )
 
+        # Final fallback: use the utterance itself as a search query
+        # rather than hardcoding "trending music 2024"
+        _query = utterance.strip() if utterance else "popular music"
         return RecommendationRequest(
             utterance=utterance,
             strategy=RecommendationStrategy.TRENDING,
-            search_query="trending music 2024",
+            search_query=_query,
         )
 
     def _next_request(self, utterance: str) -> RecommendationRequest:
