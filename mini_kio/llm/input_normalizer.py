@@ -17,49 +17,54 @@ from mini_kio.llm.emoji_normalizer import normalize_emoji_text
 logger = logging.getLogger(__name__)
 
 _TYPO_MAP = {
-    "pythn baiscs": "python basics",
     "pythn": "python",
     "recusrion": "recursion",
-    "machien learning": "machine learning",
     "machien": "machine",
-    "python sytnax": "python syntax",
     "baiscs": "basics",
     "sytnax": "syntax",
-    "whos": "who is",
-    "ur": "your",
-    "u": "you",
-    "r": "are",
-    "wat": "what",
-    "wot": "what",
-    "helo": "hello",
-    "hellp": "hello",
-    "thx": "thanks",
-    "thanx": "thanks",
     "javascrpt": "javascript",
-    "urs": "yours",
-    "im": "i am",
-    "idk": "i do not know",
-    "ik": "i know",
-    "imo": "in my opinion",
-    "tbh": "to be honest",
-    "wbt": "what about",
-    "abt": "about",
-    "bc": "because",
-    "cuz": "because",
-    "pls": "please",
-    "ty": "thank you",
+    # Small generic abbreviation/contracton lexicon (language-level)
+    "u": "you",
+    "ur": "your",
+    "r": "are",
     "rn": "right now",
     "tmrw": "tomorrow",
     "tdy": "today",
-    "wdym": "what do you mean",
-    "wyd": "what are you doing",
-    "gonna": "going to",
-    "wanna": "want to",
-    "yh": "yeah",
-    "ye": "yeah",
-    "yup": "yeah",
-    "nah": "no",
+    "pls": "please",
+    "ty": "thank you",
+    "thx": "thanks",
+    "im": "i am",
+    "idk": "i do not know",
+    "whats": "what is",
+    "whos": "who is",
+    "hows": "how is",
 }
+# Generic fuzzy vocabulary for typo recovery (constrained, not whole language)
+# Covers: resource keywords, common query targets, general conversational words
+# The fuzzy matcher only corrects tokens >= 4 chars with difflib >= 0.85 cutoff
+#
+# IMPORTANT: entries here must NOT be close to common English words.
+# e.g. 'storage' matches 'strange' (0.857 ratio), 'burning' matches 'bring'
+# (0.833 ratio) — these corrupted "Doctor Strange bring back" into
+# "Doctor storage burning back". Only include words where the user is
+# genuinely likely to MISSPELL them, not words that are themselves close
+# to valid English.
+_FUZZY_VOCAB = frozenset({
+    # Core query words
+    "what", "who", "how", "when", "where", "why",
+    # Conversational
+    "hello", "thanks", "please", "about", "because",
+    "tomorrow", "today", "right", "now",
+    # Pronouns / contractions
+    "you", "your", "are",
+    # Resource keywords — ONLY words unlikely to collide with common English
+    "python", "battery", "cpu",
+    "projects", "status", "health", "uptime", "capabilities",
+    # Common query verbs
+    "working", "building", "running", "using", "doing",
+    # Technical
+    "terminal", "browser", "telegram", "session", "process",
+})
 
 _CONTINUITY_TRIGGERS = {"next", "continue", "more"}
 
@@ -145,27 +150,42 @@ class InputNormalizer:
         return text
 
     def normalize_typos(self, text: str) -> str:
-        """Fix common typos based on deterministic map."""
-        # Multi-word/compound typos first (e.g. "pythn baiscs")
+        """Fix typos via small deterministic map + bounded fuzzy vocabulary."""
         applied = False
-        
-        # Sort keys by length descending to catch longest matches first
         sorted_typos = sorted(_TYPO_MAP.keys(), key=len, reverse=True)
-        
         working_text = " " + text + " "
         for typo in sorted_typos:
             correction = _TYPO_MAP[typo]
-            # Match with word boundaries
             pattern = r'\b' + re.escape(typo) + r'\b'
             if re.search(pattern, working_text):
                 working_text = re.sub(pattern, correction, working_text)
                 applied = True
-        
+        # Bounded fuzzy recovery for remaining single-token typos (e.g. burnin->burning, memroy->memory)
+        # Only against _FUZZY_VOCAB, only for tokens >=4 chars, only high-confidence difflib >=0.8
+        import difflib
+        toks = working_text.split()
+        out_toks = []
+        for tok in toks:
+            core = tok.strip(".,!?;:'\"()")
+            low = core.lower()
+            if low in _TYPO_MAP or low in _FUZZY_VOCAB or len(low) < 4:
+                out_toks.append(tok)
+                continue
+            # Preserve URLs, code, filenames, quoted text
+            if "/" in tok or "." in tok and len(tok) > 6:
+                out_toks.append(tok)
+                continue
+            cand = difflib.get_close_matches(low, _FUZZY_VOCAB, n=1, cutoff=0.85)
+            if cand and cand[0] != low:
+                # Preserve original casing/punctuation
+                out_toks.append(tok.replace(core, cand[0]))
+                applied = True
+            else:
+                out_toks.append(tok)
+        working_text = " ".join(out_toks)
         text = working_text.strip()
-                
         if applied:
             self._diag["typo_normalization_applied"] = True
-            
         return text
 
     def check_authority_override(self, text: str) -> Optional[str]:

@@ -24,6 +24,9 @@ class ResponseQuality(Enum):
     COHERENCE_FAILURE = "coherence_failure"
 
 
+# NOTE: _CANONICAL_KNOWLEDGE is retained for test compatibility only.
+# Production identity answers come from identity_dataset.py (single source of truth).
+# This dict is NOT used in any production code path.
 _CANONICAL_KNOWLEDGE = {
     "full_form": "KIO stands for Kernel for Intelligent Orchestration.",
     "identity": "KIO — Kernel for Intelligent Orchestration. A personal operating companion built by Joel.",
@@ -54,6 +57,12 @@ _CANONICAL_KNOWLEDGE = {
 _PROTECTED_QUERIES: dict[str, str] = {
     # These queries are NOT covered by identity_dataset.py.
     # Identity queries are resolved via identity_resolve() first in check_protected_query().
+    #
+    # IMPORTANT: Only queries that the pipeline CANNOT handle deterministically
+    # belong here. Time/date/weather queries are now handled by the pipeline's
+    # _detect_utility (UTILITY intent), so they must NOT appear in this dict.
+    # Adding a query here that the pipeline handles deterministically will cause
+    # the protected response to override the correct deterministic answer.
     "do you have admin access": (
         "KIO operates under strict deterministic safety controls. "
         "No unrestricted system access."
@@ -99,22 +108,10 @@ _PROTECTED_QUERIES: dict[str, str] = {
         "commands like opening apps, searching, and playing media directly "
         "without going through the full orchestration pipeline."
     ),
-    "what time is it": (
-        "I cannot tell you the current time. I have no clock access. "
-        "You can check your system clock."
-    ),
-    "what is the date": (
-        "I cannot tell you the current date. I have no clock access. "
-        "You can check your system clock."
-    ),
-    "do you know current events": (
-        "I do not have live access to current events. "
-        "I can search for information if you tell me what you're looking for."
-    ),
-    "what news today": (
-        "I do not have live news access. "
-        "Would you like me to search for current news?"
-    ),
+    # REMOVED: "what time is it" — now handled by pipeline _detect_utility (UTILITY intent)
+    # REMOVED: "what is the date" — now handled by pipeline _detect_utility (UTILITY intent)
+    # REMOVED: "do you know current events" — the pipeline can search for current events
+    # REMOVED: "what news today" — the pipeline can search for news
 }
 
 _LOW_QUALITY_PATTERNS = re.compile(
@@ -145,10 +142,8 @@ _EXCESSIVE_CASUAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-_IDENTITY_KEYWORDS = [
-    "kio", "kernel", "orchestration", "assistant",
-    "automation", "local", "joel", "desktop",
-]
+# _IDENTITY_KEYWORDS removed — unused in production code.
+# Identity queries are resolved by identity_dataset.py, not by keyword lists.
 
 _DRIFT_PATTERNS = re.compile(
     r"\b(I\s+(can\s+)?(control|manage|administer|override|bypass|ignore)\s+"
@@ -215,7 +210,14 @@ class ConversationGovernor:
     """
 
     def check_protected_query(self, text: str) -> Optional[str]:
-        """Return deterministic response for protected identity queries."""
+        """Return deterministic response for protected identity queries.
+
+        Uses EXACT match only — substring matching is deliberately removed
+        because it caused false overrides (e.g., 'what time is it in japan'
+        matched the 'what time is it' protected query and returned an
+        incorrect 'I cannot tell you the time' response even though the
+        pipeline handles time queries deterministically).
+        """
         normalized = text.lower().strip().strip(".,!?;:")
         identity_match = identity_resolve(normalized)
         if identity_match:
@@ -225,10 +227,9 @@ class ConversationGovernor:
         if direct:
             logger.debug(f"governor: identity_override for '{normalized}'")
             return direct
-        for query, response in _PROTECTED_QUERIES.items():
-            if query in normalized and len(normalized) < len(query) + 20:
-                logger.debug(f"governor: identity_override for '{normalized}'")
-                return response
+        # NOTE: Substring matching intentionally removed. Only exact matches
+        # are used. If a protected query needs to match variations, add each
+        # variation as a separate entry in _PROTECTED_QUERIES.
         return None
 
     def validate_quality(self, response: str) -> ResponseQuality:

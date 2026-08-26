@@ -112,22 +112,16 @@ class IntentClassifier:
             return self._unknown_intent(raw_text, f"JSON mapping failed: {str(e)}")
 
     def _is_greeting(self, text: str) -> bool:
+        """Detect social/greeting utterances.
+
+        Uses the canonical phrase sets from mini_kio.core.phrases — the single
+        source of truth for greeting, acknowledgement, and thanks vocabulary.
+        No duplicate phrase lists.
+        """
         clean = text.lower().strip().strip(".,!?;: ")
-        greetings = {
-            "hello", "hi", "hey", "yo", "sup", "wassup", "what's up", "whats up",
-            "good morning", "good afternoon", "good evening", "good night",
-            "how are you", "how are ya", "howre you", "how you doing", "hows it going",
-            "how's it going", "how r u",
-        }
-        acknowledgements = {
-            "i see", "oh i see", "ah i see", "got it", "makes sense", "understood",
-            "right", "alright", "cool", "nice", "good",
-        }
-        social = {
-            "thanks", "thank you", "thankyou", "ty", "thx", "appreciate it",
-            "bye", "goodbye", "okay", "ok", "sure",
-        }
-        return clean in greetings or clean in acknowledgements or clean in social
+        from mini_kio.core.phrases import GREETINGS, ACKNOWLEDGEMENTS, THANKS
+        social = THANKS | {"appreciate it", "bye", "goodbye", "okay", "ok", "sure"}
+        return clean in GREETINGS or clean in ACKNOWLEDGEMENTS or clean in social
 
     def _heuristic_classify(self, text: str) -> IntentClassification:
         text_lower = text.lower().strip()
@@ -175,13 +169,14 @@ class IntentClassifier:
             intent_type = IntentType.MEMORY
             confidence = 0.9
 
-        # 5. Check for Identity
-        elif any(kw in text_lower for kw in ["who are you", "what is kio", "self-analysis", "tell me about yourself"]):
-            intent_type = IntentType.IDENTITY
-            confidence = 0.9
+        # 5. Identity detection — REMOVED: the pipeline's _check_identity
+        # (using identity_dataset.py) is the canonical identity owner.
+        # This secondary classifier should not independently route identity
+        # queries, as it duplicates the pipeline's authoritative routing.
 
         # Deterministic media command patterns — high confidence, skip confirmation
-        _DETERMINISTIC_MEDIA_ACTIONS = {"play", "watch", "pause", "resume", "stop", "mute", "unmute", "next", "previous"}
+        from mini_kio.core.phrases import MEDIA_TRANSPORT as _PHRASE_MEDIA_TRANSPORT
+        _DETERMINISTIC_MEDIA_ACTIONS = {"play", "watch"} | _PHRASE_MEDIA_TRANSPORT
 
         if intent_type == IntentType.CONVERSATIONAL:
             # Check for executable patterns

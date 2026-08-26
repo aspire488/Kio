@@ -10,6 +10,15 @@ from typing import Any, Optional
 
 from mini_kio.core.pipeline.types import IntentType, RoutingDecision
 from mini_kio.core.context_manager import get_context_manager
+from mini_kio.core.phrases import (
+    GREETINGS as _PHRASE_GREETINGS,
+    ACKNOWLEDGEMENTS as _PHRASE_ACKNOWLEDGEMENTS,
+    THANKS as _PHRASE_THANKS,
+    MEDIA_TRANSPORT as _PHRASE_MEDIA_TRANSPORT,
+    SYSTEM_ACTIONS as _PHRASE_SYSTEM_ACTIONS,
+    FOLDER_KEYWORDS as _PHRASE_FOLDER_KEYWORDS,
+    FORBIDDEN_TARGETS as _PHRASE_FORBIDDEN_TARGETS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +35,10 @@ _DISCOVERY_TARGETS = frozenset({
     "put something on", "put something random on",
     # Natural-language discovery (bare utterances)
     # NOTE: normalizer expands contractions, so include both forms
-    "i'm bored", "im bored", "i am bored", "bored",
+    # IMPORTANT: 'I'm bored' / 'bored' ALONE must NOT auto-trigger media.
+    # Only when the user explicitly adds a media request ("i'm bored, play
+    # something") should media activate. The correction prefix stripping
+    # handles the compound case.
     "entertain me", "amuse me",
     "give me something", "give me something good",
     "give me something to watch", "give me something to listen to",
@@ -215,6 +227,68 @@ def _content_tokens(t: str) -> set:
     toks = set(_re.findall(r"[a-z0-9]+", (t or "").lower()))
     toks = {w for w in toks if len(w) >= 3 and w not in _PROFILE_STOP}
     return toks
+
+
+# ── Proactive media offer (standalone, called from _ResponseComposer) ──
+# Extracted from Pipeline._maybe_proactive_offer to prevent proactive offers
+# from racing the conversational response. The offer is evaluated AFTER the
+# response is composed, with strict guards:
+#   * never on social/greeting/identity/conversation intent types
+#   * never on verification/claim answers
+#   * never on pure information/news queries
+#   * per-session cooldown (5 min same topic, no consecutive offers)
+#   * one line, never a dump
+_proactive_last_ts: float = 0.0
+_proactive_last_query: str = ""
+
+
+def _maybe_offer(mm, query: str, result: dict, decision) -> None:
+    """Append a restrained media offer to an information_query response.
+
+    Called from _ResponseComposer.compose() — NOT from _exec_media().
+    This ensures the offer is evaluated after the response is finalized
+    and prevents proactive content from hijacking the response path.
+    """
+    global _proactive_last_ts, _proactive_last_query
+    try:
+        if not query or not isinstance(result, dict):
+            return
+        _src = str(result.get("_source_provider") or "")
+        if _src in ("verification", "verification_failed"):
+            return
+        if not result.get("success") or not (result.get("message") or "").strip():
+            return
+        _now = time.time()
+        # Cooldown: don't re-offer the same topic within 5 minutes
+        if _now - _proactive_last_ts < 300 and str(query).strip().lower() == _proactive_last_query:
+            return
+        # Pure information/news queries must NOT trigger a media offer
+        _ql = str(query).lower().strip()
+        _INFO_ONLY = (
+            "latest news", "current news", "recent news", "what's new",
+            "what is new", "what's happening", "what is happening",
+            "current events", "recent events", "today's news",
+            "today in news", "breaking news", "recent developments",
+            "latest updates", "news about", "news on",
+        )
+        _MEDIA_SEEK = (
+            "play ", "watch ", "play me ", "play a ", "play some",
+            "video", "trailer", "song ", "music", "interview",
+            "podcast", "highlights", "gameplay", "clip",
+            "on youtube", "in chrome", "in browser", "desktop app",
+        )
+        if any(p in _ql for p in _INFO_ONLY) and not any(p in _ql for p in _MEDIA_SEEK):
+            return
+        offer = mm.offer_media(str(query))
+        if offer and offer.get("offer"):
+            _proactive_last_ts = _now
+            _proactive_last_query = str(query).strip().lower()
+            _msg = result.get("message") or ""
+            _offer_line = str(offer.get("offer")).strip()
+            if _offer_line and _offer_line not in _msg:
+                result["message"] = (f"{_msg}\n\n{_offer_line}").strip()
+    except Exception:
+        pass
 
 
 class Pipeline:
@@ -1463,12 +1537,17 @@ class _NormalizationService:
         # chrome", "wait, open the app") must never block verb detection — the
         # correction is the command. Bounded token list; requires a following
         # word (a bare "no"/"yes" is not stripped).
+        # Phase 6: boredom phrases are correction connectors — "i'm bored,
+        # play something" strips the boredom lead and routes "play something"
+        # to media. Multi-word boredom phrases need \w+(?:\s+\w+)* to match.
         _CORRECTION_PREFIX_RE = re.compile(
-            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on)\s*,\s+",
+            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on|"
+            r"i(?:'m|\s+am)\s+bored|bored)\s*,\s+",
             re.IGNORECASE,
         )
         _CORRECTION_PREFIX_RE2 = re.compile(
-            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on)\s+",
+            r"^(?:actually|no|nah|wait|hmm|yes|yeah|sure|ok(?:ay)?|right|um|uh|hold\s+on|"
+            r"i(?:'m|\s+am)\s+bored|bored)\s+",
             re.IGNORECASE,
         )
         stripped = _CORRECTION_PREFIX_RE.sub("", cmd, count=1).strip()
@@ -1481,7 +1560,13 @@ class _NormalizationService:
             # when the remainder is clearly NOT a media action.
             _remainder_first = stripped.split()[0].lower() if stripped.split() else ""
             _MEDIA_ACCEPT_VERBS = {"start", "play", "watch", "listen", "put", "fire", "run", "load", "queue"}
-            if not (_remainder_first in _MEDIA_ACCEPT_VERBS and re.search(
+            # Phase 6: boredom prefix MUST be stripped even when the remainder
+            # is a media command ("i'm bored play something" → "play something").
+            _is_boredom_prefix = bool(re.match(
+                r"^i(?:'m|\s+am)\s+bored\b|^bored\b",
+                cmd.lower().strip(),
+            ))
+            if _is_boredom_prefix or not (_remainder_first in _MEDIA_ACCEPT_VERBS and re.search(
                 r"\b(?:start|play|watch|listen|put\s+on|fire\s+up|run|load|queue)\b",
                 stripped, re.I,
             )):
@@ -1537,44 +1622,21 @@ class _NormalizationService:
 
 
 class _IntentClassifier:
-    """Three-layer classification: fast deterministic -> semantic -> fallback."""
+    """Three-layer classification: fast deterministic -> semantic -> fallback.
 
-    GREETINGS = frozenset({
-        "hello", "hi", "hey", "yo", "hola", "sup", "wassup", "what's up", "whats up",
-        "good morning", "good afternoon", "good evening", "heyy", "bro", "broo",
-        # "what's good" is the same greeting idiom as "what's up" — never a
-        # question about the word "good" (live: "yo whats good" was stripped
-        # to "what is good" and answered with a definition of "good").
-        "what's good", "whats good", "wassup good", "waddup", "sup bro", "yo bro",
-        "wsg", "wyd", "rn",
-    })
+    Phrase sets are imported from mini_kio.core.phrases — the single source
+    of truth for shared conversational vocabulary. Adding a phrase here
+    automatically makes it recognized by all subsystems.
+    """
 
-    ACKNOWLEDGEMENTS = frozenset({
-        "i see", "oh i see", "ah i see", "i understand", "got it", "makes sense",
-        "right", "alright", "cool", "nice", "good", "understood", "that makes sense",
-    })
-
-    THANKS = frozenset({"thanks", "thank you", "thankyou", "ty", "thx"})
-
-    SYSTEM_ACTIONS = frozenset({"shutdown", "restart", "lock", "unlock", "recovery", "recover"})
-
-    MEDIA_TRANSPORT = frozenset({
-        "pause", "resume", "stop", "mute", "unmute",
-        "next", "next video", "next track", "skip", "skip video",
-        "previous", "prev", "previous video", "previous track", "go back",
-        "volume up", "increase volume", "turn it up", "louder",
-        "volume down", "decrease volume", "turn it down", "quieter", "lower volume",
-        "continue", "keep going", "continue playing",
-    })
-
-    FOLDER_KEYWORDS = frozenset({
-        "downloads", "desktop", "documents", "pictures", "music", "videos", "home", "appdata", "kio",
-    })
-
-    FORBIDDEN_TARGETS = frozenset({
-        "cmd", "powershell", "regedit", "taskmgr", "msconfig", "control.exe",
-        "explorer", "terminal", "services",
-    })
+    # Canonical phrase sets from shared module (single source of truth)
+    GREETINGS = _PHRASE_GREETINGS
+    ACKNOWLEDGEMENTS = _PHRASE_ACKNOWLEDGEMENTS
+    THANKS = _PHRASE_THANKS
+    MEDIA_TRANSPORT = _PHRASE_MEDIA_TRANSPORT
+    SYSTEM_ACTIONS = _PHRASE_SYSTEM_ACTIONS
+    FOLDER_KEYWORDS = _PHRASE_FOLDER_KEYWORDS
+    FORBIDDEN_TARGETS = _PHRASE_FORBIDDEN_TARGETS
 
     # ── KIO-self canonicalization (identity/operational root fix) ──────────
     # Bounded, deterministic normalization so the KIO-self families (health /
@@ -4766,7 +4828,70 @@ class _IntentClassifier:
             )
         return None
 
+    @staticmethod
+    def _has_active_media_session() -> bool:
+        """Check if there is an active media session (PLAYING, PAUSED, READY).
+        Used to decide whether short phrases like 'nah' are media rejections
+        vs ordinary conversation. An intelligent companion only treats these
+        as media operations when media is actually active — otherwise they
+        are conversational responses."""
+        try:
+            from mini_kio.media.media_manager import MediaManager
+            mm = MediaManager.get_instance()
+            return mm._registry.get_active() is not None
+        except Exception:
+            return False
+
     def _classify_media_transport(self, lower, text):
+        # Phase 3: media rejection phrases — "nah", "not this", "something different",
+        # etc. must route to MEDIA_PLAY so MediaManager.play's rejection handler
+        # excludes the current candidate and plays the next best.
+        #
+        # IMPORTANT: Only route to MEDIA_PLAY when there IS an active media
+        # session. Without active media, 'nah' is just a conversational
+        # response — not a media command. The media manager's play() already
+        # has the intelligent rejection handler that checks context; routing
+        # unconditionally would cause play('nah') to literally search YouTube
+        # for 'nah' when no media is active.
+        _REJECTION_PHRASES = frozenset({
+            "nah", "nope", "no", "no next", "no another",
+            "not this", "not this one", "not feeling this",
+            "this sucks", "this is bad", "this is terrible", "this is awful",
+            "this ain't it", "this isn't it",
+            "skip this", "skip it", "skip that",
+            # NOTE: standalone 'next'/'skip' are TRANSPORT commands (next track)
+            # handled by the MEDIA_TRANSPORT set below. Rejection-specific forms
+            # ('next one', 'skip this') go to media_play/play for the rejection
+            # handler in MediaManager.play.
+            "next one",
+            "another", "another one", "another please",
+            "something different", "something better",
+            "not what i meant", "not what we meant",
+            "that's not what i meant", "that is not what i meant",
+            "change it", "switch it",
+            "nah bro", "no bro", "not this bro",
+            "nah another", "nah next", "nah try",
+            "nope another", "nope next", "nope try",
+        })
+        if lower in _REJECTION_PHRASES:
+            # Context-aware: only route as media rejection when media is active.
+            # Otherwise this is conversational ("nah" in reply to a question,
+            # "not this" about a non-media thing, etc.).
+            if self._has_active_media_session():
+                return RoutingDecision(IntentType.MEDIA_PLAY, "play", lower, text, lower, confidence=1.0)
+            # No active media — fall through to conversation.
+        # Also catch "give me another", "try another", "play something else"
+        _REJECTION_PREFIXES = (
+            "give me another", "give me something else", "give me something different",
+            "try another", "try something different", "try something else",
+            "play something else", "play something different",
+            "play another",
+        )
+        for _rp in _REJECTION_PREFIXES:
+            if lower.startswith(_rp) or lower == _rp:
+                if self._has_active_media_session():
+                    return RoutingDecision(IntentType.MEDIA_PLAY, "play", lower, text, lower, confidence=1.0)
+
         # R-EFG: "play it"/"play that" are media-continuity commands resolved
         # by MediaManager.play's pronoun handling — NOT offer acceptance.
         # ("show it"/"watch it"/"play video" keep the R4 offer-acceptance path.)
@@ -4835,7 +4960,7 @@ class _IntentClassifier:
                     action = "volume_up"
                 if cmd in ("turn it down", "decrease volume", "quieter", "volume down", "lower volume"):
                     action = "volume_down"
-                if cmd in ("continue", "keep going", "continue playing"):
+                if cmd in ("continue", "keep going", "continue playing", "carry on", "keep playing", "resume it"):
                     action = "continue"
                 if cmd in ("next video", "next track"):
                     action = "next"
@@ -4945,10 +5070,20 @@ class _IntentClassifier:
                             except Exception:
                                 pass
                         break
-                # Discovery intent: route to discovery handler, not literal YouTube
-                if target in _DISCOVERY_TARGETS or any(target.startswith(p) for p in _DISCOVERY_PREFIXES):
-                    return RoutingDecision(IntentType.MEDIA_PLAY, "play_discovery", target, text, lower, confidence=1.0, platform=_platform)
-                return RoutingDecision(IntentType.MEDIA_PLAY, "play", target, text, lower, confidence=1.0, platform=_platform)
+                # Ambiguous targets ("give me another", "show me something")
+                # without active media are conversational, not media requests.
+                _AMBIGUOUS_MEDIA_TARGETS = frozenset({
+                    "another", "another one", "something", "something else",
+                    "something different", "something better",
+                })
+                if target in _AMBIGUOUS_MEDIA_TARGETS and not self._has_active_media_session():
+                    # Fall through to conversation — no active media to continue
+                    pass
+                else:
+                    # Discovery intent: route to discovery handler, not literal YouTube
+                    if target in _DISCOVERY_TARGETS or any(target.startswith(p) for p in _DISCOVERY_PREFIXES):
+                        return RoutingDecision(IntentType.MEDIA_PLAY, "play_discovery", target, text, lower, confidence=1.0, platform=_platform)
+                    return RoutingDecision(IntentType.MEDIA_PLAY, "play", target, text, lower, confidence=1.0, platform=_platform)
 
         if lower == "play":
             return RoutingDecision(IntentType.MEDIA_PLAY, "play", "", text, lower, confidence=1.0)
@@ -7213,7 +7348,9 @@ class _ExecutionCoordinator:
             result = mm.process_information_query(
                 query_text, session_id=getattr(decision, "session_id", "") or ""
             )
-            self._maybe_proactive_offer(mm, query_text, result)
+            # Proactive offer is now evaluated in the response composer,
+            # not inline here — prevents offer appending from racing the
+            # conversational response. See _ResponseComposer.compose().
             return result
         if action == "accept_offer":
             result = mm.process_followup(decision.normalized_text)
@@ -7266,10 +7403,16 @@ class _ExecutionCoordinator:
             "pause": mm.pause, "resume": mm.resume, "stop": mm.stop,
             "mute": mm.mute, "unmute": mm.unmute,
             "next": mm.next_track, "previous": mm.previous_track,
+            "skip": mm.next_track,
             "volume_up": lambda: mm.volume_up(), "volume_down": lambda: mm.volume_down(),
             "continue": mm.resume,
             "now_playing": lambda: mm.now_playing(),
         }
+        # Phase 1: additional resume variants map to the same transport action
+        _RESUME_ALIASES = {"carry on", "keep playing", "resume it"}
+        for alias in _RESUME_ALIASES:
+            if alias not in transport_actions:
+                transport_actions[alias] = mm.resume
         # R-EFG: dispatch on the classifier action, not the first word of the
         # utterance, so "play next video" (action=next) reaches next_track
         # instead of being treated as a play command.
@@ -7283,84 +7426,9 @@ class _ExecutionCoordinator:
         logger.warning("[MEDIA] unhandled action=%s text=%s", action, decision.normalized_text)
         return {"success": False, "message": f"Unhandled media action: {action}"}
 
-    def _maybe_proactive_offer(self, mm, query: str, result: dict) -> None:
-        """Register a restrained, useful media opportunity after a topic answer.
-
-        The proactive intelligence mechanism (MediaDiscovery.detect_opportunity)
-        is a GENERIC opportunity model: topic patterns crossed with opportunity
-        keywords ("trailer", "latest", "new", "review"...), never per-entity
-        rules. It was dead code — offer_media() was never called. Wiring it here
-        runs the detector after a normal topic answer and, when it genuinely
-        fires (topic + opportunity signal), registers the offer so a later
-        "show it / play it / yes" resolves through the existing acceptance path.
-
-        Restraint rules (a companion, not a search bot):
-          * never after a verification/claim answer (propositions are discourse
-            state, not media leads);
-          * never when the query is a bare probe or a command;
-          * per-session cooldown (the discovery layer also TTLs offers) so a
-            repeat topic does not re-offer every turn;
-          * the offer is a single optional line, never a dump.
-        """
-        try:
-            if not query or not isinstance(result, dict):
-                return
-            _src = str(result.get("_source_provider") or "")
-            if _src in ("verification", "verification_failed"):
-                return
-            if not result.get("success") or not (result.get("message") or "").strip():
-                return
-            _now = time.time()
-            _last_t = getattr(self, "_last_proactive_ts", 0.0)
-            _last_q = getattr(self, "_last_proactive_query", "")
-            # Cooldown: don't re-offer the same topic within 5 minutes, and
-            # don't offer on consecutive turns at all (the user just got an
-            # answer; the offer is for the NEXT relevant topic moment).
-            if _now - _last_t < 300 and str(query).strip().lower() == _last_q:
-                return
-            # Pure information/news queries must NOT trigger a media offer.
-            # "latest news about AI", "current events", "what's happening in
-            # tech" are RESEARCH requests — the user wants an answer, not a
-            # video. Only offer media when the user's intent is genuinely
-            # media-seeking (contains play/watch/video/trailer/etc.) or the
-            # topic is a known media-centric domain (sports, movies, music).
-            _ql = str(query).lower().strip()
-            _INFO_ONLY_PATTERNS = (
-                "latest news", "current news", "recent news", "what's new",
-                "what is new", "what's happening", "what is happening",
-                "current events", "recent events", "today's news",
-                "today in news", "breaking news", "recent developments",
-                "latest updates", "news about", "news on",
-            )
-            _MEDIA_SEEK_PATTERNS = (
-                "play ", "watch ", "play me ", "play a ", "play some",
-                "video", "trailer", "song ", "music", "interview",
-                "podcast", "highlights", "gameplay", "clip",
-                "on youtube", "in chrome", "in browser", "desktop app",
-            )
-            _is_info_only = any(p in _ql for p in _INFO_ONLY_PATTERNS)
-            _has_media_intent = any(p in _ql for p in _MEDIA_SEEK_PATTERNS)
-            if _is_info_only and not _has_media_intent:
-                logger.info("[PROACTIVE_OFFER] suppressed: pure info query=%s", _ql[:60])
-                return
-            offer = mm.offer_media(str(query))
-            if offer and offer.get("offer"):
-                self._last_proactive_ts = _now
-                self._last_proactive_query = str(query).strip().lower()
-                logger.info(
-                    "[PROACTIVE_OFFER] topic=%s media_type=%s",
-                    offer.get("topic"), offer.get("media_type"),
-                )
-                # Surface the offer as a single natural trailing line so the
-                # user knows the resource exists and can take it ("show it"/
-                # "yes" resolves through the existing accept path). Bounded:
-                # one line, never a list.
-                _msg = result.get("message") or ""
-                _offer_line = str(offer.get("offer")).strip()
-                if _offer_line and _offer_line not in _msg:
-                    result["message"] = (f"{_msg}\n\n{_offer_line}").strip()
-        except Exception:
-            pass
+    # NOTE: _maybe_proactive_offer is now a standalone function _maybe_offer()
+    # called from _ResponseComposer.compose(). This prevents proactive offers
+    # from racing the conversational response.
 
     # NOTE: desktop-state composition ('What's open?') moved to the canonical
     # owner mini_kio/core/desktop_state.py (native window observation + tab
@@ -7783,42 +7851,6 @@ class _ExecutionCoordinator:
 
         return {"success": False, "message": f"Conversation action '{action}' not implemented."}
 
-    def _reply_greeting(self, text: str) -> str:
-        lower = text.lower()
-        if re.search(r"\bgood\s+(morning|afternoon|evening|night)\b", lower):
-            for key, reply in (
-                ("morning", "Good morning! What can I help you with today?"),
-                ("afternoon", "Good afternoon! What can I do for you?"),
-                ("evening", "Good evening! What's on your mind?"),
-                ("night", "Good night! Sleep well."),
-            ):
-                if f"good {key}" in lower:
-                    return reply
-        if any(
-            k in lower
-            for k in (
-                "how are you", "how's it going", "how is it going", "how are ya",
-                "how are things", "how have you been", "how you doing",
-                "how's your day", "how is your day", "how are you doing",
-                "what's up", "what is up",
-            )
-        ):
-            # Truthful, KIO-appropriate small talk: an assistant with a real
-            # operational state — never a fabricated human biography.
-            return random.choice([
-                "All good on my end and ready to help. What's on your mind?",
-                "Running fine. What can I do for you?",
-                "Everything's working — what do you need?",
-            ])
-        return random.choice([
-            "Hey! How's it going?",
-            "Hello! What can I do for you?",
-            "Hey there. What's up?",
-            "Hi! Good to see you.",
-            "Hey! What's on your mind?",
-            "Hello. How can I help?",
-        ])
-
     def _research_facts(self, prompt: str) -> str:
         """Ground a content-generation request with retrieved facts.
 
@@ -8125,7 +8157,13 @@ class _ExecutionCoordinator:
             "general context (e.g. do NOT say 'your favorite engineering field is robotics' just because "
             "the user is an engineering student). Fabricated preferences are worse than honest ignorance. "
             "If you don't know something about the user, say so instead of guessing. Do not speculate "
-            "about how the user is feeling or what they are doing unless they told you.",
+            "about how the user is feeling or what they are doing unless they told you. "
+            "When the user shares an emotional state ('I'm exhausted', 'today sucked', 'I'm excited'), "
+            "respond to the situation naturally — acknowledge it, relate if appropriate, offer a thought "
+            "or suggestion that fits. Never reply with just 'That sounds [adjective].' — that is echo, "
+            "not conversation. When someone shares something casual or humorous ('my code works and "
+            "I'm scared', 'bro my code is possessed'), recognize the humor and play along briefly "
+            "before offering anything practical. Keep personality visible but never forced.",
         ]
         # Ponytail demand-driven CompanionContext: only inject capability/runtime when relevant
         _low_q = (decision.normalized_text or decision.raw_text or "").lower()
@@ -8246,6 +8284,25 @@ class _ExecutionCoordinator:
             _analysis = self._pragmatics_of(decision)
             _user_text = decision.raw_text or decision.normalized_text
             parts.append(discourse_block(ctx, _analysis, _user_text))
+        except Exception:
+            pass
+
+        # ── Occasion/wish context injection ────────────────────────────
+        # When the user sends a social wish ("Happy Onam", "Merry Christmas",
+        # "Eid Mubarak"), the LLM should use its knowledge of the occasion
+        # to generate a natural, contextually appropriate response. This note
+        # tells the LLM to be occasion-aware without hardcoding responses.
+        try:
+            from mini_kio.core.pragmatics import ConversationAct as _CA
+            _analysis = _analysis if '_analysis' in dir() else self._pragmatics_of(decision)
+            if _analysis and _CA.WISH.value in (_analysis.acts or []):
+                parts.append(
+                    "The user is sending you a social wish/celebration. "
+                    "Use your knowledge of the occasion to respond naturally. "
+                    "Be warm and specific to the occasion — mention what makes "
+                    "it special if you know. Keep it brief (1-2 sentences). "
+                    "Do not simply echo the wish back. Reciprocate naturally."
+                )
         except Exception:
             pass
 
@@ -8947,6 +9004,12 @@ class _ResponseComposer:
     def compose(
         self, result: dict[str, Any], decision: RoutingDecision, ctx
     ) -> dict[str, Any]:
+        # Mark user interaction for proactive suppression (prevents dual responses)
+        try:
+            from mini_kio.monitoring.proactive import mark_user_interaction
+            mark_user_interaction()
+        except Exception:
+            pass
         result.setdefault("success", False)
         if "message" not in result:
             result["message"] = "Done." if result.get("success") else "Command failed."
@@ -8976,6 +9039,29 @@ class _ResponseComposer:
             observe_exchange(decision, result, ctx)
         except Exception:
             pass
+        # ── Proactive media offer (guarded) ──────────────────────────
+        # Only append a media offer when the action was an information_query
+        # AND the base response is substantive (not social/conversational).
+        # This prevents proactive offers from hijacking greetings, identity
+        # answers, or casual conversation.
+        if (
+            decision.action == "information_query"
+            and result.get("success")
+            and result.get("message")
+            and decision.intent_type not in (
+                IntentType.GREETING, IntentType.SOCIAL, IntentType.IDENTITY,
+                IntentType.CONVERSATION, IntentType.UNKNOWN,
+            )
+        ):
+            try:
+                from mini_kio.media.media_manager import MediaManager
+                mm = MediaManager.get_instance()
+                query_text = decision.target or decision.normalized_text or ""
+                if query_text and mm:
+                    _maybe_offer(mm, query_text, result, decision)
+            except Exception:
+                pass
+
         if decision.session_id and decision.action:
             from mini_kio.core.runtime import remember_runtime_context
             # BC-3: never persist a raw serialized capability target
