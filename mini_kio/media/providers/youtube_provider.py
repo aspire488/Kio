@@ -1097,13 +1097,12 @@ class YouTubeProvider(MediaProvider):
             # URL (the video really playing), not the search-results URL.
             _session_url = _actual_watch_url or url
 
-            # Media contract (URL leak): a user-supplied YouTube URL is parsed
-            # as INPUT, but user-facing text must use the RESOLVED media title,
-            # never the URL. Once playback is established on a direct-URL tab,
-            # read the loaded page title and use it for the session title and
-            # the reply; the canonical URL stays internal (session.url).
+            # Read the actual page title after playback — this is the TRUE
+            # media identity regardless of whether it was a direct URL or
+            # search result. The page title is the actual video title.
             _page_title = ""
-            if _is_direct_url and playback_state in (
+            _page_channel = ""
+            if playback_state in (
                 MediaState.PLAYING, MediaState.READY, MediaState.PAUSED,
             ):
                 try:
@@ -1112,48 +1111,45 @@ class YouTubeProvider(MediaProvider):
                         _pt = str(_info.message.get("title") or "").strip()
                         if _pt and _pt.lower() not in ("youtube", "- youtube"):
                             _page_title = re.sub(r"\s*[-|–]\s*YouTube\s*$", "", _pt).strip()
+                        _page_channel = str(_info.message.get("channel") or "").strip()
                 except Exception:
                     pass
 
             if playback_state == MediaState.PLAYING:
-                _label = user_facing_media_label(clean_query) or _page_title or "the requested media"
+                # Use the ACTUAL candidate metadata for the response, not the
+                # search query. The selected candidate has the real title/channel.
+                _candidate_title = (_selected or {}).get("title", "") or ""
+                _candidate_channel = (_selected or {}).get("channel", "") or ""
+                # Clean title: strip " - YouTube" suffix
+                _clean_title = re.sub(r"\s*[-|]\s*YouTube\s*$", "", _candidate_title).strip() if _candidate_title else ""
+                # Session title: prefer page title (actual loaded video), then candidate, then query
+                _session_title = _page_title or _clean_title or _title
+                # Artist: prefer page channel, then candidate channel, then parsed artist
+                _session_artist = _page_channel or _candidate_channel or _artist
+
                 self._session = MediaSession(
                     player=PlayerType.YOUTUBE,
                     tab_id=tab_id,
                     state=playback_state,
                     query=clean_query,
-                    title=_page_title or _title,
-                    artist=_artist,
+                    title=_session_title,
+                    artist=_session_artist,
                     url=_session_url,
                     domain_hint="youtube.com",
                     media_type=self._detect_type(clean_query),
                 )
                 self._session.touch()
 
-                # Media contract: natural titled replies, never platform-
-                # qualified or URL-bearing. Playback is already verified above
-                # (PLAY_VERIFY_FINAL), so the response is a verified claim.
+                # Build user-facing response from ACTUAL metadata
+                _display_title = _clean_title or _page_title or user_facing_media_label(clean_query) or "the requested media"
                 _mt = self._detect_type(clean_query)
-                _RESPONSE_PREFIXES = {
-                    MediaType.VIDEO: "Playing",
-                    MediaType.MUSIC: "Playing",
-                    MediaType.MOVIE_TRAILER: "Playing",
-                    MediaType.TV_TRAILER: "Playing",
-                    MediaType.PODCAST: "Playing",
-                    MediaType.AUDIOBOOK: "Playing",
-                    MediaType.INTERVIEW: "Playing",
-                    MediaType.EDUCATIONAL: "Playing",
-                    MediaType.TUTORIAL: "Playing",
-                    MediaType.LIVESTREAM: "Playing",
-                    MediaType.SPORTS: "Playing",
-                    MediaType.NEWS: "Playing",
-                    MediaType.MUSIC_VIDEO: "Playing",
-                }
-                _prefix = _RESPONSE_PREFIXES.get(_mt, "Playing")
-                message = f"{_prefix} {_label}." if _label else f"{_prefix} the video."
-                logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True media_type=%s message=%s",
+                if _session_artist:
+                    message = f"Playing {_display_title} by {_session_artist}."
+                else:
+                    message = f"Playing {_display_title}."
+                logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True media_type=%s message=%s candidate_title=%s candidate_channel=%s",
                             playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
-                            _mt.value, message)
+                            _mt.value, message, _clean_title, _candidate_channel)
                 return MediaResult(
                     success=True,
                     message=message,

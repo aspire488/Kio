@@ -1198,23 +1198,22 @@ class MediaManager:
         if not active:
             return {"success": False, "message": "Nothing is playing right now."}
         _pname, session = active
-        label = session.title or session.query or session.domain_hint or "media"
-        from mini_kio.media.media_session import user_facing_media_label
-        display = user_facing_media_label(label) if label else "media"
+        # Use actual title + artist/channel, not the search query
+        _title = session.title or ""
+        _artist = session.artist or ""
+        # Clean title: strip " - YouTube" suffix
+        import re as _re
+        _clean_title = _re.sub(r"\s*[-|]\s*YouTube\s*$", "", _title).strip() if _title else ""
+        if _clean_title:
+            display = f"{_clean_title} by {_artist}" if _artist else _clean_title
+        elif session.query:
+            from mini_kio.media.media_session import user_facing_media_label
+            display = user_facing_media_label(session.query) or session.query
+        else:
+            display = session.domain_hint or "media"
         state = session.state.value
-        _mt_label = session.media_type.value if hasattr(session, 'media_type') and session.media_type else "media"
-        _LABEL_MAP = {
-            "music": "Playing", "music_video": "Playing",
-            "video": "Playing", "movie_trailer": "Playing",
-            "tv_trailer": "Playing", "podcast": "Playing",
-            "audiobook": "Playing", "interview": "Playing",
-            "educational": "Playing", "tutorial": "Playing",
-            "livestream": "Playing", "sports": "Playing",
-            "news": "Playing",
-        }
-        _prefix = _LABEL_MAP.get(_mt_label, "Playing")
         if state == MediaState.PLAYING.value:
-            return {"success": True, "message": f"{_prefix} {display}."}
+            return {"success": True, "message": f"Playing {display}."}
         if state == MediaState.PAUSED.value:
             return {"success": True, "message": f"Paused on {display}."}
         return {"success": True, "message": f"Loaded {display} (ready to play)."}
