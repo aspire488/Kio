@@ -111,6 +111,7 @@ def _score_candidate(
     description: str = "",
     media_type: str = "",
     view_count: int = 0,
+    published_at: str = "",
 ) -> int:
     """Relevance score of a YouTube result against the requested query.
 
@@ -148,6 +149,22 @@ def _score_candidate(
     if not terms:
         return 0
 
+    # Content-type synonym map: when the user asks for a content type by one
+    # name, titles using a synonym should still count as a term match.
+    # "play cosmic samson teaser" → "Curtain Raiser" counts as matching "teaser".
+    _CONTENT_SYNONYMS = {
+        "teaser": ("curtain raiser", "first look", "sneak peek", "glimpse"),
+        "trailer": ("curtain raiser", "official preview", "glimpse"),
+        "interview": ("conversation with", "talks with", "sits down with"),
+        "review": ("verdict", "analysis"),
+        "documentary": ("full documentary", "feature documentary"),
+        "gameplay": ("lets play", "playthrough", "walkthrough"),
+        "highlights": ("best moments", "top plays"),
+        "music video": ("official video", "mv"),
+        "podcast": ("episode", "pod"),
+        "live": ("live performance", "live concert", "live session", "acoustic"),
+    }
+
     score = 0
     phrase_at = tl.find(ql)
     phrase_full = 30
@@ -174,6 +191,14 @@ def _score_candidate(
             # Distinctive (rarer) terms carry more weight than filler.
             score += 8 if len(term) >= 5 else 3
             matched += 1
+        elif term in _CONTENT_SYNONYMS:
+            # Content-type synonym resolution: "curtain raiser" in title
+            # counts as matching the term "teaser" in the query.
+            for syn in _CONTENT_SYNONYMS[term]:
+                if syn in tl:
+                    score += 8 if len(term) >= 5 else 3
+                    matched += 1
+                    break
 
     if matched == 0:
         return -100  # clearly unrelated
@@ -243,6 +268,20 @@ def _score_candidate(
             framing_penalty += 12
             if framing_penalty >= 24:
                 break
+    # RC11: when user explicitly asks for teaser/trailer/song, reaction/review
+    # framing is an especially strong mismatch — penalize harder so the
+    # official upload always wins. A "teaser reaction" must never beat the
+    # actual teaser.
+    _NON_REACTION_TYPES = ("teaser", "trailer", "song", "music video", "official")
+    if any(ct in ql for ct in _NON_REACTION_TYPES):
+        _reaction_strong = ("reaction", "reacts", "react to", "review",
+                            "reviewing", "breakdown", "explained", "explains",
+                            "analysis", "what happens", "ending explained")
+        for _rs in _reaction_strong:
+            if _rs in tl and _rs not in ql:
+                framing_penalty += 10
+                if framing_penalty >= 40:
+                    break
     score -= framing_penalty
 
     # ── RC9: aggregation / mashup penalty ──────────────────────────────
@@ -313,10 +352,24 @@ def _score_candidate(
     # exact content type get a strong boost. This prevents "Bethlehem
     # documentary" from returning an interview, or "Messi interview" from
     # returning a highlight reel.
+    #
+    # RC12: the boost does NOT apply when the title also carries strong
+    # framing words (reaction, review, breakdown, explained, ...). A title
+    # "Cosmic Samson Teaser Reaction" is NOT a teaser — it is a reaction
+    # ABOUT a teaser. The content-type keyword is incidental, not the actual
+    # content. Without this gate, reaction/review titles accumulate a
+    # +36 content-type bonus that overwhelms their framing penalty, causing
+    # them to beat the official upload.
+    #
+    # RC13: the caller's media_type (from the pipeline) may not carry the
+    # user's explicit content-type intent — e.g. "play cosmic samson teaser"
+    # gets media_type="music" because "play" dominates the pipeline's
+    # weighted scorer. Detect the content type from the query directly so
+    # the boost fires for ALL explicit content-type requests.
     _CONTENT_TYPE_KEYWORDS = {
         "interview": ("interview", "conversation with", "talks with", "sits down with"),
-        "trailer": ("trailer", "teaser", "official preview"),
-        "teaser": ("teaser", "first look", "sneak peek"),
+        "trailer": ("trailer", "teaser", "official preview", "curtain raiser", "glimpse"),
+        "teaser": ("teaser", "first look", "sneak peek", "curtain raiser", "glimpse", "official teaser"),
         "documentary": ("documentary", "full documentary", "feature documentary"),
         "review": ("review", "reviewing", "verdict", "analysis"),
         "gameplay": ("gameplay", "lets play", "playthrough", "walkthrough"),
@@ -325,12 +378,26 @@ def _score_candidate(
         "podcast": ("podcast", "episode", "pod"),
         "live": ("live performance", "live concert", "live session", "acoustic"),
     }
-    if media_type in _CONTENT_TYPE_KEYWORDS:
-        _ct_markers = _CONTENT_TYPE_KEYWORDS[media_type]
+    _FRAMING_WORDS = (
+        "reaction", "reacts", "review", "reviewing", "breakdown",
+        "explained", "explains", "analysis", "what happens", "ending",
+        "theory", "theories", "leaked", "leak", "recap",
+    )
+    _title_is_framing = any(fw in tl for fw in _FRAMING_WORDS)
+    # RC13: detect content type from query first; fall back to caller's
+    # media_type when the query doesn't contain an explicit content word.
+    _effective_type = media_type
+    if not _effective_type or _effective_type not in _CONTENT_TYPE_KEYWORDS:
+        for _ct in _CONTENT_TYPE_KEYWORDS:
+            if _ct in ql:
+                _effective_type = _ct
+                break
+    if _effective_type in _CONTENT_TYPE_KEYWORDS:
+        _ct_markers = _CONTENT_TYPE_KEYWORDS[_effective_type]
         _ct_match = any(m in tl for m in _ct_markers)
-        if _ct_match:
+        if _ct_match and not _title_is_framing:
             score += 18  # strong boost: title explicitly matches requested type
-        elif media_type in ql and media_type not in tl:
+        elif _effective_type in ql and _effective_type not in tl:
             # User asked for type X but title doesn't mention it — penalize
             score -= 10
 
@@ -342,8 +409,8 @@ def _score_candidate(
     # "trailer".
     _EXPLICIT_CONTENT_TYPES = {
         "interview": ("interview", "conversation with", "talks with", "sits down with"),
-        "trailer": ("trailer", "teaser", "official preview"),
-        "teaser": ("teaser", "first look", "sneak peek"),
+        "trailer": ("trailer", "teaser", "official preview", "curtain raiser", "glimpse"),
+        "teaser": ("teaser", "first look", "sneak peek", "curtain raiser", "glimpse", "official teaser"),
         "documentary": ("documentary", "full documentary", "feature documentary"),
         "review": ("review", "reviewing", "verdict", "analysis"),
         "gameplay": ("gameplay", "lets play", "playthrough", "walkthrough"),
@@ -359,9 +426,9 @@ def _score_candidate(
     for _ct_word, _ct_markers in _EXPLICIT_CONTENT_TYPES.items():
         if _ct_word in ql:
             _ct_match = any(m in tl for m in _ct_markers)
-            if _ct_match:
+            if _ct_match and not _title_is_framing:
                 score += 18  # strong boost: title matches requested content type
-            else:
+            elif not _ct_match:
                 # Content-type MISMATCH: user asked for X but title doesn't
                 # contain any X marker — strong penalty to prevent type confusion.
                 # "Bethlehem interview" must not select a trailer; penalty
@@ -427,6 +494,26 @@ def _score_candidate(
         _pop_bonus = max(0, min(5, int(_log_views - 3)))
         score += _pop_bonus
 
+    # ── Recency signal (weak, supporting) ────────────────────────────────
+    # A recent official upload should beat an older reaction video when
+    # relevance is otherwise comparable. Parsed from ISO 8601 published_at.
+    # Never exceeds +3 — recency is a tiebreaker, not a ranking criterion.
+    if published_at:
+        try:
+            from datetime import datetime, timezone
+            _pub = published_at.replace("Z", "+00:00")
+            _pub_dt = datetime.fromisoformat(_pub)
+            _now = datetime.now(timezone.utc)
+            _days_old = (_now - _pub_dt).total_seconds() / 86400
+            if _days_old <= 7:
+                score += 3  # very recent (within a week)
+            elif _days_old <= 30:
+                score += 2  # recent (within a month)
+            elif _days_old <= 90:
+                score += 1  # somewhat recent (within 3 months)
+        except (ValueError, TypeError, OverflowError):
+            pass
+
     return score
 
 
@@ -481,7 +568,7 @@ class YouTubeProvider(MediaProvider):
             params = urllib.parse.urlencode({
                 "part": "snippet,statistics",
                 "type": "video",
-                "maxResults": 15,
+                "maxResults": 25,
                 "q": query,
                 "key": key,
             })
@@ -609,6 +696,23 @@ class YouTubeProvider(MediaProvider):
             logger.info("[YT_CANDIDATE] no candidates scraped for query=%s (rejected=%d)", query, len(_rej_raw))
             return None
 
+        # Deduplicate by video_id: the same video with different URL params
+        # (e.g. &list=..., &t=..., ?si=...) must not appear as separate
+        # candidates. Keep the first occurrence (API results preferred over
+        # browser-scrape since they carry richer metadata).
+        _seen_vids: set[str] = set()
+        _deduped: list[dict] = []
+        for c in candidates:
+            vid = c.get("video_id", "") or _video_id_from_url(c.get("url", ""))
+            if vid and vid in _seen_vids:
+                continue
+            if vid:
+                _seen_vids.add(vid)
+            _deduped.append(c)
+        if len(_deduped) < len(candidates):
+            logger.info("[YT_CANDIDATE] dedup %d -> %d candidates", len(candidates), len(_deduped))
+        candidates = _deduped
+
         # RC9: deterministic selection. max() alone returns the FIRST candidate
         # on a score tie — the exact failure that let a random 44-scoring mashup
         # beat Sony's official trailers (all 8 tied at 44). Break ties by
@@ -622,6 +726,7 @@ class YouTubeProvider(MediaProvider):
                     description=c.get("description", "") or "",
                     media_type=media_type,
                     view_count=c.get("view_count", 0) or 0,
+                    published_at=c.get("published_at", "") or "",
                 ),
                 -len(c.get("title", "") or ""),
             )
@@ -1110,7 +1215,11 @@ class YouTubeProvider(MediaProvider):
                     if _info.success and isinstance(_info.message, dict):
                         _pt = str(_info.message.get("title") or "").strip()
                         if _pt and _pt.lower() not in ("youtube", "- youtube"):
-                            _page_title = re.sub(r"\s*[-|–]\s*YouTube\s*$", "", _pt).strip()
+                            # Strip Chrome tab ID prefix like "(30) " and YouTube suffix
+                            _pt = re.sub(r"^\(\d+\)\s*", "", _pt)  # remove "(30) " prefix
+                            _pt = re.sub(r"\s*[-|–]\s*YouTube\s*$", "", _pt).strip()
+                            if _pt and _pt.lower() not in ("youtube", "- youtube"):
+                                _page_title = _pt
                         _page_channel = str(_info.message.get("channel") or "").strip()
                 except Exception:
                     pass
@@ -1123,7 +1232,10 @@ class YouTubeProvider(MediaProvider):
                 # Clean title: strip " - YouTube" suffix
                 _clean_title = re.sub(r"\s*[-|]\s*YouTube\s*$", "", _candidate_title).strip() if _candidate_title else ""
                 # Session title: prefer page title (actual loaded video), then candidate, then query
+                # Never use bare "YouTube" as a title
                 _session_title = _page_title or _clean_title or _title
+                if _session_title.lower().strip() in ("youtube", "- youtube", ""):
+                    _session_title = _clean_title or user_facing_media_label(clean_query) or "the requested media"
                 # Artist: prefer page channel, then candidate channel, then parsed artist
                 _session_artist = _page_channel or _candidate_channel or _artist
 
@@ -1141,12 +1253,35 @@ class YouTubeProvider(MediaProvider):
                 self._session.touch()
 
                 # Build user-facing response from ACTUAL metadata
+                # Vary response wording based on context for natural feel
+                import random as _rnd
                 _display_title = _clean_title or _page_title or user_facing_media_label(clean_query) or "the requested media"
                 _mt = self._detect_type(clean_query)
-                if _session_artist:
-                    message = f"Playing {_display_title} by {_session_artist}."
+                _is_rejection = bool(kwargs.get("rejected_ids"))
+                if _is_rejection:
+                    # After rejection: varied "trying this instead" responses
+                    _rej_variants = [
+                        f"How about this one: {_display_title}.",
+                        f"Trying something different: {_display_title}.",
+                        f"Let's try {_display_title} instead.",
+                    ]
+                    message = _rnd.choice(_rej_variants)
+                elif _session_artist:
+                    # With known artist/channel
+                    _with_artist_variants = [
+                        f"Playing {_display_title} by {_session_artist}.",
+                        f"{_display_title} by {_session_artist}.",
+                        f"Now playing: {_display_title} by {_session_artist}.",
+                    ]
+                    message = _rnd.choice(_with_artist_variants)
                 else:
-                    message = f"Playing {_display_title}."
+                    # Without artist
+                    _no_artist_variants = [
+                        f"Playing {_display_title}.",
+                        f"{_display_title}.",
+                        f"Now playing: {_display_title}.",
+                    ]
+                    message = _rnd.choice(_no_artist_variants)
                 logger.info("[ROOT_YT] FINAL_RETURN playback_state=%s success=True media_type=%s message=%s candidate_title=%s candidate_channel=%s",
                             playback_state.value if isinstance(playback_state, MediaState) else str(playback_state),
                             _mt.value, message, _clean_title, _candidate_channel)
@@ -1425,6 +1560,8 @@ class YouTubeProvider(MediaProvider):
                 _ql = query.lower()
                 if "trailer" in _ql:
                     _st = "trailer"
+                elif "teaser" in _ql:
+                    _st = "teaser"
                 elif "review" in _ql:
                     _st = "review"
                 elif "interview" in _ql:
@@ -1435,6 +1572,18 @@ class YouTubeProvider(MediaProvider):
                     _st = "music video"
                 elif "podcast" in _ql or "episode" in _ql:
                     _st = "podcast"
+
+                # Deduplicate by video_id (same video, different URL params)
+                _seen: set[str] = set()
+                _deduped: list[dict] = []
+                for c in candidates:
+                    vid = c.get("video_id", "") or _video_id_from_url(c.get("url", ""))
+                    if vid and vid in _seen:
+                        continue
+                    if vid:
+                        _seen.add(vid)
+                    _deduped.append(c)
+                candidates = _deduped
 
                 def _art_key(item: dict) -> tuple:
                     return (
@@ -1459,7 +1608,7 @@ class YouTubeProvider(MediaProvider):
                 )
                 return MediaResult(
                     success=True,
-                    message=f"Found on YouTube: {title}",
+                    message=f"YouTube search: {title}",
                     candidates=[candidate],
                     player="youtube",
                 )
