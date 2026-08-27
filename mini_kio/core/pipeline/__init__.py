@@ -8124,10 +8124,10 @@ class _ExecutionCoordinator:
         # different timeout/task, then deterministic fallback. The LLM chain
         # already fails over Gemini->Groq->OpenRouter->Together->Cerebras,
         # but an empty reply can still occur on transient provider issues.
-        for _attempt in range(3):
+        for _attempt in range(2):
             try:
-                _timeout = 45.0 if _attempt == 0 else (60.0 if _attempt == 1 else 30.0)
-                _task = "content" if _attempt < 2 else "chat"
+                _timeout = 45.0 if _attempt == 0 else 60.0
+                _task = "content"
                 reply = ask_llm_sync(
                     prompt,
                     system_prompt=system_prompt,
@@ -8520,10 +8520,13 @@ class _ExecutionCoordinator:
             parts.append(
                 "\nCOMPANION INTELLIGENCE -- evidence sections above contain longitudinal data about Joel. When the user asks about themselves, compose a natural answer from the evidence above. Do NOT say you lack information when evidence IS present. Synthesize naturally: reference patterns, give examples, note trends."
             )
+        _t_converse = time.monotonic()
         try:
             reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=800, task="conversation")
         except Exception:
             reply = None
+        _dt_llm1 = (time.monotonic() - _t_converse) * 1000
+        _dt_llm2 = 0.0
         # Bounded provider recovery: a transient outage (rate limit, one
         # provider down) can blank the whole chain on the FIRST call. One
         # short-delay retry recovers it (live: a movie question got "I'm not
@@ -8531,8 +8534,10 @@ class _ExecutionCoordinator:
         # Never loops — a genuinely dead chain stays dead after one retry.
         if not reply:
             try:
-                time.sleep(1.0)
+                time.sleep(0.2)
+                _t_retry = time.monotonic()
                 reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=800, task="conversation")
+                _dt_llm2 = (time.monotonic() - _t_retry) * 1000
             except Exception:
                 reply = None
         if reply:
@@ -8607,7 +8612,11 @@ class _ExecutionCoordinator:
                         )
                     except Exception:
                         pass
+                _dt_total = (time.monotonic() - _t_converse) * 1000
+                logger.debug("converse: llm1=%.0fms retry=%.0fms total=%.0fms", _dt_llm1, _dt_llm2, _dt_total)
                 return cleaned
+        _dt_total = (time.monotonic() - _t_converse) * 1000
+        logger.debug("converse: llm1=%.0fms retry=%.0fms total=%.0fms (no reply)", _dt_llm1, _dt_llm2, _dt_total)
         return None
 
     def _semantic_forget(self, session_id: str, topic: str) -> Optional[dict]:

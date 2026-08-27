@@ -253,6 +253,10 @@ class KioRuntime:
     tracked_processes: list[dict[str, object]] = field(default_factory=list)
     resource_guard: ResourceGuard = field(default_factory=lambda: ResourceGuard())
     execution_counter: int = 0
+    # Latency optimization: throttle expensive per-message operations
+    _last_prune_at: float = 0.0
+    _last_snapshot_at: float = 0.0
+    _cached_snapshot: dict[str, object] | None = None
 
     # Imported runtimes injected at bootstrap (initially None)
     browser_runtime: object | None = None
@@ -452,7 +456,15 @@ class KioRuntime:
         self.tracked_processes = retained
 
     def prune_tracked_processes(self) -> None:
-        """Remove dead processes from the registry (piggybacked on command dispatch)."""
+        """Remove dead processes from the registry (piggybacked on command dispatch).
+
+        Throttled to once per 30 seconds — psutil checks are unnecessary on
+        every single message and can add 5-50ms of latency per dispatch.
+        """
+        now = time.monotonic()
+        if now - self._last_prune_at < 30.0:
+            return
+        self._last_prune_at = now
         import os
         import platform
         import subprocess
@@ -1091,6 +1103,7 @@ def dispatch_channel_input(
             "channel": channel,
         }
 
+    t_dispatch_start = time.monotonic()
     try:
         from mini_kio.core.activation import touch_activation_session
 
@@ -1131,8 +1144,8 @@ def dispatch_channel_input(
 
     # ── Session Context (unified) ──────────────────────────────────────
     session_id = _compute_session_id(channel, user_id)
-    from mini_kio.core.context_manager import get_session_context
-    _ctx = get_session_context(session_id)
+    from mini_kio.core.context_manager import get_context_manager
+    _ctx = get_context_manager(session_id)
 
     # ── Single dispatch through authoritative Pipeline ────────────────
     try:
@@ -1177,6 +1190,15 @@ def dispatch_channel_input(
         },
     )
     result["channel"] = channel
+    _dt_ms = (time.monotonic() - t_dispatch_start) * 1000
+    emit_runtime_trace(
+        "dispatch_complete",
+        channel=channel,
+        dt_ms=round(_dt_ms, 1),
+        success=bool(result.get("success")),
+    )
+    if _dt_ms > 1000:
+        logger.warning("dispatch_channel_input: %.0fms for '%s'", _dt_ms, command[:40])
     return result
 
 
@@ -1255,8 +1277,18 @@ def aura_emit_observation(event_type: str, data: dict[str, object], *, context: 
 
 
 def get_runtime_snapshot() -> dict[str, object]:
-    """Return a tiny runtime state snapshot for execution tracing."""
+    """Return a tiny runtime state snapshot for execution tracing.
+
+    Cached for 5 seconds — psutil calls (memory_info, virtual_memory) are
+    unnecessary on every single message and add 1-5ms of latency per dispatch.
+    """
     runtime = _CURRENT_RUNTIME
+    now = time.monotonic()
+    # Return cached snapshot if fresh (< 5s)
+    if (runtime is not None
+            and runtime._cached_snapshot is not None
+            and now - runtime._last_snapshot_at < 5.0):
+        return runtime._cached_snapshot
     if runtime is None:
         return {
             "state": RuntimeState.INIT,
@@ -1278,16 +1310,32 @@ def get_runtime_snapshot() -> dict[str, object]:
     import os
     try:
         process = psutil.Process(os.getpid())
-        ram_mb = process.memory_info().rss / 1024 / 1024
+        proc_rss_mb = process.memory_info().rss / 1024 / 1024
     except Exception:
-        ram_mb = 0.0
+        proc_rss_mb = 0.0
+    # System RAM is authoritative via psutil.virtual_memory (fast, <5ms), NOT process RSS
+    try:
+        _vm = psutil.virtual_memory()
+        sys_ram_percent = int(_vm.percent)
+        sys_ram_used_gb = round(_vm.used / (1024**3), 1)
+        sys_ram_total_gb = round(_vm.total / (1024**3), 1)
+    except Exception:
+        sys_ram_percent = None
+        sys_ram_used_gb = None
+        sys_ram_total_gb = None
 
-    return {
+    snap = {
         "state": runtime.state,
         "safety_state": runtime.safety_state,
         "channels": list(runtime.channels),
         "uptime_ms": uptime_ms,
-        "ram_usage_mb": round(ram_mb, 1),
+        # Process memory (KIO RSS) — NOT system RAM
+        "ram_usage_mb": round(proc_rss_mb, 1),
+        "process_rss_mb": round(proc_rss_mb, 1),
+        # System RAM — authoritative, fresh per snapshot
+        "system_ram_percent": sys_ram_percent,
+        "system_ram_used_gb": sys_ram_used_gb,
+        "system_ram_total_gb": sys_ram_total_gb,
         "last_error": runtime.last_error,
         "context_size": len(runtime.context_items),
         "observer_count": len(runtime.observers),
@@ -1302,6 +1350,10 @@ def get_runtime_snapshot() -> dict[str, object]:
         "browser_runtime_ready": getattr(runtime.browser_runtime, '_started', False) if runtime.browser_runtime is not None else False,
         "mcp_runtime_ready": runtime.mcp_runtime is not None,
     }
+    # Cache the snapshot for 5s to avoid repeated psutil calls
+    runtime._cached_snapshot = snap
+    runtime._last_snapshot_at = time.monotonic()
+    return snap
 
 
 
@@ -1521,6 +1573,47 @@ def start_runtime_channel(
         emit_runtime_trace("runtime_channel_stop", channel=channel_name, runtime=get_runtime_snapshot())
 
 
+def _start_watch_poller(runtime: KioRuntime) -> None:
+    """Daemon thread that polls every active release watch and pushes new
+    releases to the user out-of-band. Only starts when Telegram is configured
+    (no token = no outbound channel). A failed tick is logged and skipped."""
+    if not TELEGRAM_TOKEN:
+        logger.info("[WATCH_POLLER] no TELEGRAM_TOKEN — watch poller disabled")
+        return
+    import time as _time
+    from mini_kio.monitoring.watches import poll_watches, POLL_INTERVAL_S
+
+    def _loop():
+        logger.info("[WATCH_POLLER] started (interval=%ss)", POLL_INTERVAL_S)
+        while not runtime.shutdown_requested:
+            try:
+                poll_watches()
+            except Exception as exc:
+                logger.warning("[WATCH_POLLER] tick failed: %s", exc)
+            # The SAME outbound loop delivers due reminders — one daemon,
+            # one delivery path, two trigger types (change / time).
+            try:
+                from mini_kio.monitoring.reminders import poll_reminders
+                poll_reminders()
+            except Exception as exc:
+                logger.warning("[WATCH_POLLER] reminder tick failed: %s", exc)
+            # General proactive evaluation over canonical-graph goals: the
+            # same daemon, the same Telegram push, a different trigger
+            # (stale goal vs change vs time). Silence is a normal result.
+            try:
+                from mini_kio.monitoring.proactive import poll_proactive
+                poll_proactive()
+            except Exception as exc:
+                logger.warning("[WATCH_POLLER] proactive tick failed: %s", exc)
+            _time.sleep(POLL_INTERVAL_S)
+        logger.info("[WATCH_POLLER] stopped")
+
+    import threading as _threading
+    t = _threading.Thread(target=_loop, daemon=True, name="watch-poller")
+    t.start()
+    emit_runtime_trace("runtime_watch_poller_start", interval_s=POLL_INTERVAL_S)
+
+
 def host_runtime(runtime: KioRuntime, idle_wait_s: float = 5.0) -> None:
     """
     Keep the runtime process alive with a minimal idle host loop.
@@ -1666,6 +1759,8 @@ def run_runtime() -> None:
     if TELEGRAM_TOKEN:
         from kio_bot import run_bot
         start_runtime_channel(runtime, "telegram", run_bot)
+
+    _start_watch_poller(runtime)
 
     # Keep alive for non-blocking channels (Discord, Terminal alongside Telegram)
     host_runtime(runtime)
