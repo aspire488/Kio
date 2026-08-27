@@ -30,6 +30,8 @@ class IntentType(enum.Enum):
     MCP = "mcp"
     CREDENTIAL = "credential"
     DESKTOP_ACTION = "desktop_action"
+    UTILITY = "utility"
+    SIMULATE = "simulate"
 
 
 @dataclass

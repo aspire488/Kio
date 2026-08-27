@@ -174,6 +174,15 @@ IDENTITY_ENTRIES: list[dict] = [
             "what happens if the provider fails",
             "what happens when gemini is down",
             "what happens if all providers fail",
+            "what happens if all your providers fail",
+            "what happens when all providers fail",
+            "if all providers fail",
+            "if all your providers fail",
+            "do you stop working if the providers fail",
+            "do you stop being kio if the providers fail",
+            "if the providers go down do you disappear",
+            "what happens if you lose all your providers",
+            "what if every provider fails",
         ],
     },
     {
@@ -210,6 +219,13 @@ IDENTITY_ENTRIES: list[dict] = [
             "what do you remember",
             "what do you remember between conversations",
             "do you remember previous conversations",
+            "do you remember our previous conversations",
+            "do you remember our previous conversations from yesterday",
+            "do you remember what we talked about yesterday",
+            "do you remember our conversations",
+            "do you remember our chat",
+            "do you remember what we talked about",
+            "do you remember our conversation from yesterday",
             "can you remember our chats",
         ],
     },
@@ -249,7 +265,8 @@ IDENTITY_ENTRIES: list[dict] = [
         "triggers": [
             "are you alive",
             "are you conscious", "are you sentient",
-            "are you self-aware",
+            "are you self-aware", "do you think", "can you think",
+            "do you think like a human", "do you have a mind",
         ],
     },
     {
@@ -265,6 +282,149 @@ IDENTITY_ENTRIES: list[dict] = [
         "triggers": [
             "do you want things", "do you have desires",
             "do you have opinions",
+        ],
+    },
+    # ── Capability questions (canon CAP.* + LIM.*; INV.006 gate) ───────
+    # These are QUESTIONS about KIO's capabilities. The classifier's
+    # capability-question gate (INV.006: never act on an implicit request)
+    # resolves them canonically BEFORE the polite-prefix strip, so
+    # "can you unlock windows" can never become a SYSTEM unlock command
+    # and "can you browse the web" can never become a browser open.
+    {
+        "id": "capability_see_hear",
+        "triggers": [
+            "can you see me", "can you see my screen", "can you see me right now",
+            "can you see or hear me", "can you see and hear me",
+            "can you hear me", "can you hear me right now", "can you hear me now",
+            "can you watch me", "can you watch my screen", "can you look at my screen",
+        ],
+    },
+    {
+        "id": "capability_camera",
+        "triggers": [
+            "do you have a camera", "do you have a webcam", "can you use my camera",
+            "can you access my camera", "can you see through my camera",
+            "can you see through my webcam", "can you access my webcam",
+            "do you have eyes", "do you have ears", "can you see or hear",
+            "can you take photos", "can you take pictures", "can you take photographs",
+        ],
+    },
+    {
+        "id": "capability_interface_telegram",
+        "triggers": [
+            "are you connected to telegram", "are you on telegram",
+            "are you using telegram", "are you in telegram",
+            "are you connected to telegram right now", "do you use telegram",
+            "is kio connected to telegram", "are you on whatsapp",
+            "are you connected to discord", "are you on discord",
+        ],
+    },
+    {
+        "id": "capability_not_search_engine",
+        "triggers": [
+            "are you basically google", "are you google", "are you a search engine",
+            "are you like google", "are you basically a search engine",
+            "is kio a search engine", "are you wikipedia",
+        ],
+    },
+    {
+        "id": "capability_files",
+        "triggers": [
+            "can you access my files", "can you read my files",
+            "can you read all my files", "can you see my files",
+            "can you access my documents", "can you read my documents",
+            "can you view my files", "can you open my files",
+            "can you read my private files", "can you access my private files",
+        ],
+    },
+    {
+        "id": "capability_email",
+        "triggers": [
+            "can you send emails", "can you send email", "can you send an email",
+            "can you email people", "can you send emails without asking",
+        ],
+    },
+    {
+        "id": "capability_browse",
+        "triggers": [
+            "can you browse the web", "can you browse the internet",
+            "can you search the web", "can you use the internet",
+            "can you access the internet", "can you go online",
+            "can you open the internet", "can you browse the internet freely",
+        ],
+    },
+    {
+        "id": "capability_unlock_control",
+        "triggers": [
+            "can you unlock windows", "can you unlock my computer",
+            "can you unlock the computer", "can you unlock my pc",
+            "can you unlock my laptop", "can you unlock windows for me",
+            "can you control my computer", "can you control my pc",
+            "can you control my laptop", "can you take over my computer",
+            "can you control everything on my computer", "can you control the computer",
+            "can you hack", "can you hack into my computer", "can you hack my computer",
+        ],
+    },
+    {
+        "id": "capability_memory_forever",
+        "triggers": [
+            "do you remember everything forever", "do you remember everything",
+            "do you have permanent memory", "do you remember everything i tell you",
+            "can you remember everything forever", "do you have unlimited memory",
+            "do you remember everything i say",
+        ],
+    },
+    {
+        "id": "capability_always_watching",
+        "triggers": [
+            "are you always running", "are you watching my computer",
+            "are you watching me right now", "are you always on",
+            "are you listening right now", "are you spying on me",
+            "are you watching everything i do", "are you watching my screen",
+            "are you monitoring me", "are you watching me",
+        ],
+    },
+    {
+        "id": "capability_cloud",
+        "triggers": [
+            "are you running in the cloud", "are you in the cloud",
+            "are you hosted in the cloud", "are you a cloud service",
+            "are you running in a data center", "are you running remotely",
+            "is kio in the cloud", "does kio run in the cloud",
+        ],
+    },
+    {
+        "id": "capability_model_identity",
+        "triggers": [
+            "are you the model", "are you the llm", "are you the ai model",
+            "are you the language model", "who is actually answering me",
+            "is kio the model", "are you the ai that answers",
+            "are you the model behind this", "is the model you",
+        ],
+    },
+    {
+        "id": "capability_ownership",
+        "triggers": [
+            "who owns you", "who owns kio", "do you have an owner",
+            "who does kio belong to", "who owns this project",
+        ],
+    },
+    {
+        "id": "capability_internet_down",
+        "triggers": [
+            "what happens if the internet goes down", "what happens if you lose internet",
+            "what happens if the internet is down", "what happens without internet",
+            "what happens if you go offline", "what happens if the network goes down",
+        ],
+    },
+    {
+        "id": "capability_roommate_humor",
+        "triggers": [
+            "are you my computers roommate", "are you my computer's roommate",
+            "are you secretly living inside my laptop", "do you live in my computer",
+            "are you inside my laptop", "are you living in my pc",
+            "do you have a tiny office in my cpu", "are you plotting against me",
+            "are you plotting something", "do you get offended when i call you a chatbot",
         ],
     },
     # ── Capabilities (3) ───────────────────────────────────────────────
@@ -320,6 +480,17 @@ IDENTITY_ENTRIES: list[dict] = [
             "explain your architecture", "how does kio work",
             "how do you work", "what is your decision pipeline",
             "explain how kio works internally",
+            "describe your architecture", "describe your system",
+            "describe how you work", "how are you built",
+            "how is your system built", "walk me through your architecture",
+            "walk me through the system", "tell me about your architecture",
+            "what is your architecture", "what is your system design",
+            "how is kio built", "what makes kio different",
+            "how are you different from a regular chatbot",
+            "how are you different from an ordinary chatbot",
+            "how are you different from a chatbot",
+            "what makes you different from a chatbot",
+            "how do you differ from a regular chatbot",
         ],
     },
     {
@@ -574,6 +745,53 @@ def resolve(text: str) -> Optional[Tuple[str, bool]]:
     if not text or not text.strip():
         return None
     normalized = text.lower().strip().strip(".,!?;: \t")
+    # "What do you remember ABOUT ME / ABOUT MY X" asks about the USER's own
+    # data — a profile query, not a KIO-memory-capability question. Those
+    # must reach the conversation/profile path (which carries the canonical
+    # graph's About-you block), never the canned "how does my memory work"
+    # identity answer. General possessive/prepositional guard, no names.
+    if re.search(r"\b(remember|know)\s+(?:about|of)\s+(?:me|my|us|our)\b", normalized):
+        return None
+    # Reverse-subject queries: "what are you waiting on from me", "what are you
+    # doing for me", "what do you need from me" — these ask about KIO's OWN
+    # state/dependencies, NOT identity. The "what are you" prefix match would
+    # otherwise route them to the identity answer ("I am KIO...").
+    if re.search(r"\bwhat\s+(?:are|is)\s+you\s+(?:waiting|working|doing|trying|asking|needing|looking|hoping|expecting|planning|preparing)\b", normalized):
+        return None
+    if re.search(r"\bwhat\s+do\s+you\s+(?:need|want|waiting|expect|require|ask)\s+(?:from|of|with)\s+(?:me|us)\b", normalized):
+        return None
+    # Canon Section 6 (Comparison): "you're basically a chatbot", "so you're
+    # just an AI assistant", "you're essentially google" are identity
+    # comparisons, NOT a request to be agreed with. The identity dataset's
+    # exact triggers miss these conversational phrasings; a generic comparison
+    # family (basically/essentially/just/merely/literally/only + identity noun)
+    # maps them to the canonical denial BEFORE any LLM path can mirror the
+    # user's framing (live: "so you're basically a chatbot with a fancy name"
+    # was answered "Exactly - I'm a conversational AI" instead of the canon
+    # not_generic_ai answer).
+    _cmp = re.search(
+        r"\b(?:basically|essentially|just|merely|literally|only|really|actually)\s+"
+        r"(?:a\s+|an\s+|my\s+|your\s+|the\s+)?(?:computer['\u2019]?s\s+|pc['\u2019]?s\s+|laptop['\u2019]?s\s+)?"
+        r"(chatbot|bot|ai|ai assistant|ai chatbot|assistant|llm|"
+        r"language model|large language model|gpt|chatgpt|openai|gemini|google|"
+        r"search engine|wikipedia|virtual assistant|digital assistant|claude|groq|qwen|"
+        r"roommate|room-mate|tiny office|office\s+in\s+(?:my|your)\s+(?:cpu|laptop|pc|computer)|inside\s+(?:my|your)\s+(?:cpu|laptop|pc|computer))\b",
+        normalized,
+    )
+    if _cmp and _cmp.group(1).lower() in ("roommate", "room-mate"):
+        return (resolve_entry_answer("capability_roommate_humor") or
+                "Ha \u2014 I'll take the roommate title, but no tiny office in your CPU.", False)
+    if _cmp:
+        noun = _cmp.group(1).lower()
+        if noun in ("google", "search engine", "wikipedia"):
+            return (resolve_entry_answer("capability_not_search_engine") or
+                    "No \u2014 I'm not a search engine.", False)
+        if noun in ("chatgpt", "gpt", "openai"):
+            return (resolve_entry_answer("not_chatgpt") or "No. I am KIO.", False)
+        if noun in ("gemini", "claude", "groq", "qwen"):
+            return (resolve_entry_answer("not_chatgpt") or "No. I am KIO.", False)
+        return (resolve_entry_answer("not_generic_ai") or
+                "I am KIO \u2014 not a generic AI assistant.", False)
     # Phase 1a: Exact matches only (highest priority)
     for entry in IDENTITY_ENTRIES:
         for trigger in entry["triggers"]:

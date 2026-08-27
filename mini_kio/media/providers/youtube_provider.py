@@ -565,8 +565,12 @@ class YouTubeProvider(MediaProvider):
         if not key:
             return []
         try:
+            # NOTE: 'statistics' is NOT supported on the /search endpoint —
+            # it causes HTTP 400. Only 'snippet' is valid for search. View
+            # counts are fetched separately if needed (not required for
+            # candidate scoring which uses title/channel/description).
             params = urllib.parse.urlencode({
-                "part": "snippet,statistics",
+                "part": "snippet",
                 "type": "video",
                 "maxResults": 25,
                 "q": query,
@@ -607,10 +611,17 @@ class YouTubeProvider(MediaProvider):
             # EXPLICITLY (this is why API discovery silently went missing) but
             # never leak the key, never retry (a 429 retry storm worsens quota),
             # and keep the graceful degrade to the browser-scrape path.
+            _err_body = ""
+            try:
+                _err_body = exc.read().decode("utf-8", "replace")[:500]
+            except Exception:
+                pass
             if exc.code == 429:
                 logger.error("[YT_API_SEARCH] QUOTA_EXHAUSTED query=%s (key present, quota exceeded; falling back to browser scrape)", query)
+            elif exc.code == 400:
+                logger.warning("[YT_API_SEARCH] HTTP 400 query=%s body=%s", query, _err_body)
             else:
-                logger.warning("[YT_API_SEARCH] failed query=%s http_err=%s", query, exc.code)
+                logger.warning("[YT_API_SEARCH] failed query=%s http_err=%s body=%s", query, exc.code, _err_body)
             return []
         except Exception as exc:
             logger.warning("[YT_API_SEARCH] failed query=%s err=%s", query, exc)

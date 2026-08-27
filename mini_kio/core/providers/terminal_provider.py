@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 import time
 from typing import Any
 
@@ -37,11 +38,15 @@ class TerminalProvider(ExecutionProvider):
 
     def _run(self, command: str, **kwargs: Any) -> dict[str, Any]:
         start = time.time()
+        _run_kwargs: dict[str, Any] = dict(
+            shell=True, capture_output=True, text=True,
+            timeout=kwargs.get("timeout", 30),
+        )
+        # CREATE_NO_WINDOW prevents a visible console flash on Windows.
+        if sys.platform == "win32":
+            _run_kwargs["creationflags"] = 0x08000000
         try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                timeout=kwargs.get("timeout", 30),
-            )
+            result = subprocess.run(command, **_run_kwargs)
             elapsed = int((time.time() - start) * 1000)
             return {
                 "success": result.returncode == 0,

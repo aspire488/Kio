@@ -206,4 +206,11 @@ class TestIdentityDatasetCoverage:
             assert len(answer) >= 10
 
     def test_59_categories(self):
-        assert len(IDENTITY_ENTRIES) == 59
+        # Canonical identity dataset size. Updated when new identity families
+        # are added (was 59; +16 capability-question entries for the identity
+        # adversarial audit: senses, camera, files, email, browse, unlock/
+        # control, memory-forever, always-watching, cloud, model-identity,
+        # ownership, internet-down, roommate-humor, telegram-interface,
+        # not-search-engine, +"do you think"/"can you think" consciousness
+        # variants). Tracked so an accidental entry drop is caught.
+        assert len(IDENTITY_ENTRIES) == 75

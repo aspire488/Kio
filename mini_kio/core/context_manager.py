@@ -1,19 +1,20 @@
 """
-context_manager.py — Unified Session Context.
+context_manager.py — Canonical Session Context Manager.
 
-Single authoritative source for: active domain/entity, continuity detection,
-exchange history, topic/entity stacks, pending actions, and persistence.
-
-Replaces:
-  - SessionState.active_* / last_action / persistence
-  - ConversationContext exchange history, topic/entity stacks
-  - ContinuityResolver._state (class-level static)
-  - IntegrationAdapter._is_continuation_query (independent pronoun/reference logic)
+Single authoritative source for ALL session/continuity/conversation state.
+Consolidates and replaces:
+  - SessionState (mini_kio/llm/session_state.py)
+  - ConversationContext (mini_kio/llm/conversation_context.py)
+  - ContinuityResolver (mini_kio/core/continuity_resolver.py)
+  - MediaEntityMemory (mini_kio/media/intelligence/media_entity_memory.py)
+  - ArtifactMemory (mini_kio/media/intelligence/artifact_memory.py)
+  - MediaContext (mini_kio/media/media_context.py)
+  - IntegrationAdapter continuity logic (mini_kio/media/intelligence/integration_adapter.py)
 
 Usage:
-    ctx = get_session_context("tg_2146008061")
+    ctx = get_context_manager("tg_2146008061")
     if ctx.is_continuation(text):
-        text = ctx.resolved_text(text)
+        text = ctx.resolve_references(text)
     ctx.update(result, command, domain)
     ctx.append_exchange(user_text, reply)
 """
@@ -115,7 +116,12 @@ _KNOWN_ENTITIES = frozenset({
     "git", "docker", "kubernetes", "vscode", "chrome",
 })
 
-_MAX_EXCHANGES = 10
+# Conversation retention: a real 30-50 turn companion conversation must stay
+# coherent — KIO must remember its own opinions/statements from dozens of turns
+# back ("you said earlier that X"). 10 exchanges pruned everything older than
+# five turns and broke long-form recall. 60 retains a full active conversation
+# in-session; the LLM prompt still injects a bounded RECENT window.
+_MAX_EXCHANGES = 60
 
 # BC-5: results from cognition-only owners (conversation, identity, status,
 # operational readings) never produce an actionable referent. Their "target"
@@ -129,6 +135,12 @@ _NON_REFERENT_ACTIONS = frozenset({
     "app_inventory", "lock_state", "system", "system_status",
     "list_tabs", "greeting", "acknowledge", "capability", "capabilities",
     "recommend", "search", "information_query", "entity_query",
+    # Deterministic utility results (arithmetic, conversions, time/date)
+    # produce a NUMBER or expression, NEVER a conversational referent.
+    # Live failure: "6!" -> active_entity="6" poisoned the NEXT message's
+    # pronoun splice, turning "why did you prefer that one" into
+    # "why did you prefer 6 one" (LLM replied "I chose the sixth option").
+    "calculate", "convert", "time", "date", "weather", "utility",
 })
 
 
@@ -140,24 +152,30 @@ class PendingAction:
     executed: bool = False
 
 
-_SESSION_CONTEXTS: dict[str, "SessionContext"] = {}
+_CONTEXT_MANAGERS: dict[str, "ContextManager"] = {}
 
 _STATE_FACT_KEY = "session_context_state_json"
 _STATE_TTL_S = 3600
 
 
-def get_session_context(session_id: str) -> "SessionContext":
-    if session_id not in _SESSION_CONTEXTS:
-        _SESSION_CONTEXTS[session_id] = SessionContext(session_id=session_id)
-    return _SESSION_CONTEXTS[session_id]
+def get_context_manager(session_id: str) -> "ContextManager":
+    """Get the canonical ContextManager for a session."""
+    if session_id not in _CONTEXT_MANAGERS:
+        _CONTEXT_MANAGERS[session_id] = ContextManager(session_id=session_id)
+    return _CONTEXT_MANAGERS[session_id]
 
 
-def clear_session_context(session_id: str) -> None:
-    _SESSION_CONTEXTS.pop(session_id, None)
+def clear_context_manager(session_id: str) -> None:
+    _CONTEXT_MANAGERS.pop(session_id, None)
 
 
-class SessionContext:
-    """Per-session unified state. Single source of truth."""
+# Backward compatibility aliases
+get_session_context = get_context_manager
+clear_session_context = clear_context_manager
+
+
+class ContextManager:
+    """Per-session unified state. Single source of truth for all context."""
 
     def __init__(self, session_id: str):
         self.session_id = session_id
@@ -165,6 +183,11 @@ class SessionContext:
         self.active_entity: Optional[str] = None
         self.last_action: Optional[str] = None
         self.last_target: Optional[str] = None
+        # Instance kind of the last successful action ("tab"/"window"/""):
+        # structured metadata so a later "close it" operates on the CONCRETE
+        # instance that was created ("open a new Telegram tab" then "close
+        # it" must close that tab — never the native Telegram app).
+        self.last_instance: Optional[str] = None
         self.last_command: str = ""
         self.last_success: bool = False
         self.pending_action: Optional[PendingAction] = None
@@ -174,6 +197,16 @@ class SessionContext:
         # commands ("close both", "close those apps", "the first and second")
         # resolve to the actual targets, never to a single last-target.
         self.recent_targets: list[dict] = []
+        # Conversational pragmatics discourse state (owned by
+        # mini_kio/core/pragmatics.py): user-set style preference from
+        # meta-conversation control ("you're too formal" -> "casual"), the
+        # running social energy, the last user/KIO acts, and the last
+        # mentioned location (for "what time is it there").
+        self.register_preference: str = "auto"
+        self.social_energy: int = 0
+        self.last_user_act: str = ""
+        self.last_kio_act: str = ""
+        self.last_location: str = ""
 
         self._exchanges: list[tuple[str, str]] = []
         self._topic_stack: list[str] = []
@@ -200,6 +233,14 @@ class SessionContext:
                 self._entity_stack.append(e)
         self._exchanges.append((user_text, reply))
         self._prune_exchanges()
+        # Persist to DB so history survives process restarts
+        try:
+            from mini_kio.memory.memory_store import MemoryStore
+            ms = MemoryStore(session_id=self.session_id)
+            ms.append("user", user_text)
+            ms.append("assistant", reply)
+        except Exception:
+            pass
 
     def _prune_exchanges(self) -> None:
         while len(self._exchanges) > _MAX_EXCHANGES:
@@ -248,6 +289,55 @@ class SessionContext:
         if self._exchanges:
             return self._exchanges[-1][1]
         return None
+
+    def search_exchanges(self, topic: str, limit: int = 5) -> list[tuple[str, str]]:
+        """Search exchange history for topic-matching user statements.
+        Returns matching (user_text, kio_reply) pairs, most recent first.
+        Used for 'what did I say about X?' / 'what were we discussing?' queries."""
+        if not topic or not self._exchanges:
+            return []
+        topic_low = topic.lower().strip()
+        stop = {"the", "about", "what", "that", "this", "with", "from", "have",
+                "were", "was", "been", "being", "does", "doing", "will",
+                "would", "could", "should", "tell", "said", "asked"}
+        words = [w for w in __import__('re').findall(r'[a-z]{3,}', topic_low)
+                 if w not in stop]
+        if not words:
+            return []
+        matches: list[tuple[float, tuple[str, str]]] = []
+        for user_text, kio_reply in reversed(self._exchanges):
+            if not user_text:
+                continue
+            ul = user_text.lower()
+            score = 0.0
+            if topic_low in ul:
+                score = 1.0
+            else:
+                matched = sum(1 for w in words if w in ul)
+                if matched > 0:
+                    score = matched / len(words) * 0.8
+            if score > 0:
+                matches.append((score, (user_text, kio_reply)))
+            if len(matches) >= limit * 2:
+                break
+        matches.sort(key=lambda x: -x[0])
+        return [m[1] for m in matches[:limit]]
+
+    def recent_topics_summary(self, max_topics: int = 5) -> str:
+        """Compact summary of recent conversation topics.
+        Injected into the prompt so the LLM knows what was discussed."""
+        if not self._topic_stack:
+            return ""
+        # Deduplicate consecutive same topics
+        unique = []
+        for t in reversed(self._topic_stack):
+            if not unique or t != unique[-1]:
+                unique.append(t)
+            if len(unique) >= max_topics:
+                break
+        if not unique:
+            return ""
+        return "Recent topics: " + ", ".join(reversed(unique)) + "."
 
     @staticmethod
     def _extract_topic(text: str) -> Optional[str]:
@@ -349,7 +439,7 @@ class SessionContext:
                 if age > _STATE_TTL_S:
                     self.reset()
                     return
-                logger.info("SessionContext restored: entity=%s domain=%s age=%.0fs",
+                logger.info("ContextManager restored: entity=%s domain=%s age=%.0fs",
                             self.active_entity, self.active_domain, age)
         except Exception as e:
             logger.debug("Failed to hydrate session context: %s", e)
@@ -473,13 +563,16 @@ class SessionContext:
         return False
 
     def resolved_text(self, text: str) -> str:
+        """Backward-compat alias for resolve_references (tests + legacy callers)."""  
+        return self.resolve_references(text)
+
+    def resolve_references(self, text: str) -> str:
         """Resolve continuity references and return the modified command string.
 
-        P1.2: canonical home of contextual-reference resolution. Merged the
+        Canonical home of contextual-reference resolution. Merged the
         live pipeline resolver guards (media/transport/forget passthrough,
         "again" via runtime buffer, pronoun with last-target fallback) with
-        the pre-existing S1/S2 marker handling. S1/S2 are newly-live on the
-        pipeline path and are covered as new surface in validation.
+        the pre-existing S1/S2 marker handling.
         """
         if not text:
             return text
@@ -575,6 +668,31 @@ class SessionContext:
                 return f"{self.pending_action.action_type} {self.pending_action.query}"
             return text
 
+        # S3: affirmative + imperative pronoun ("yeah do that", "okay do it",
+        # "sure go ahead") inherits the pending action or the last successful
+        # interaction — the user is confirming the previous concrete action,
+        # not starting a fresh vague command.
+        _AFFIRM_DO_RE = re.compile(
+            r"^(?:yeah|yes|yep|yup|sure|ok|okay|alright|aight)\s+"
+            r"(?:do|go|run|make|open|close|create|search|play|show|start|launch)\s+"
+            r"(?:it|that|this)$",
+            re.I,
+        )
+        if _AFFIRM_DO_RE.match(lower):
+            if self.pending_action and not self.pending_action.executed:
+                return f"{self.pending_action.action_type} {self.pending_action.query}"
+            from mini_kio.core.runtime import get_last_successful_interaction
+            last = get_last_successful_interaction(must_have_target=False)
+            if last:
+                action = str(last.get("action", "") or "")
+                for _suffix in ("_app", "_web", "_system", "_folder"):
+                    action = action.replace(_suffix, "")
+                target = str(last.get("target", "") or "")
+                resolved = f"{action} {target}".strip()
+                if resolved:
+                    return resolved
+            return text
+
         # Power-family passthrough: "is it charging" / "how's the battery" are
         # deterministic battery queries — their referents must never be
         # rewritten by generic pronoun resolution ("it" has no app antecedent).
@@ -637,6 +755,36 @@ class SessionContext:
                 f"the {self.active_entity} app", text, flags=re.IGNORECASE, count=1,
             )
 
+        # INSTANCE-AWARE close/focus: after "open a new Telegram tab" the
+        # referent "it" means the CREATED TAB — "close it" must close that
+        # exact tab, never the native Telegram app of the same name. The last
+        # successful action's instance kind ("tab"/"window") is structured
+        # context and scopes the rewrite BEFORE generic pronoun substitution.
+        _inst_pronoun = re.match(
+            r"^(close|shut|quit|kill|end|focus|switch\s+to)\s+(?:the\s+)?"
+            r"(it|that|this)(?:\s+(?:tab|window))?\s*$",
+            lower,
+        )
+        if _inst_pronoun and self.active_entity and self.last_instance in ("tab", "window"):
+            verb = _inst_pronoun.group(1).lower()
+            entity = self.active_entity
+            # Tab instance: always tab scope ("close <entity> tab" -> close_tab).
+            if self.last_instance == "tab":
+                if verb in ("focus", "switch to"):
+                    return f"focus {entity}"
+                return f"close {entity} tab"
+            # Window instance: native apps close at app scope; webapps close
+            # their tab (window-scope browser ops aren't modeled — never a
+            # fake window close).
+            try:
+                from mini_kio.core.app_operator import _find_in_registry
+                is_native = _find_in_registry(entity) is not None
+            except Exception:
+                is_native = False
+            if verb == "close":
+                return f"close the {entity} window" if is_native else f"close {entity} tab"
+            return f"focus {entity}"
+
         # G5: pronoun → active_entity, then session last_target fallback
         # A pronoun in a QUALITY-MODIFIER construction ("make it concise",
         # "keep it short", "write it as a poem", "turn it professional") is
@@ -663,7 +811,49 @@ class SessionContext:
             lower,
         ):
             return text
-        if re.search(r"\b(it|that|this)\b", lower):
+        # DISCOURSE guard: the G5 pronoun splice exists for COMMAND
+        # referents ("open it", "play that", "close this", "focus the
+        # second one") — a pronoun anchored by an imperative/action verb. It
+        # must NEVER fire on conversational discourse ("why did you prefer
+        # that one", "would you pick it", "what about the other one", "do
+        # you still like this") — those refer to the discussion's subject
+        # and are resolved by the conversational generator with full
+        # history, not by splicing a stale command entity. Live failure:
+        # after a math turn left active_entity="6", the splice rewrote
+        # "why did you prefer that one" -> "why did you prefer 6 one" and
+        # the LLM answered "I chose the sixth option". Rule: only splice a
+        # pronoun when an ACTION VERB appears in the message (the command
+        # frame) and the message is not a discourse question about prior
+        # talk. Generic verb list, never per-phrase.
+        _COMMAND_ANCHOR_RE = re.compile(
+            r"\b(?:open|close|shut|quit|kill|end|play|pause|resume|stop|search|show|"
+            r"list|start|launch|focus|switch\s+to|navigate|go\s+to|find|get|run|"
+            r"install|uninstall|download|read|delete|rename|copy|move|take|capture|"
+            r"create|make|write|send|set|turn\s+on|turn\s+off)\b",
+            re.I,
+        )
+        _DISCOURSE_QUESTION_RE = re.compile(
+            r"\b(?:why|what|which|who|how|would|could|should|do|does|did)\b.*"
+            r"\b(it|that|this|one|ones)\b|"
+            r"\b(?:prefer|think|recommend|suggest|pick|choose|go\s+with|like|enjoy)\b.*"
+            r"\b(it|that|this|one|ones)\b|"
+            r"\b(?:instead|rather\s+than|compared\s+to|vs\.?|over)\b.*"
+            r"\b(it|that|this|one|ones)\b|"
+            r"^\s*(?:what|how)\s+about\b.*\b(it|that|this|one|ones)\b|"
+            # Media modifier commands: "turn it up", "make it louder" —
+            # "it" is the generic media object (volume/playback), NEVER a
+            # referent to splice ("turn 6 up" would be garbage).
+            r"\b(?:turn|make|set|get)\s+(?:it|that|this)\s+(?:up|down|louder|quieter|softer|higher|lower)\b"
+        )
+        # Only splice when an ACTION VERB anchors the pronoun — the command
+        # frame. A bare discourse reference ("why did you prefer that one")
+        # with no command verb is never spliced; the conversational generator
+        # resolves it from history instead.
+        if (
+            re.search(r"\b(it|that|this)\b", lower)
+            and _COMMAND_ANCHOR_RE.search(lower)
+            and not _DISCOURSE_QUESTION_RE.search(lower)
+        ):
             # BC-4: never splice a sentence-length referent. A conversational
             # question stored by mistake (or any long entity) would be injected
             # verbatim into a fresh command. Referents must look like concise
@@ -746,6 +936,12 @@ class SessionContext:
         action = result.get("action") or ""
         if action:
             self.last_action = action
+        # Remember the concrete instance kind created ("tab"/"window") so a
+        # later referent command ("close it") operates at that scope. Only
+        # successful results set it — a failed open never claims an instance.
+        if result.get("success"):
+            inst = result.get("instance") or ""
+            self.last_instance = str(inst) if str(inst) in ("tab", "window") else None
 
         if result.get("success"):
             self.pending_action = None  # mark executed
@@ -791,6 +987,11 @@ class SessionContext:
         self.last_success = False
         self.pending_action = None
         self.timestamp = 0.0
+        self.register_preference = "auto"
+        self.social_energy = 0
+        self.last_user_act = ""
+        self.last_kio_act = ""
+        self.last_location = ""
         self.clear_exchanges()
 
     # ── Internal helpers ──
@@ -820,3 +1021,6 @@ class SessionContext:
             if not _THAT_CONJUNCTION_RE.search(lower):
                 return True
         return False
+
+# Backward-compat alias
+SessionContext = ContextManager

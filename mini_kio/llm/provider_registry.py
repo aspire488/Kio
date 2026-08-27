@@ -55,9 +55,9 @@ class DiagnosticRecord:
 class ProviderPriority(int, Enum):
     GEMINI = 0
     GROQ = 1
-    CEREBRAS = 2
+    FIREWORKS = 2  # ponytail: fastest reliable first, was 4
     SAMBANOVA = 3
-    FIREWORKS = 4
+    CEREBRAS = 4  # was 2, 402/429 frequent
     HUGGINGFACE = 5
     OPENROUTER = 6
     TOGETHER_AI = 7
@@ -65,12 +65,19 @@ class ProviderPriority(int, Enum):
 
 
 _PERMANENT_ERROR_PATTERNS = (
-    "INVALID_API_KEY", "AUTH_FAILED", "PERMISSION_DENIED",
+    "INVALID_API_KEY", "AUTH_FAILED", "AUTH_ERROR", "PERMISSION_DENIED",
     "GEMINI_AUTH_ERROR", "GEMINI_NOT_CONFIGURED", "GEMINI_MODEL_NOT_FOUND",
     "GEMINI_PACKAGE", "PACKAGE_MISSING", "MODULE_NOT_FOUND",
     "HUGGINGFACE_AUTH_ERROR", "HUGGINGFACE_MODEL_NOT_FOUND", "HUGGINGFACE_NOT_CONFIGURED",
     "API_KEY_INVALID", "UNAUTHORIZED", "FORBIDDEN",
     "404", "NOT_FOUND", "INVALID_MODEL",
+    # Payment/credential misconfigurations: 401/402 mean the provider is not
+    # usable until a key is fixed — never transient, never worth retrying or
+    # walking past every call. Marking them DEAD (live: openrouter HTTP_402 and
+    # together_ai AUTH_ERROR stayed in the chain forever, wasted 1-2s per
+    # request, and cancelled the transient-failure retry because they looked
+    # non-transient — causing repeated 30s+ chain exhaustion for conversation).
+    "HTTP_401", "HTTP_402", "HTTP_403", "HTTP_404",
 )
 
 
@@ -97,11 +104,11 @@ class ProviderFailoverRegistry:
 
     COOLDOWN_DURATION_S = 60
     DEGRADE_THRESHOLD = 1
-    COOLDOWN_THRESHOLD = 3
+    COOLDOWN_THRESHOLD = 2  # was3 — enter cooldown faster to avoid wasting chain budget
 
-    COOLDOWN_RATE_LIMIT_S = 300
-    COOLDOWN_QUOTA_S = 1800
-    COOLDOWN_TIMEOUT_S = 120
+    COOLDOWN_RATE_LIMIT_S = 120  # was300 —5min is too long for transient rate limits
+    COOLDOWN_QUOTA_S = 600  # was1800 —30min is excessive; retry sooner
+    COOLDOWN_TIMEOUT_S = 60  # was120 —2min timeout cooldown is too long
 
     def __init__(self):
         self._providers: List[str] = []
@@ -238,6 +245,23 @@ class ProviderFailoverRegistry:
         if "TIMEOUT" in upper:
             return self.COOLDOWN_TIMEOUT_S
         return self.COOLDOWN_DURATION_S
+
+    def seconds_until_soonest_recovery(self) -> Optional[float]:
+        """Seconds until the cooldown provider that recovers SOONEST becomes
+        try-able again, or None when no provider is cooling down.
+
+        Lets the gateway wait for a momentary rate-limit burst to clear
+        (instead of failing instantly for the whole cooldown window).
+        """
+        now = time.time()
+        soonest = None
+        for name in self._providers:
+            if self._states.get(name) != ProviderState.COOLDOWN:
+                continue
+            until = self._cooldown_until.get(name, 0.0) - now
+            if until > 0 and (soonest is None or until < soonest):
+                soonest = until
+        return soonest
 
     def get_state(self, name: str) -> ProviderState:
         return self._states.get(name, ProviderState.DEAD)

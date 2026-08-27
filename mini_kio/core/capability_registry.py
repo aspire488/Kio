@@ -133,6 +133,53 @@ class CapabilityRegistry:
     def get_diagnostics(self) -> Dict[str, int]:
         return dict(self._diag)
 
+    def resolve(self, intent_type: "IntentType", action: str) -> Optional[str]:
+        """Map IntentType + action to capability name using dynamic registry.
+        
+        This replaces the hardcoded mapping in _CapabilityResolver.
+        """
+        from mini_kio.core.pipeline.types import IntentType
+        
+        # Built-in intent-to-capability mapping (extensible)
+        intent_map = {
+            IntentType.GREETING: "conversation",
+            IntentType.SOCIAL: "conversation",
+            IntentType.IDENTITY: "conversation",
+            IntentType.DESKTOP_OPEN: "desktop",
+            IntentType.DESKTOP_CLOSE: "desktop",
+            IntentType.SEARCH: "desktop",
+            IntentType.MEDIA_PLAY: "media",
+            IntentType.MEDIA_TRANSPORT: "media",
+            IntentType.BROWSER_FOCUS: "browser",
+            IntentType.BROWSER_TABS: "browser",
+            IntentType.BROWSER_NAVIGATE: "browser",
+            IntentType.SYSTEM: "system",
+            IntentType.OPERATIONAL: "operational",
+            IntentType.KNOWLEDGE: "knowledge",
+            IntentType.MULTI_STEP: "coordinator",
+            IntentType.ENTITY_QUERY: "media",
+            IntentType.INFORMATION: "media",
+            IntentType.CONVERSATION: "conversation",
+            IntentType.FILE: "desktop",
+            IntentType.DESKTOP_ACTION: "desktop_action",
+            IntentType.MEMORY: "memory",
+            IntentType.MCP: "mcp",
+            IntentType.CREDENTIAL: "credential",
+            IntentType.UTILITY: "utility",
+            IntentType.UNKNOWN: "conversation",
+        }
+        
+        # Check for specific action overrides
+        action_map = {
+            "search_youtube": "media",
+            "play_youtube": "media",
+        }
+        
+        if action in action_map:
+            return action_map[action]
+        
+        return intent_map.get(intent_type)
+
 
 _CAPABILITY_REGISTRY = None
 

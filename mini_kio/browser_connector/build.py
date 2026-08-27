@@ -14,4 +14,4 @@ tests/test_fix_batch_20260809b.py parses those files and asserts they equal
 this constant. Bump here FIRST, then bump the JS/manifest to match.
 """
 
-EXTENSION_BUILD = "0.3.4"
+EXTENSION_BUILD = "0.3.6"

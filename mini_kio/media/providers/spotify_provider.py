@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -529,17 +530,33 @@ class SpotifyProvider(MediaProvider):
             import subprocess
             import sys
             if sys.platform == "win32":
-                proc = subprocess.Popen(["cmd", "/c", "start", uri], shell=True)
+                # Use os.startfile — launches the URI handler without a
+                # visible console window.  Falls back to CREATE_NO_WINDOW
+                # Popen only if startfile is unavailable (it never is on
+                # modern Windows).
+                try:
+                    os.startfile(uri)
+                    proc = None
+                except Exception:
+                    _flags = 0x08000000  # CREATE_NO_WINDOW
+                    proc = subprocess.Popen(
+                        ["cmd", "/c", "start", uri],
+                        shell=False,
+                        creationflags=_flags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
             else:
                 proc = subprocess.Popen(["xdg-open", uri])
             time.sleep(1) # Give Spotify a moment to launch
-            try:
-                ret = proc.wait(timeout=2)
-                if ret != 0:
-                    logger.warning("[SPOTIFY] desktop URI process exited with code %d", ret)
-                    return False
-            except subprocess.TimeoutExpired:
-                pass
+            if proc is not None:
+                try:
+                    ret = proc.wait(timeout=2)
+                    if ret != 0:
+                        logger.warning("[SPOTIFY] desktop URI process exited with code %d", ret)
+                        return False
+                except subprocess.TimeoutExpired:
+                    pass
             # Verify Spotify process appeared after launch
             for v_attempt in range(3):
                 time.sleep(0.5)
@@ -569,7 +586,17 @@ class SpotifyProvider(MediaProvider):
             import subprocess
             import sys
             if sys.platform == "win32":
-                subprocess.Popen(["cmd", "/c", "start", uri], shell=True)
+                try:
+                    os.startfile(uri)
+                except Exception:
+                    _flags = 0x08000000  # CREATE_NO_WINDOW
+                    subprocess.Popen(
+                        ["cmd", "/c", "start", uri],
+                        shell=False,
+                        creationflags=_flags,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
             else:
                 subprocess.Popen(["xdg-open", uri])
             logger.info("[SPOTIFY] transport=%s for URI=%s", action, uri)

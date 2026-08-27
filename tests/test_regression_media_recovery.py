@@ -23,6 +23,33 @@ from mini_kio.media.media_state import MediaState, PlayerType
 
 
 # ---------------------------------------------------------------------------
+# Current-runtime regressions — target clauses and ad truthfulness
+# ---------------------------------------------------------------------------
+
+def test_context_intent_keeps_entity_when_trailing_provider_is_specified():
+    """A target phrase must never replace the requested interview entity."""
+    from mini_kio.media.intelligence.media_context_intelligence import MediaContextIntelligence
+
+    intent = MediaContextIntelligence().extract_intent(
+        "Play a Sam Altman interview on YouTube"
+    )
+
+    assert intent.topic == "sam altman interview"
+    assert intent.search_query == "sam altman interview"
+
+
+def test_context_intent_keeps_about_subject():
+    """Topical clauses still retain their semantic subject."""
+    from mini_kio.media.intelligence.media_context_intelligence import MediaContextIntelligence
+
+    intent = MediaContextIntelligence().extract_intent(
+        "Show me a documentary about coral reefs"
+    )
+
+    assert intent.topic == "coral reefs"
+
+
+# ---------------------------------------------------------------------------
 # RC1 — stale-build detection in VerifiedConnector
 # ---------------------------------------------------------------------------
 

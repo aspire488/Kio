@@ -9,7 +9,7 @@ const WS_URL = "ws://127.0.0.1:9877";
 // payload" failures. Bump together with manifest.json version AND the Python
 // constant in mini_kio/browser_connector/build.py (single source of truth;
 // keep all three in sync).
-const BUILD_VERSION = "0.3.4";
+const BUILD_VERSION = "0.3.6";
 
 let AUTH_TOKEN = "";  // Set by runtime message or storage
 
@@ -407,6 +407,62 @@ const SCRIPTS = {
     // and currentTime advanced.
     console.log('[PLAY_SCRIPT] play_succeeded (observed)');
     diag.player_status = 'playing';
+
+    // ── AD DETECTION (conservative) ──────────────────────────────────
+    // Ad DOM elements can persist in the page even after an ad finishes.
+    // We only flag as ad_playing when there is an ACTIVE, VISIBLE ad
+    // indicator — specifically a skip button that is rendered and visible.
+    // Stale/hidden ad containers do NOT constitute a live ad.
+    let _ad_detected = false;
+    try {
+      // Check for an ACTIVE skip button (only present during a live ad)
+      const _skipCandidates = document.querySelectorAll(
+        '.ytp-ad-skip-button-modern, .ytp-ad-skip-button, .ytp-skip-ad-button'
+      );
+      for (const btn of _skipCandidates) {
+        if (btn && btn.offsetHeight > 0) {
+          const style = window.getComputedStyle(btn);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            _ad_detected = true;
+            console.log('[PLAY_SCRIPT] AD_SKIP_BUTTON_VISIBLE — live ad detected');
+            break;
+          }
+        }
+      }
+      // If no skip button, check for active ad overlay that covers the player
+      if (!_ad_detected) {
+        const _overlay = document.querySelector('.ytp-ad-player-overlay');
+        if (_overlay && _overlay.offsetHeight > 0) {
+          const style = window.getComputedStyle(_overlay);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            _ad_detected = true;
+            console.log('[PLAY_SCRIPT] AD_OVERLAY_VISIBLE — live ad overlay detected');
+          }
+        }
+      }
+    } catch (_e) { /* ad detection is best-effort */ }
+
+    if (_ad_detected) {
+      console.log('[PLAY_SCRIPT] AD_DETECTED (active) — returning ad_playing status');
+      return JSON.stringify({
+        ...diag,
+        status: 'ad_playing',
+        player_status: 'ad_playing',
+        currentTime: v.currentTime,
+        duration: v.duration,
+        volume: v.volume,
+        muted: v.muted,
+        paused: v.paused,
+        ended: v.ended,
+        readyState: v.readyState,
+        _play_api_used: _hasApi,
+        _muted_play_used,
+        _audio_before_muted: _before_muted,
+        _audio_before_volume: _before_volume,
+        _audio_restored,
+      });
+    }
+
     return JSON.stringify({
       ...diag,
       status: 'playing',
@@ -781,7 +837,7 @@ const SCRIPTS = {
     // injected function cannot see the outer BUILD_VERSION const (see SCRIPTS
     // header note). Keep in sync with BUILD_VERSION above and manifest.json
     // and mini_kio/browser_connector/build.py.
-    return JSON.stringify({ build: '0.3.4' });
+    return JSON.stringify({ build: '0.3.6' });
   },
   search_results: () => {
     // MV3-safe candidate scrape for controlled YouTube search (R11).

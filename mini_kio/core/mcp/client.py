@@ -199,10 +199,17 @@ class MCPClient:
             existing_path = env.get("PYTHONPATH", "")
             if project_root not in existing_path.split(os.pathsep):
                 env["PYTHONPATH"] = project_root + (os.pathsep + existing_path if existing_path else "")
-            proc = subprocess.Popen(
-                [sys.executable, server_script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            _popen_kw: dict = dict(
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, cwd=info.working_dir or os.getcwd(),
                 env=env,
+            )
+            # CREATE_NO_WINDOW prevents the child Python process from opening
+            # a visible console window on Windows.
+            if sys.platform == "win32":
+                _popen_kw["creationflags"] = 0x08000000
+            proc = subprocess.Popen(
+                [sys.executable, server_script], **_popen_kw,
             )
             conn = _ServerConnection(proc=proc, stdout_thread=None, response_queue=None,
                                       shutdown_event=threading.Event())

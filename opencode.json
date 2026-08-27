@@ -1,6 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "lsp": true,
   "plugin": [
     "C:/Users/joelj/OneDrive/Desktop/Kio/kio_fixed_v3/kio_final/.agent-skills/ponytail/.opencode/plugins/ponytail.mjs"
-  ]
+  ],
+  "mcp": {
+    "gitnexus": {
+      "type": "local",
+      "command": [
+        "node",
+        "C:\\Users\\joelj\\OneDrive\\Desktop\\Kio\\kio_fixed_v3\\kio_final\\.gitnexus\\run.cjs",
+        "mcp"
+      ],
+      "enabled": true
+    }
+  }
 }

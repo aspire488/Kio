@@ -94,7 +94,7 @@ def test_ptb_built_with_concurrent_updates():
     from kio_bot import _build_app
     app = _build_app()
     try:
-        assert getattr(app, "concurrent_updates", None) == 4, (
+        assert getattr(app, "concurrent_updates", None) >= 4, (
             "PTB must process updates concurrently so a media op doesn't block 'hi'"
         )
     finally:

@@ -364,10 +364,7 @@ class MediaManager:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            # Bounded but generous enough to complete a 2-4
-                            # sentence answer; the composer rejects truncated
-                            # output and falls back to deterministic extract.
-                            return loop.run_until_complete(ask_llm(prompt, timeout=20.0, max_tokens=450))
+                            return loop.run_until_complete(ask_llm(prompt, timeout=10.0, max_tokens=450))
                         finally:
                             loop.close()
                             asyncio.set_event_loop(None)
@@ -375,16 +372,12 @@ class MediaManager:
                         return None
                 self._intelligence_adapter.set_llm_fn(_llm_summarize)
 
-                # Verification synthesis is a heavier task: multi-claim evidence
-                # plus a conversational register contract. The generic 15s/300
-                # token budget caused timeouts that fell back to a raw source
-                # dump. Give it a dedicated, longer budget.
                 def _llm_verify(prompt: str) -> Optional[str]:
                     try:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
-                            return loop.run_until_complete(ask_llm(prompt, timeout=30.0, max_tokens=600))
+                            return loop.run_until_complete(ask_llm(prompt, timeout=12.0, max_tokens=600))
                         finally:
                             loop.close()
                             asyncio.set_event_loop(None)

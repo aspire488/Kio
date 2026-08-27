@@ -229,14 +229,23 @@ class KnowledgeRouter:
         if not self.is_knowledge_query(query):
             return None
 
-        # Tier 1: External Search Providers
-        # Try DuckDuckGo
-        result = duckduckgo_provider.search(query)
-        if result:
-            logger.info("[RETRIEVAL_SOURCE] duckduckgo (query=%s)", query)
-            return result
+        text = query.strip()
 
-        # Tier 3: Wikipedia (Deterministic Topic extraction fallback)
+        # Tier 1: External Search Providers — try all configured providers
+        # before falling back to Wikipedia as the evergreen safety net.
+        for name in ["Exa", "Tavily", "DuckDuckGo"]:
+            fn = _PROVIDER_DISPATCH.get(name)
+            if not fn:
+                continue
+            try:
+                result = fn(text)
+                if result:
+                    logger.info("[RETRIEVAL_SOURCE] %s (query=%s)", name.lower(), query)
+                    return result
+            except Exception:
+                logger.debug("[KNOWLEDGE_ROUTER] %s failed for '%s'", name, text, exc_info=True)
+
+        # Tier 2: Wikipedia (Deterministic Topic extraction fallback)
         # We try Wikipedia on the full query first, then on extracted topic
         result = fetch_summary(query)
         if result:
@@ -264,12 +273,17 @@ class KnowledgeRouter:
         sources: List[SearchSource] = []
 
         # Collect results from providers for consensus
-        
-        # DuckDuckGo
-        res = duckduckgo_provider.search(text)
-        if res:
-            logger.debug("knowledge_router: collected from duckduckgo for '%s'", text)
-            sources.append(SearchSource(name="DuckDuckGo", url=None, content=res))
+        for name in ["Exa", "Tavily", "DuckDuckGo"]:
+            fn = _PROVIDER_DISPATCH.get(name)
+            if not fn:
+                continue
+            try:
+                res = fn(text)
+                if res:
+                    logger.debug("knowledge_router: collected from %s for '%s'", name.lower(), text)
+                    sources.append(SearchSource(name=name, url=None, content=res))
+            except Exception:
+                logger.debug("knowledge_router: %s failed for '%s'", name, text, exc_info=True)
 
         if not sources:
             logger.debug("knowledge_router: no freshness results for '%s'", query)

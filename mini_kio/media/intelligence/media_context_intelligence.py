@@ -628,15 +628,13 @@ class MediaContextIntelligence:
                     return " ".join(_pf[:3])
             except Exception:
                 pass
-        # No preference data — use mode-appropriate generic query
-        if intent.media_mode == MediaMode.WATCH:
-            return "interesting video to watch"
-        if intent.media_mode == MediaMode.LISTEN:
-            return "popular music"
-        if intent.media_mode == MediaMode.BACKGROUND:
-            return "background music"
-        if intent.mood != Mood.UNKNOWN:
-            return _MOOD_SEARCH.get(intent.mood, ["popular music"])[0]
+        # No preference data — use the user's own words from raw_text.
+        # NEVER insert hardcoded generic queries like "Popular Songs".
+        # The user's utterance IS the best signal we have for discovery.
+        if intent.raw_text and intent.raw_text.strip():
+            return intent.raw_text.strip()
+        # Truly empty — return empty string; callers MUST handle this
+        # by using the original user request as the search query.
         return ""
     
     def store_recommendations(

@@ -1,0 +1,157 @@
+{
+  "metadata": {
+    "started_at": "2026-08-21T04:48:11.350604+00:00",
+    "bot_token_prefix": "89358723",
+    "bot_username": "KIO_Runtime_bot",
+    "telethon_user_id": 2146008061
+  },
+  "turns": [
+    {
+      "test_id": "A1",
+      "category": "normal_conversation",
+      "user_message": "What is KIO?",
+      "bot_reply": "KIO — Kernel for Intelligent Orchestration.\n\nA personal operating companion built by Joel.\n\nI help with desktop automation, system operations and conversational assistance.",
+      "latency_ms": 2164.7,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:15.092555+00:00"
+    },
+    {
+      "test_id": "B1",
+      "category": "continuity",
+      "user_message": "What kind of things can you actually do?",
+      "bot_reply": "Hold the door open for someone.",
+      "latency_ms": 10862.3,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:27.467575+00:00"
+    },
+    {
+      "test_id": "B2",
+      "category": "continuity",
+      "user_message": "What is the weather like today?",
+      "bot_reply": "I can't check live weather from this machine right now — no weather service is connected.",
+      "latency_ms": 2173.2,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:31.149926+00:00"
+    },
+    {
+      "test_id": "B3",
+      "category": "continuity",
+      "user_message": "Going back to what you said about capabilities, what is your most important one?",
+      "bot_reply": "I don't have a record of discussing",
+      "latency_ms": 12607.8,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:45.260812+00:00"
+    },
+    {
+      "test_id": "C1",
+      "category": "personal_context",
+      "user_message": "What do you know about me?",
+      "bot_reply": "Right now, you're an engineering",
+      "latency_ms": 4241.0,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:51.014899+00:00"
+    },
+    {
+      "test_id": "C2",
+      "category": "personal_context",
+      "user_message": "What am I currently studying?",
+      "bot_reply": "You're an engineering student in your third semester at SCMS College of Engineering, with a current CGPA of 8.13.",
+      "latency_ms": 4251.5,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:48:56.776197+00:00"
+    },
+    {
+      "test_id": "C3",
+      "category": "personal_context",
+      "user_message": "What have I been working on lately?",
+      "bot_reply": "You've been working on the , waiting for an opencode review, and also on the Aura integration layer. You also mentioned wanting to drop the whole planner idea.",
+      "latency_ms": 4248.1,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:02.527900+00:00"
+    },
+    {
+      "test_id": "D1",
+      "category": "kio_identity",
+      "user_message": "Are you just a chatbot?",
+      "bot_reply": "I am KIO — a personal operating companion built by Joel.\n\nI am not a generic AI assistant, not a chatbot, not a language model, and not an LLM.\n\nI am a local desktop orchestration runtime with a specific architecture, persistent identity, and deterministic execution capabilities.",
+      "latency_ms": 2173.4,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:06.201551+00:00"
+    },
+    {
+      "test_id": "E1",
+      "category": "runtime_awareness",
+      "user_message": "KIO health",
+      "bot_reply": "KIO's healthy and running normally.",
+      "latency_ms": 2194.0,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:09.905488+00:00"
+    },
+    {
+      "test_id": "E2",
+      "category": "runtime_awareness",
+      "user_message": "How much RAM am I using?",
+      "bot_reply": "RAM usage is 67% (10.2 GB of 15.2 GB).",
+      "latency_ms": 4393.0,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:15.810832+00:00"
+    },
+    {
+      "test_id": "G1",
+      "category": "personality",
+      "user_message": "What do you think about AI replacing developers?",
+      "bot_reply": "AI is a tool — a powerful one with meaningful limitations.\n\nKIO's perspective on AI:\n- AI models are execution resources, not identities.\n- AI should assist human judgment, not replace it.\n- Deterministic safety boundaries are essential.\n- Transparency about capabilities and limits builds trust.\n- The most dangerous AI claim is the one that sounds confident but is wrong.\n\nKIO does not believe AI should be autonomous, conscious, or unsupervised in critical decisions. KIO exists to help one person work better — not to make decisions for them.\n\nInspiration from Claude's approach to honesty and from Jensen Huang's engineering discipline shapes KIO's design philosophy, but KIO's relationship with AI is practical and bounded.",
+      "latency_ms": 2174.4,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:19.487177+00:00"
+    },
+    {
+      "test_id": "H1",
+      "category": "response_continuity",
+      "user_message": "Tell me about the KIO project architecture and what makes it different from a regular chatbot",
+      "bot_reply": "KIO's architecture integrates a semantic graph for persistent memory",
+      "latency_ms": 8421.8,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:49:29.414049+00:00"
+    },
+    {
+      "test_id": "I1",
+      "category": "continuity_recall",
+      "user_message": "What were we discussing earlier about your capabilities?",
+      "bot_reply": "We covered that I keep a semantic‑graph memory of our talks, can issue commands through my system but don’t actually click, type, or open files for you, and I never fabricate links, personal experiences, or user details.",
+      "latency_ms": 35566.3,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:50:06.491405+00:00"
+    },
+    {
+      "test_id": "J1",
+      "category": "normal_conversation",
+      "user_message": "Thanks KIO, that is all for now",
+      "bot_reply": "Alright, talk later.",
+      "latency_ms": 4287.7,
+      "status": "PASS",
+      "status_reason": "reply_received",
+      "sent_at": "2026-08-21T04:50:12.282722+00:00"
+    }
+  ],
+  "summary": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0,
+    "errors": 0,
+    "completed_at": "2026-08-21T04:50:13.798952+00:00"
+  }
+}

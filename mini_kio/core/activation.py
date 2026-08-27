@@ -398,12 +398,62 @@ def prepare_activation_groundwork() -> dict[str, object]:
     return {"camera_observer": camera, "activation": snapshot, "camera": cam_snap}
 
 
+# ── Away-event accumulation ──────────────────────────────────────────────
+# While the user is away (IDLE state), meaningful events accumulate here.
+# On return (ACTIVE transition), the accumulated events are surfaced.
+# This is NOT a new store — it's a transient buffer that lives in memory
+# and is cleared after being surfaced.
+_AWAY_EVENTS: list[dict] = []
+_AWAY_EVENT_LIMIT = 10
+
+
+def record_away_event(source: str, description: str, *,
+                      urgency: str = "medium", metadata: dict | None = None) -> None:
+    """Record a meaningful event that occurred while the user was away.
+    Called by watchers, reminders, workflow completions, system events, etc.
+    Events accumulate until the user returns, then get surfaced."""
+    runtime = _runtime()
+    if runtime is None:
+        return
+    # Only accumulate when user is not actively engaged
+    if runtime.activation_state == ActivationState.ACTIVE:
+        return
+    import datetime as _dt
+    _AWAY_EVENTS.append({
+        "source": source,
+        "description": description,
+        "urgency": urgency,
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "metadata": metadata or {},
+    })
+    # Bounded: never accumulate too many
+    if len(_AWAY_EVENTS) > _AWAY_EVENT_LIMIT:
+        _AWAY_EVENTS.pop(0)
+
+
+def consume_away_events() -> list[dict]:
+    """Retrieve and clear accumulated away events.
+    Called when the user returns (ACTIVE transition) so KIO can surface
+    meaningful activity that occurred while they were away."""
+    events = list(_AWAY_EVENTS)
+    _AWAY_EVENTS.clear()
+    return events
+
+
+def has_away_events() -> bool:
+    """Check if there are pending away events to surface."""
+    return len(_AWAY_EVENTS) > 0
+
+
 __all__ = [
     "ActivationState",
     "can_accept_activation_signal",
+    "consume_away_events",
     "force_release_activation",
     "get_activation_snapshot",
+    "has_away_events",
     "prepare_activation_groundwork",
+    "record_away_event",
     "register_activation_observer",
     "release_activation",
     "submit_activation_signal",

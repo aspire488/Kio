@@ -206,7 +206,7 @@ def _system_metrics() -> dict[str, Any]:
         "gpu": None,
     }
     try:
-        out["cpu"] = int(psutil.cpu_percent(interval=0.4))
+        out["cpu"] = int(psutil.cpu_percent(interval=0.1))  # ponytail: 0.1s vs 0.4s, RAM still fast but CPU sampled
     except Exception:
         pass
     try:
@@ -1170,25 +1170,102 @@ def _format_app_installed(target: str) -> str:
     return f"I couldn't find {app} installed on your computer."
 
 
+# Everyday-work apps KIO can name specifically. The answer NEVER invents an
+# app: each candidate is kept only when it actually appears in the real
+# inventory, so the machine stays the source of truth. Short exact-ish names
+# win over long installer/package labels ("Git" over "Git Release Notes").
+_USEFUL_APP_KEYWORDS = (
+    "word", "excel", "powerpoint", "outlook", "onenote", "teams",
+    "code", "visual studio", "vscode", "chrome", "edge", "firefox",
+    "brave", "telegram", "whatsapp", "spotify", "discord", "slack",
+    "calculator", "camera", "notepad", "paint", "photos", "vlc",
+    "snipping", "winrar", "zoom", "skype", "obs", "audacity", "gimp",
+    "github", "git", "python", "node", "docker", "figma", "blender",
+    "canva", "mail", "calendar", "store", "settings",
+)
+
+# Raw inventory display cleanup: registry/package stems often come lowercase
+# or mangled ("notepad", "mspaint", "SnippingTool", "ms-teams"). These map
+# to the natural product name for the composed answer only.
+_USEFUL_APP_DISPLAY = {
+    "notepad": "Notepad",
+    "mspaint": "Paint",
+    "snippingtool": "Snipping Tool",
+    "ms-teams": "Teams",
+    "code": "VS Code",
+    "calc": "Calculator",
+    "winword": "Word",
+    "excel": "Excel",
+    "powerpnt": "PowerPoint",
+}
+
+# Noisy installer/package labels that match a keyword but are NOT everyday
+# apps — never shown in the curated part of the answer.
+_USEFUL_APP_NOISE = (
+    "release notes", "additional tools", "install", "updater", "update",
+    "redistribut", "runtime", "sdk", "offers", "documentation", "help",
+    "manual", "uninstall", "report", "crash", "debug", "wizard", "trial",
+    "sample", "template", "readme", "icon", "removal", "repair",
+)
+
+
 def _format_app_inventory() -> str:
     """Installed-app inventory from authoritative Windows sources.
 
     Generic (no curated app list): Uninstall registry + Start Menu + AppX
-    aliases. A bounded sample is shown naturally; the count is real.
+    aliases. The response is COMPOSED, not dumped: real machine state feeds a
+    KIO-style answer that names useful everyday apps (only when actually
+    present), gives the true total, and offers the full list on request.
     """
     from mini_kio.core.app_operator import list_installed_apps
-    apps = list_installed_apps(60)
+    apps = list_installed_apps(250)
     if not apps:
         return "I can't read your installed apps right now."
-    shown = apps[:14]
-    sample = ", ".join(shown)
     total = len(apps)
-    if total > len(shown):
+    # Family-group the matches: several installed labels can share one product
+    # ("Git", "Git Bash", "Git CMD", "Git GUI") — the SHORTEST name of each
+    # family wins, so the answer names "Git" once, never four entries.
+    # Core everyday apps are ordered first; the rest fill after them.
+    _core_first = (
+        "word", "excel", "powerpoint", "outlook", "teams", "chrome",
+        "edge", "firefox", "brave", "telegram", "whatsapp", "spotify",
+        "discord", "slack", "calculator", "camera", "notepad", "paint",
+        "photos", "vlc", "snipping", "winrar", "zoom", "code",
+    )
+    by_family: dict[str, str] = {}
+    for app in apps:
+        low = app.lower()
+        if any(nz in low for nz in _USEFUL_APP_NOISE):
+            continue
+        for kw in _USEFUL_APP_KEYWORDS:
+            if kw in low:
+                prev = by_family.get(kw)
+                if prev is None or len(app) < len(prev):
+                    by_family[kw] = app
+                break
+    if by_family:
+        ordered = [k for k in _core_first if k in by_family]
+        ordered += [k for k in _USEFUL_APP_KEYWORDS if k in by_family and k not in ordered]
+        named = [by_family[k] for k in ordered][:12]
+        named = [_USEFUL_APP_DISPLAY.get(n.lower(), n) for n in named]
+    else:
+        named = []
+    if named:
+        shown = ", ".join(named)
+        if total <= len(named):
+            return f"You have {total} apps installed: {shown}."
         return (
-            f"You've got quite a few apps installed. A sample: {sample}, "
-            f"and about {total - len(shown)} more."
+            f"You have quite a few installed ({total} apps). The useful ones "
+            f"I found: {shown}, plus a bunch of developer and system "
+            f"utilities. Want the full list?"
         )
-    return f"You've got these apps installed: {sample}."
+    shown = ", ".join(apps[:12])
+    if total <= 12:
+        return f"You have {total} apps installed: {shown}."
+    return (
+        f"You've got {total} apps installed. Here are some of them: "
+        f"{shown}, and more. Want the full list?"
+    )
 
 
 def _format_system_summary() -> str:

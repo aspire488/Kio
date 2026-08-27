@@ -30,6 +30,65 @@ from mini_kio.core.command_router import route
 from mini_kio.core.config import TELEGRAM_TOKEN, TELEGRAM_PROXY, ALLOWED_USER_IDS
 from mini_kio.core.runtime import bootstrap_runtime
 
+# Per-session message ordering: prevent stale responses from leaking.
+import threading
+_session_locks = {}
+_session_counter = {}
+_session_completed = {}
+
+# Concurrency isolation: long-running operations (media, document creation)
+# run on a dedicated thread pool so short operations (chat, status) are never
+# blocked by a slow media verification or LLM content generation.
+import concurrent.futures
+_LONG_OP_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="kio-long",
+)
+# Fast-path pool: greetings, acknowledgements, simple commands that must
+# NEVER be blocked by a slow media/LLM operation in the long pool.
+_FAST_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="kio-fast",
+)
+
+# Deterministic fast-path patterns: messages matching these are guaranteed
+# to complete without LLM/media/browser and must never wait behind slow work.
+_FAST_PATH_PATTERNS = frozenset({
+    "hi", "hey", "hello", "yo", "sup", "hii", "heyy",
+    "thanks", "thank you", "ty", "thx", "thankyou",
+    "ok", "okay", "k", "cool", "nice", "got it", "alright",
+    "pause", "pause it", "pause that", "pause the music", "pause the video",
+    "resume", "resume it", "resume that", "unpause",
+    "stop", "stop it", "stop playing", "stop that",
+    "what is playing", "what's playing", "now playing", "what is playing?", "what's playing?",
+    "what's playing now", "what is playing now",
+})
+# Prefixes that indicate a fast-path command (e.g., "pause it" -> "pause" prefix)
+_FAST_PATH_PREFIXES = (
+    "hi ", "hey ", "hello ",
+    "pause ", "resume ", "stop ",
+    "what is playing ", "what's playing ",
+)
+
+
+def _is_fast_path(text: str) -> bool:
+    """Deterministic fast-path check: messages that complete without LLM/media.
+    Must be O(1) and never block."""
+    t = text.strip().lower()
+    if not t:
+        return False
+    # Exact match
+    if t in _FAST_PATH_PATTERNS:
+        return True
+    # Prefix match (strip punctuation)
+    t_clean = t.rstrip(".!?;:,")
+    if t_clean in _FAST_PATH_PATTERNS:
+        return True
+    for pfx in _FAST_PATH_PREFIXES:
+        if t_clean.startswith(pfx):
+            return True
+    return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,9 +139,42 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     command = (update.message.text or "/status").split()[0].split("@")[0]
     logger.info(f"[TELEGRAM] uid={user_id} cmd={command!r}")
+    # Per-session sequence tracking (same as handle_message - ponytail: minimal fix for crash)
+    if user_id not in _session_locks:
+        _session_locks[user_id] = threading.Lock()
+        _session_counter[user_id] = 0
+        _session_completed[user_id] = 0
+    _slock = _session_locks[user_id]
+    _slock.acquire()
     try:
-        reply = await asyncio.to_thread(route, command, user_id)
-        logger.info(f"[TELEGRAM_REPLY] uid={user_id} reply={reply!r}")
+        _session_counter[user_id] += 1
+        my_seq = _session_counter[user_id]
+    finally:
+        _slock.release()
+    try:
+        # Operational commands are deterministic and fast — use fast pool
+        reply = await asyncio.get_event_loop().run_in_executor(
+            _FAST_POOL, route, command, user_id,
+        )
+        # Discard stale: if a newer message arrived during route()
+        # CRITICAL: failure responses are NEVER stale — the user needs to
+        # know that an action failed, even if newer commands arrived.
+        _slock.acquire()
+        try:
+            cur = _session_counter.get(user_id, 0)
+            done = _session_completed.get(user_id, 0)
+            _is_failure = reply and (
+                reply.startswith("I couldn't") or reply.startswith("I don't")
+                or "failed" in reply.lower() or "error" in reply.lower()
+                or "nothing" in reply.lower()
+            )
+            if my_seq < cur and done < cur and not _is_failure:
+                logger.info(f"[TELEGRAM_STALE] uid={user_id} seq={my_seq}<{cur} discarded")
+                return
+            _session_completed[user_id] = max(done, my_seq)
+        finally:
+            _slock.release()
+        logger.info(f"[TELEGRAM_REPLY] uid={user_id} seq={my_seq} reply={reply!r}")
         await update.message.reply_text(reply)
     except BaseException as exc:
         logger.exception(f"[TELEGRAM] operational handler error: {exc}")
@@ -126,14 +218,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f"[TELEGRAM] uid={user_id} cmd={command!r}")
     await update.message.chat.send_action("typing")
 
+    # Per-session sequence tracking
+    if user_id not in _session_locks:
+        _session_locks[user_id] = threading.Lock()
+        _session_counter[user_id] = 0
+        _session_completed[user_id] = 0
+    _slock = _session_locks[user_id]
+    _slock.acquire()
+    try:
+        _session_counter[user_id] += 1
+        my_seq = _session_counter[user_id]
+    finally:
+        _slock.release()
+
     # Lightweight round-trip diagnostic (no message secrets): proves
     # update received -> routed -> response generated -> response sent.
     from mini_kio.core.runtime import emit_runtime_trace
     _rt_start = time.monotonic()
+    # Concurrency: fast-path messages (hi/hello/thanks/pause/resume/stop) go to
+    # a DEDICATED fast pool so they NEVER wait behind slow media/LLM work.
+    # Long ops go to the slow pool. Default pool is for everything else.
+    _is_fast = _is_fast_path(command)
+    _LONG_KEYWORDS = (
+        "play", "next", "prev", "volume",
+        "create", "make", "generate", "write", "open chrome", "open edge",
+        "browse", "search", "news", "weather",
+    )
+    _use_long_pool = not _is_fast and any(kw in command.lower() for kw in _LONG_KEYWORDS)
     try:
-        reply = await asyncio.to_thread(route, command, user_id)
+        # Queue wait: measure time from handler entry to pool dispatch
+        _t_queue_start = time.monotonic()
+        if _is_fast:
+            # Fast path: dedicated pool, never blocked by slow work
+            reply = await asyncio.get_event_loop().run_in_executor(
+                _FAST_POOL, route, command, user_id,
+            )
+        elif _use_long_pool:
+            reply = await asyncio.get_event_loop().run_in_executor(
+                _LONG_OP_POOL, route, command, user_id,
+            )
+        else:
+            reply = await asyncio.to_thread(route, command, user_id)
         _rt_route_ms = int((time.monotonic() - _rt_start) * 1000)
-        logger.info(f"[TELEGRAM_REPLY] uid={user_id} reply={reply!r}")
+        _queue_ms = int((time.monotonic() - _t_queue_start) * 1000) - _rt_route_ms
+        # Negative queue means dispatch was instant (thread available immediately)
+        _queue_ms = max(0, _queue_ms)
+        # Discard stale: if a newer message arrived during route()
+        # CRITICAL: failure responses are NEVER stale — the user needs to
+        # know that an action failed, even if newer commands arrived.
+        _slock.acquire()
+        try:
+            cur = _session_counter.get(user_id, 0)
+            done = _session_completed.get(user_id, 0)
+            _is_failure = reply and (
+                reply.startswith("I couldn't") or reply.startswith("I don't")
+                or "failed" in reply.lower() or "error" in reply.lower()
+                or "nothing" in reply.lower()
+            )
+            if my_seq < cur and done < cur and not _is_failure:
+                logger.info(f"[TELEGRAM_STALE] uid={user_id} seq={my_seq}<{cur} discarded")
+                return
+            _session_completed[user_id] = max(done, my_seq)
+        finally:
+            _slock.release()
+        logger.info(f"[TELEGRAM_REPLY] uid={user_id} seq={my_seq} reply={reply!r}")
         sent = await update.message.reply_text(reply)
         _rt_total_ms = int((time.monotonic() - _rt_start) * 1000)
         emit_runtime_trace(
@@ -142,6 +290,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update_id=getattr(update, "update_id", None),
             route_ms=_rt_route_ms,
             total_ms=_rt_total_ms,
+            queue_ms=_queue_ms if '_queue_ms' in dir() else 0,
+            pool="fast" if _is_fast else ("long" if _use_long_pool else "default"),
             reply_len=len(reply),
             send_ok=bool(sent is not None),
         )
@@ -198,7 +348,7 @@ def _build_app() -> Application:
         # answered while playback is being resolved. The connector serializes
         # extension commands on its single WS loop, so concurrent callers only
         # interleave there — no shared-state corruption.
-        .concurrent_updates(4)
+        .concurrent_updates(8)  # was 4 — allow more concurrent Telegram messages
     )
     if TELEGRAM_PROXY:
         logger.info("[TELEGRAM_PROXY] configured: %s", TELEGRAM_PROXY)
@@ -330,4 +480,12 @@ def run_bot(runtime=None) -> None:
 
 if __name__ == "__main__":
     from mini_kio.core.runtime import run_runtime
-    run_runtime()
+    from mini_kio.core.single_instance import acquire_runtime_owner, release_runtime_owner
+
+    if not acquire_runtime_owner():
+        logger.error("[LIFECYCLE] startup refused: another KIO runtime is active")
+        raise SystemExit(2)
+    try:
+        run_runtime()
+    finally:
+        release_runtime_owner()

@@ -212,9 +212,15 @@ class ClassificationResult:
 def classify_topic(query: str) -> ClassificationResult:
     q = query.lower().strip()
 
-    # 1. hard lock check (exact substring)
+    # 1. hard lock check (exact substring; short keys need word boundaries so
+    # "dc" never hard-locks "education", "producing", etc. — same general
+    # short-keyword rule as the keyword scoring below)
     for entity, locked_topic in _HARD_LOCK.items():
-        if entity in q:
+        if " " in entity or len(entity) > 2:
+            _locked_hit = entity in q
+        else:
+            _locked_hit = re.search(rf"\b{re.escape(entity)}\b", q) is not None
+        if _locked_hit:
             return ClassificationResult(
                 topic=locked_topic,
                 confidence=1.0,
@@ -228,7 +234,18 @@ def classify_topic(query: str) -> ClassificationResult:
 
     for topic, kw_set in _TOPIC_KEYWORDS.items():
         for kw in kw_set:
-            if kw in q:
+            # Short single-token keywords ("ep", "mv", "dc", "f1") must match
+            # on WORD BOUNDARIES, never as substrings of unrelated words. Live
+            # bug: the MUSIC keyword "ep" (extended play) matched inside
+            # "independEPence" and misclassified "Which country is celebrating
+            # independence day today" as MUSIC — which the current-info
+            # rewrite then turned into a music-tour search. "ep" as a real
+            # word ("new EP", "this ep") still matches via \bep\b.
+            if " " in kw or len(kw) > 2:
+                _matched = kw in q
+            else:
+                _matched = re.search(rf"\b{re.escape(kw)}\b", q) is not None
+            if _matched:
                 # multi-word phrases score higher
                 weight = 1.0 + (kw.count(" ") * 0.5)
                 scores[topic] += weight

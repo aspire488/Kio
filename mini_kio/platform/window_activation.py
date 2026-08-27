@@ -37,9 +37,22 @@ _GetWindowTextLengthW = _user32.GetWindowTextLengthW
 _GetWindowTextW = _user32.GetWindowTextW
 _GetWindowLongW = _user32.GetWindowLongW
 
+# Foreground-lock workaround bindings (taskbar-flashing fix)
+_keybd_event = _user32.keybd_event
+_SetWindowPos = _user32.SetWindowPos
+
 # Window style constants
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x00000080
+
+# SetWindowPos constants
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_SHOWWINDOW = 0x0040
+_KEYEVENTF_KEYUP = 0x0002
+_VK_MENU = 0x12
 
 
 # ── Internal helpers ──────────────────────────────────────────────
@@ -64,8 +77,21 @@ def _find_windows_for_pid(pid: int) -> List[int]:
 
 
 def _force_foreground(hwnd: int) -> None:
-    """Bring a window to foreground, working around Windows foreground lock
-    by attaching to the foreground thread's input queue."""
+    """Bring a window to the SCREEN foreground (never just the taskbar).
+
+    Windows refuses SetForegroundWindow for a process that does not hold the
+    foreground activation lock — the classic symptom is the target app only
+    BLINKING in the taskbar instead of appearing. The canonical workaround
+    sequence:
+      1. restore from minimized + show the window
+      2. attach our input queue to the foreground thread (when different)
+      3. simulate a user ALT keystroke — the OS grants foreground privilege
+         only to the process "receiving input", and a synthetic ALT press
+         releases that lock
+      4. SetForegroundWindow + BringWindowToTop
+      5. force the z-order to TOPMOST then release it, guaranteeing the
+         window is drawn above every other window
+    """
     fore_hwnd = _GetForegroundWindow()
     if fore_hwnd == hwnd:
         return
@@ -87,8 +113,25 @@ def _force_foreground(hwnd: int) -> None:
         if _IsIconic(hwnd):
             _ShowWindow(hwnd, SW_RESTORE)
         _ShowWindow(hwnd, SW_SHOW)
-        _SetForegroundWindow(hwnd)
+        # Foreground-lock workaround: a synthetic ALT press makes the system
+        # believe the user is switching apps, releasing the activation lock
+        # so SetForegroundWindow succeeds (taskbar-flashing fix).
+        try:
+            _keybd_event(_VK_MENU, 0, 0, 0)
+            _SetForegroundWindow(hwnd)
+            _keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, 0)
+        except Exception:
+            _SetForegroundWindow(hwnd)
         _BringWindowToTop(hwnd)
+        # Force the window above everything, then release TOPMOST so it is
+        # simply the foreground window (not pinned on top forever).
+        try:
+            _SetWindowPos(hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                          _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW)
+            _SetWindowPos(hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0,
+                          _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW)
+        except Exception:
+            pass
     finally:
         if attached:
             try:

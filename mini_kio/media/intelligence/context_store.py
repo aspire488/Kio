@@ -2,7 +2,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from mini_kio.media.intelligence.media_intelligence_models import EventRecord, ArtifactRecord, TopicType
+from mini_kio.media.intelligence.media_intelligence_models import EventRecord, ArtifactRecord, RelationshipRecord, TopicType
 
 
 MAX_ENTRIES = 50
@@ -34,6 +34,7 @@ class ContextStore:
         # typed shortcut stores
         self.events: list[EventRecord] = []
         self.artifacts: list[ArtifactRecord] = []
+        self.relationships: list[RelationshipRecord] = []
         self.topics: list[tuple[TopicType, float, float]] = []  # (topic, confidence, timestamp)
 
     # ── generic store ─────────────────────────────────────────────────────────
@@ -61,6 +62,12 @@ class ContextStore:
             if e.key == key:
                 return e
         return None
+
+    def remove(self, key: str) -> None:
+        """Drop an entry by key (claim-store lifecycle: consumed claims are
+        removed so a later probe cannot resurrect an old conversation's
+        proposition)."""
+        self._store = [e for e in self._store if e.key != key]
 
     def get_value(self, key: str, default: Any = None) -> Any:
         e = self.get(key)
@@ -92,6 +99,68 @@ class ContextStore:
         if len(self.artifacts) >= self.max_entries:
             self.artifacts.pop(0)
         self.artifacts.append(artifact)
+
+    def add_relationship(self, rel: RelationshipRecord) -> None:
+        """Store a semantic relationship triple, deduped by
+        (subject, predicate, object); a higher-confidence record replaces the
+        older one (newer evidence wins at equal confidence)."""
+        if not rel.is_valid():
+            return
+        for i, r in enumerate(self.relationships):
+            if (
+                r.subject.lower() == rel.subject.lower()
+                and r.predicate == rel.predicate
+                and r.object.lower() == rel.object.lower()
+            ):
+                if rel.confidence > r.confidence or (
+                    rel.confidence == r.confidence and rel.timestamp >= r.timestamp
+                ):
+                    self.relationships[i] = rel
+                return
+        if len(self.relationships) >= self.max_entries:
+            self.relationships.pop(0)
+        self.relationships.append(rel)
+
+    def find_relationships(
+        self,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+        object_: Optional[str] = None,
+        session_id: Optional[str] = None,
+        max_age: Optional[float] = None,
+    ) -> list[RelationshipRecord]:
+        """Relationship lookup: any subset of (subject, predicate, object,
+        session) filters; best (highest confidence, newest) records first."""
+        now = time.time()
+        out = []
+        for r in self.relationships:
+            if subject and r.subject.lower() != subject.strip().lower():
+                continue
+            if predicate and r.predicate != predicate:
+                continue
+            if object_ and r.object.lower() != object_.strip().lower():
+                continue
+            if session_id is not None and r.session_id and r.session_id != session_id:
+                continue
+            if max_age is not None and (now - r.timestamp) > max_age:
+                continue
+            out.append(r)
+        out.sort(key=lambda r: (r.confidence, r.timestamp), reverse=True)
+        return out
+
+    def find_relationship(
+        self,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+        object_: Optional[str] = None,
+        session_id: Optional[str] = None,
+        max_age: Optional[float] = None,
+    ) -> Optional[RelationshipRecord]:
+        found = self.find_relationships(
+            subject=subject, predicate=predicate, object_=object_,
+            session_id=session_id, max_age=max_age,
+        )
+        return found[0] if found else None
 
     def add_topic(self, topic: TopicType, confidence: float = 1.0) -> None:
         self.topics.append((topic, confidence, time.time()))
@@ -141,4 +210,5 @@ class ContextStore:
         self._store.clear()
         self.events.clear()
         self.artifacts.clear()
+        self.relationships.clear()
         self.topics.clear()

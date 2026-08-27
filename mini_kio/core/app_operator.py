@@ -427,10 +427,31 @@ def _discovery_match(name: str, candidate: str) -> bool:
     return False
 
 
+# --- App Paths discovery cache (avoids repeated registry walks) ---
+_APP_PATHS_CACHE: dict = {"ts": 0.0, "results": {}}
+_APP_PATHS_CACHE_TTL = 300.0  # 5 minutes
+
+
 def _app_paths_discovery(name: str) -> Optional[str]:
     """Find an installed executable through the App Paths registry."""
     if not _IS_WINDOWS:
         return None
+    # Check cache first (avoids repeated registry enumeration per classification)
+    now = time.time()
+    cache = _APP_PATHS_CACHE
+    if now - cache["ts"] < _APP_PATHS_CACHE_TTL and name in cache["results"]:
+        return cache["results"][name]
+    result = _app_paths_discovery_uncached(name)
+    # Store in cache (both found and not-found)
+    if now - cache["ts"] >= _APP_PATHS_CACHE_TTL:
+        cache["ts"] = now
+        cache["results"].clear()
+    cache["results"][name] = result
+    return result
+
+
+def _app_paths_discovery_uncached(name: str) -> Optional[str]:
+    """Inner registry walk — uncached."""
     try:
         import winreg
     except Exception:
@@ -459,10 +480,31 @@ def _app_paths_discovery(name: str) -> Optional[str]:
     return None
 
 
+# --- Start Menu discovery cache (avoids repeated os.walk per classification) ---
+_START_MENU_CACHE: dict = {"ts": 0.0, "results": {}}
+_START_MENU_CACHE_TTL = 300.0  # 5 minutes
+
+
 def _start_menu_discovery(name: str) -> Optional[str]:
     """Find a Start Menu .lnk shortcut matching the requested name (bounded walk)."""
     if not _IS_WINDOWS:
         return None
+    # Check cache first (avoids repeated os.walk per classification call)
+    now = time.time()
+    cache = _START_MENU_CACHE
+    if now - cache["ts"] < _START_MENU_CACHE_TTL and name in cache["results"]:
+        return cache["results"][name]
+    result = _start_menu_discovery_uncached(name)
+    # Store in cache (both found and not-found)
+    if now - cache["ts"] >= _START_MENU_CACHE_TTL:
+        cache["ts"] = now
+        cache["results"].clear()
+    cache["results"][name] = result
+    return result
+
+
+def _start_menu_discovery_uncached(name: str) -> Optional[str]:
+    """Inner Start Menu walk — uncached, bounded."""
     roots = [
         os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
         os.path.join(os.environ.get("ProgramData", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
@@ -570,6 +612,11 @@ def _uwp_app_discovery(name: str) -> Optional[Dict]:
     return None
 
 
+# --- _find_installed_app result cache ---
+_FIND_INSTALLED_CACHE: dict = {"ts": 0.0, "results": {}}
+_FIND_INSTALLED_CACHE_TTL = 300.0  # 5 minutes
+
+
 def _find_installed_app(name: str) -> Optional[Dict]:
     """Generic Windows installed-application discovery (no hard-coded list).
 
@@ -581,6 +628,22 @@ def _find_installed_app(name: str) -> Optional[Dict]:
     if not _IS_WINDOWS or not name:
         return None
     norm = name.lower().strip()
+    # Check top-level cache first
+    now = time.time()
+    cache = _FIND_INSTALLED_CACHE
+    if now - cache["ts"] < _FIND_INSTALLED_CACHE_TTL and norm in cache["results"]:
+        return cache["results"][norm]
+    result = _find_installed_app_uncached(name, norm)
+    # Store in cache
+    if now - cache["ts"] >= _FIND_INSTALLED_CACHE_TTL:
+        cache["ts"] = now
+        cache["results"].clear()
+    cache["results"][norm] = result
+    return result
+
+
+def _find_installed_app_uncached(name: str, norm: str) -> Optional[Dict]:
+    """Inner discovery — uncached."""
     exe = _app_paths_discovery(norm)
     if exe:
         return {"kind": "exe", "target": exe, "display": name.strip()}
@@ -1424,12 +1487,46 @@ def _find_existing_web_target(conn, url: str, friendly_name: str):
     return None
 
 
-def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
+def _count_web_tabs(conn, url: str, friendly_name: str) -> Optional[int]:
+    """Count live tabs matching the web target (URL or entity identity).
+
+    Single bounded list_tabs call; None when the count cannot be determined
+    (connector unreadable) so callers can skip count-based verification without
+    inventing evidence.
+    """
+    try:
+        from mini_kio.core.async_utils import safe_run_async
+        tabs_result = safe_run_async(conn.list_tabs())
+        if not getattr(tabs_result, "success", False):
+            return None
+        tabs = getattr(tabs_result, "tabs", None) or []
+        url_norm = (url or "").rstrip("/").lower()
+        fname = (friendly_name or "").lower()
+        count = 0
+        for t in tabs:
+            t_url = ((getattr(t, "url", "") or "") or "").rstrip("/").lower()
+            t_title = (getattr(t, "title", "") or "").lower()
+            if url_norm and (url_norm in t_url or t_url in url_norm):
+                count += 1
+            elif fname and len(fname) >= 3 and (fname in t_title or fname in t_url):
+                count += 1
+        return count
+    except Exception as exc:
+        logger.debug("[APP] tab count unavailable: %s", exc)
+        return None
+
+
+def _verify_web_tab_opened(conn, url: str, friendly_name: str, before_count: Optional[int] = None) -> bool:
     """Bounded tab-identity verification after opening a web URL (BC-4).
 
     The connector ACK proves the extension received the open; this strengthens
     success by confirming a tab whose URL/title matches actually exists. Single
     bounded list_tabs call — never a polling loop.
+
+    before_count (explicit additional-instance requests only): when the number
+    of matching tabs was sampled BEFORE the open, require the count to have
+    increased by exactly one — a genuine new tab was created, not a refresh/
+    reuse of the existing one.
     """
     try:
         from mini_kio.core.async_utils import safe_run_async
@@ -1439,14 +1536,19 @@ def _verify_web_tab_opened(conn, url: str, friendly_name: str) -> bool:
         tabs = getattr(tabs_result, "tabs", None) or []
         url_norm = (url or "").rstrip("/").lower()
         fname = (friendly_name or "").lower()
+        count = 0
         for t in tabs:
             t_url = ((getattr(t, "url", "") or "") or "").rstrip("/").lower()
             t_title = (getattr(t, "title", "") or "").lower()
             if url_norm and (url_norm in t_url or t_url in url_norm):
-                return True
-            if fname and (fname in t_title or fname in t_url):
-                return True
-        return False
+                count += 1
+            elif fname and (fname in t_title or fname in t_url):
+                count += 1
+        if before_count is not None:
+            # Exactly one more matching tab than before the open proves a
+            # fresh tab was created (never a refresh of the existing one).
+            return count == before_count + 1
+        return count > 0
     except Exception as exc:
         logger.debug("[APP] tab-identity verification unavailable: %s", exc)
         return False
@@ -1803,6 +1905,36 @@ def close_app(name: str, pid: Optional[int] = None) -> dict:
                 return close_app(name, pid=int(tracked["pid"]))
         discovered = _find_installed_app(key)
         if discovered:
+            # UWP/Store apps (Camera, Photos, ...) run under their REAL image
+            # name (WindowsCamera.exe), never the AUMID. Match running image
+            # names by the request key (bounded containment, >=4 chars, same
+            # guard as generic discovery; ApplicationFrameHost wrapper excluded)
+            # so "close the camera" actually closes the running camera.
+            if discovered.get("kind") == "uwp":
+                import psutil as _psutil
+                norm_key = re.sub(r"[^a-z0-9]", "", key.lower())
+                for _proc in _psutil.process_iter(["pid", "name"]):
+                    try:
+                        _img = re.sub(
+                            r"[^a-z0-9]", "",
+                            (_proc.info.get("name") or "").lower(),
+                        )
+                        # Empty/unreadable image names must NEVER match ("" is a
+                        # substring of every key — that made the close target an
+                        # unrelated elevated process instead of the camera).
+                        if not _img or len(_img) < 4:
+                            continue
+                        if _img in ("applicationframehost", "dllhost", "explorer"):
+                            continue
+                        # Request name must be contained IN the image name
+                        # ("camera" -> windowscamera.exe): only the real app
+                        # process matches, never an unrelated short-name
+                        # process the request name merely contains.
+                        if len(norm_key) >= 4 and norm_key in _img:
+                            logger.info("[APP] close_app UWP fallback: %s pid=%d", key, _proc.info["pid"])
+                            return close_app(name, pid=int(_proc.info["pid"]))
+                    except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                        continue
             exe_base = Path(discovered["target"]).stem.lower()
             pseudo_info = {"lifecycle": "standard", "process": exe_base + ".exe"}
             discovered_pid = _find_matching_process_pid(key, pseudo_info)
@@ -2375,7 +2507,7 @@ def _resolve_path(info: Dict) -> Optional[str]:
     return found
 
 
-def _verify_process_started_windows(proc_name: str, timeout_s: int = 3, uwp_packages: list[str] | None = None) -> bool:
+def _verify_process_started_windows(proc_name: str, timeout_s: int = 1.5, uwp_packages: list[str] | None = None) -> bool:
     """Lightweight verification: poll Windows tasklist for a process image name."""
     if not proc_name:
         return False
@@ -2402,7 +2534,7 @@ def _verify_process_started_windows(proc_name: str, timeout_s: int = 3, uwp_pack
                     return True
         except Exception:
             pass
-        time.sleep(0.4)
+        time.sleep(0.2)
     return False
 
 
@@ -2495,7 +2627,7 @@ def _refine_pid_windows(
 
         # UWP Refinement
         if lifecycle == "uwp" or is_packaged_broker:
-            deadline = launch_start + 3.0
+            deadline = launch_start + 1.5
             
             def _find_latest_uwp_process(exclude_pids: set[int]) -> psutil.Process | None:
                 newest_proc = None
@@ -2554,7 +2686,7 @@ def _refine_pid_windows(
                         continue
                 return newest_proc
 
-            deadline = launch_start + 3.0
+            deadline = launch_start + 1.5
             while time.time() < deadline:
                 new_proc = _find_latest_singleton()
                 # If we found a process and it's NOT in prior_pids, it's new
@@ -2721,7 +2853,7 @@ def _launch_uri(uri: str, name: str, info: Dict) -> dict:
         return {"success": False, "message": f"Failed to open {name}: {str(exc)[:80]}"}
 
     if _IS_WINDOWS and proc_name:
-        verified_started = _verify_process_started_windows(proc_name, timeout_s=4, uwp_packages=uwp_packages)
+        verified_started = _verify_process_started_windows(proc_name, timeout_s=2, uwp_packages=uwp_packages)
         latest_pid = _find_matching_process_pid(name.lower(), info, exclude=prior_pids)
         if verified_started and latest_pid is None:
             latest_pid = _find_matching_process_pid(name.lower(), info)
@@ -2735,6 +2867,22 @@ def _launch_uri(uri: str, name: str, info: Dict) -> dict:
         else:
             return {"success": False, "message": f"Failed to launch {name}.", "pid": pid}
     return {"success": True, "message": f"Opened {name}", "pid": pid}
+
+
+def _activate_launched_window(pid: int) -> None:
+    """Bring a freshly launched app's window to the SCREEN (never just the
+    taskbar). Launching an exe opens the window in the background; without an
+    explicit foreground activation the user only sees the taskbar flash.
+    Bounded: one short wait + one activation attempt, never a polling loop.
+    """
+    if not _IS_WINDOWS or not pid:
+        return
+    try:
+        time.sleep(0.3)
+        from mini_kio.platform.window_activation import activate_window
+        activate_window(int(pid))
+    except Exception:
+        pass
 
 
 def _launch_from_info(info: Dict, name: str) -> dict:
@@ -2822,7 +2970,7 @@ def _launch_from_info(info: Dict, name: str) -> dict:
             res_extra["verification_mode"] = "noop"
 
         if _IS_WINDOWS:
-            if _verify_process_started_windows(proc_name, timeout_s=3, uwp_packages=uwp_packages):
+            if _verify_process_started_windows(proc_name, timeout_s=2, uwp_packages=uwp_packages):
                 # Refine PID to handle launchers/aliases
                 final_pid = _refine_pid_windows(pid, proc_name, prior_pids=prior_pids, launch_start=launch_start, uwp_packages=uwp_packages, lifecycle=lifecycle)
                 if final_pid is None:
@@ -2834,6 +2982,7 @@ def _launch_from_info(info: Dict, name: str) -> dict:
                 logger.info(f"[DEBUG_APP] final_pid refined: {final_pid}")
                 out = {"success": True, "message": f"Opened {name}", "pid": final_pid}
                 out.update(res_extra)
+                _activate_launched_window(final_pid)
                 return out
             else:
                 logger.warning(f"[APP] launch verification failed for: {proc_name}")
@@ -2925,12 +3074,17 @@ def _discover_and_launch(name: str) -> dict:
         logger.info(f"[APP] fuzzy discovery found: {fuzzy_path}")
         return _launch_path(fuzzy_path, name)
 
-    # Absolute last resort — launch by name via cmd start (no verified path)
+    # Absolute last resort — launch by name (no verified path).
+    # Use os.startfile on Windows (no visible console window) or direct
+    # Popen with CREATE_NO_WINDOW.  The old "cmd /c start" always opened
+    # a visible terminal window during normal Telegram operation.
     try:
-        subprocess.Popen(["cmd", "/c", "start", "", name], shell=False, creationflags=_creation_flags())
+        if _IS_WINDOWS:
+            os.startfile(name)
+        else:
+            subprocess.Popen([name], shell=False)
         # Best-effort verification
-        if _IS_WINDOWS and _verify_process_started_windows(f"{name}.exe", timeout_s=3):
-            # Use "Launched" when path/ownership is unverified
+        if _IS_WINDOWS and _verify_process_started_windows(f"{name}.exe", timeout_s=2):
             return {"success": True, "message": f"Launched {name}"}
         if not _IS_WINDOWS:
             return {"success": True, "message": f"Launched {name}"}
@@ -2967,11 +3121,12 @@ def _launch_path(path: str, name: str) -> dict:
 
         proc_name = Path(path).name
         if _IS_WINDOWS:
-            if _verify_process_started_windows(proc_name, timeout_s=3):
+            if _verify_process_started_windows(proc_name, timeout_s=2):
                 final_pid = _refine_pid_windows(pid, proc_name)
                 if final_pid is None:
                     # Honest capability response: successful launch but untracked
                     return {"success": True, "message": f"Launched {name} (ownership not tracked)."}
+                _activate_launched_window(final_pid)
                 return {"success": True, "message": f"Opened {name}", "pid": final_pid}
             else:
                 logger.warning(f"[APP] launch verification failed for: {proc_name}")
@@ -2990,7 +3145,12 @@ def _pkill(name: str) -> dict:
 
 
 def _creation_flags() -> int:
-    return 0x00000008 if _IS_WINDOWS else 0  # DETACHED_PROCESS
+    # CREATE_NO_WINDOW prevents the child process from opening a visible
+    # console window.  DETACHED_PROCESS (0x00000008) only detaches from the
+    # parent console but still allows the child to create its own window —
+    # which is the root cause of the unwanted terminal window during normal
+    # Telegram operation.  CREATE_NO_WINDOW (0x08000000) suppresses it.
+    return 0x08000000 if _IS_WINDOWS else 0  # CREATE_NO_WINDOW
 
 
 
@@ -3047,7 +3207,12 @@ def execute_capability(target: str) -> dict:
                             prior_pids.add(proc.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied): continue
 
-            proc = subprocess.Popen(["cmd", "/c", "start", target_url], shell=False)
+            # Use os.startfile for URLs — avoids visible console window.
+            try:
+                os.startfile(target_url)
+                proc = type('Obj', (), {'pid': 0})()  # sentinel for ownership check
+            except Exception:
+                proc = subprocess.Popen(["cmd", "/c", "start", target_url], shell=False, creationflags=_creation_flags())
             
             # Attempt Bounded Ownership Registration
             if _IS_WINDOWS and info:
@@ -3192,21 +3357,34 @@ def execute_capability(target: str) -> dict:
                          "capability_name": display, "browser": app_name},
                         start_time)
                 try:
-                    result = safe_run_async(conn.open_tab(url))
+                    # An explicit additional-instance request must open a
+                    # GENUINELY NEW tab — force_new skips the connector's own
+                    # same-domain dedup, which otherwise navigates/refreshes
+                    # the existing tab instead of creating one (the
+                    # "Open a new Telegram tab" bug).
+                    before_count = _count_web_tabs(conn, url, friendly_name) if force_new else None
+                    result = safe_run_async(conn.open_tab(url, force_new=force_new))
                     if result.success:
                         from mini_kio.core.routing_utils import register_browser_capability
                         register_browser_capability(friendly_name, app_name, url)
                         # BC-4: the extension ACK confirms the tab was created;
                         # strengthen with a bounded tab-identity check so success
-                        # is verified (never pure assertion).
-                        verified = _verify_web_tab_opened(conn, url, friendly_name)
+                        # is verified (never pure assertion). For explicit new-
+                        # instance requests, verify the target count increased
+                        # by exactly ONE — existence alone cannot distinguish a
+                        # freshly created tab from the pre-existing one.
+                        verified = _verify_web_tab_opened(conn, url, friendly_name, before_count=before_count)
                         from mini_kio.core.target_ref import display_target_name
+                        # instance="tab" lets the context referent remember the
+                        # CREATED INSTANCE KIND so a later "close it" closes the
+                        # tab — never the native app of the same name.
                         return _normalize_public_result(
                             "execute_capability", f"{app_name}::{friendly_name}",
                             {"success": True, "message": f"Opened {display_target_name(friendly_name)} in {display_target_name(app_name)}.",
                              "verification_mode": "tab_identity" if verified else "noop",
                              "verification_status": "passed" if verified else "unverified",
-                             "capability_name": display_target_name(friendly_name), "browser": app_name},
+                             "capability_name": display_target_name(friendly_name), "browser": app_name,
+                             "instance": "tab"},
                             start_time)
                 except Exception as exc:
                     logger.debug("[CONNECTOR] execute_capability open_tab failed, falling back: %s", exc)
@@ -3267,8 +3445,24 @@ def execute_capability(target: str) -> dict:
         except Exception as e:
             return _normalize_public_result("execute_capability", f"{app_name}::{friendly_name}", {"success": False, "message": f"Failed to route {cap} to {app_name}: {e}"}, start_time)
     # For now, just mock media capabilities since KIO is lightweight and doesn't hook into Windows Media APIs
-    if cap in ("play", "pause", "next", "previous", "open_project", "open_file", "send_message"):
+    if cap in ("play", "pause", "next", "previous", "open_project", "open_file"):
         return _normalize_public_result("execute_capability", target, {"success": True, "message": f"Successfully routed '{cap}' to {app_name} (mocked API)."}, start_time)
+    # send_message is a REAL outbound-communication capability, never a mock:
+    # route it through the canonical communication seam (draft/send/verify/
+    # persist) instead of claiming a fake delivery. The seam resolves the
+    # authorized sink and honestly reports delivery or refusal.
+    if cap == "send_message":
+        try:
+            from mini_kio.communication.messages import message_answer
+            result = message_answer("send a message to me: %s" % args, decision=None)
+            return _normalize_public_result(
+                "execute_capability", target,
+                {"success": bool(result.get("success")), "message": result.get("message", "Message not sent.")},
+                start_time,
+            )
+        except Exception as exc:
+            return _normalize_public_result("execute_capability", target,
+                                            {"success": False, "message": f"Message capability unavailable: {exc}"}, start_time)
         
     return _normalize_public_result("execute_capability", target, {"success": False, "message": f"Capability {cap} not implemented."}, start_time)
 

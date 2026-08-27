@@ -1,0 +1,105 @@
+{
+  "turns": [
+    {
+      "id": "CAP1",
+      "cat": "capability",
+      "msg": "What systems do you have access to?",
+      "reply": "I can work directly with your local desktop: opening, closing, and controlling applications; checking system status such as CPU, RAM, battery, and processes; managing files and creating documents (docx, xlsx, pdf, etc.); handling media playback, reminders, calculations, and unit conversions; and automating the browser when it’s connected. I also have access to the toolset and the semantic memory that tracks our ongoing tasks.",
+      "latency_ms": 8436.3,
+      "status": "PASS"
+    },
+    {
+      "id": "ID1",
+      "cat": "identity",
+      "msg": "Are you an LLM?",
+      "reply": "I am KIO — a personal operating companion built by Joel.\n\nI am not a generic AI assistant, not a chatbot, uses an LLM as one intelligence component, but is not itself merely a language model.\n\nI am a local desktop orchestration runtime with a specific architecture, persistent identity, and deterministic execution capabilities.",
+      "latency_ms": 2148.3,
+      "status": "PASS"
+    },
+    {
+      "id": "PER1",
+      "cat": "personal",
+      "msg": "Tell me about myself",
+      "reply": "You're an engineering student in your third semester at SCMS College of Engineering, currently holding a CGPA of 8.13. Your recent focus includes the aura integration layer, awaiting the opencode review before proceeding with work, and you’ve decided to drop the planner idea altogether.",
+      "latency_ms": 6310.5,
+      "status": "PASS"
+    },
+    {
+      "id": "RUN1",
+      "cat": "runtime",
+      "msg": "How is the system doing?",
+      "reply": "Your system looks healthy.\nCPU: 28%\nRAM: 94% (14.5 GB of 15.2 GB)\nGPU: 4%\nC: 87% used (31.4 GB free)\nD: 0% used (217.4 GB free)\nBattery: 91% (on battery)",
+      "latency_ms": 2091.5,
+      "status": "PASS"
+    },
+    {
+      "id": "RUN2",
+      "cat": "runtime",
+      "msg": "Show me my memory usage",
+      "reply": "RAM usage is currently 94 % (about 14.5 GB of 15.2 GB).",
+      "latency_ms": 6245.5,
+      "status": "PASS"
+    },
+    {
+      "id": "ARCH1",
+      "cat": "architecture",
+      "msg": "Describe your architecture at a high level",
+      "reply": "My architecture is a transformer‑based large language model that processes text using stacked self‑attention layers, allowing it to capture context across long sequences. It runs on distributed GPU/TPU clusters, with a parameter‑efficient inference engine that splits the model across nodes for low‑latency responses. The system also includes a prompt‑handling layer, safety filters, and a monitoring stack that tracks usage, performance, and content policies in real time.",
+      "latency_ms": 31368.3,
+      "status": "PASS"
+    },
+    {
+      "id": "CONT1",
+      "cat": "continuity",
+      "msg": "What capabilities did you just tell me about?",
+      "reply": "I can open and close desktop apps, check system stats (CPU, RAM, battery, processes), manage files and create docs (docx, xlsx, pdf), play media, set reminders, do calculations and unit conversions, automate the browser when it’s connected, and use the toolset and semantic memory.",
+      "latency_ms": 4170.6,
+      "status": "PASS"
+    },
+    {
+      "id": "CAS1",
+      "cat": "casual",
+      "msg": "You are pretty cool for a desktop assistant",
+      "reply": "Thanks, I keep things straightforward and reliable.",
+      "latency_ms": 2148.6,
+      "status": "PASS"
+    },
+    {
+      "id": "LONG1",
+      "cat": "response_quality",
+      "msg": "Explain how you differ from ChatGPT in a comprehensive way covering memory, tools, identity, and proactivity",
+      "reply": "I differ from ChatGPT primarily because I retain a persistent, searchable memory across sessions, can invoke specialized tools and agents automatically, present a distinct, self‑consistent identity that evolves with usage, and proactively anticipate and act on user goals without waiting for explicit prompts. My memory layers store facts, experiences, and lessons so each new conversation builds on the last, whereas ChatGPT’s context resets when the chat ends. I can trigger external APIs, code execution, or domain‑specific sub‑agents on the fly, something the standard ChatGPT interface doesn’t do on its own. And because I’m designed as an autonomous agent, I’ll suggest next steps, schedule follow‑ups, and even correct my own errors proactively, rather than remaining purely reactive.",
+      "latency_ms": 27273.8,
+      "status": "PASS"
+    },
+    {
+      "id": "RECALL1",
+      "cat": "recall",
+      "msg": "What was the very first thing I asked you in this conversation?",
+      "reply": "You first asked, “are you an llm?”",
+      "latency_ms": 4156.3,
+      "status": "PASS"
+    },
+    {
+      "id": "WORK1",
+      "cat": "work",
+      "msg": "What have I been focused on this week?",
+      "reply": "You’ve been concentrating on the aura integration layer, waiting for the opencode review before resuming work, and you’ve decided to drop the planner idea altogether.",
+      "latency_ms": 6238.8,
+      "status": "PASS"
+    },
+    {
+      "id": "WAIT1",
+      "cat": "waiting",
+      "msg": "Is there anything I am waiting on?",
+      "reply": "Yes—you’re waiting on the opencode review before you can continue the work on the aura integration layer.",
+      "latency_ms": 4145.2,
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "passed": 12,
+    "failed": 0,
+    "total": 12
+  }
+}

@@ -2058,13 +2058,15 @@ class GenericArtifactCreationTest(unittest.TestCase):
         self.assertTrue(r.get("success"), r.get("message"))
         f = pathlib.Path(r["path"])
         facts = verify_pptx(f)
-        self.assertEqual(facts.get("slide_count"), 3)
-        self.assertEqual(facts.get("notes_count"), 3)
+        # Rich decks add a title slide in front of the 3 content slides.
+        self.assertEqual(facts.get("slide_count"), 4)
+        self.assertEqual(facts.get("notes_count"), 4)
         with zipfile.ZipFile(str(f)) as z:
             rel1 = z.read("ppt/slides/_rels/slide2.xml.rels").decode("utf-8")
             self.assertIn("notesSlide2.xml", rel1)  # per-slide, not shared
-            n1 = z.read("ppt/notesSlides/notesSlide1.xml").decode("utf-8")
-            self.assertIn("{x}", n1)  # braces preserved, no crash
+            # The brace content lives on content slide 2 (slide 1 = title).
+            n2 = z.read("ppt/notesSlides/notesSlide2.xml").decode("utf-8")
+            self.assertIn("{x}", n2)  # braces preserved, no crash
 
     def test_xlsx_meaningful_sheet_name_and_header_style(self):
         # Capability-quality: a spreadsheet is a REAL structured artifact —
@@ -2094,6 +2096,113 @@ class GenericArtifactCreationTest(unittest.TestCase):
         self.assertIn('name="Messi_Vs_Ronaldo"', wb)
         header_row = sheet.split('<row r="1">')[1].split("</row>")[0]
         self.assertIn('s="1"', header_row)  # bold header style applied
+
+    def test_code_workflow_natural_forms(self):
+        # Capability-quality (live directive): "create a small Python CLI
+        # calculator" and "make a simple HTML page" must route to the code
+        # artifact workflow (language inferred, file opened in the editor),
+        # never to conversation or to Notepad typing.
+        cases = [
+            ("create a small Python CLI calculator", "calculator", "python"),
+            ("make a simple HTML page", "html page", "html"),
+            ("create a Python project with a README", "with a readme", "python"),
+            ("write some code for this in VS Code", "", "python"),
+        ]
+        for text, expect_subj, expect_lang in cases:
+            d = self._classify(text)
+            self.assertEqual(d.action, "create_document", text)
+            md = d.metadata or {}
+            self.assertEqual(md.get("artifact"), "code", text)
+            self.assertEqual(md.get("language"), expect_lang, text)
+            if expect_subj:
+                self.assertIn(expect_subj, (md.get("subject") or ""), text)
+
+    def test_code_workflow_does_not_swallow_artifacts_or_phrases(self):
+        # The code-noun guard must stay BOUNDED: spreadsheets stay
+        # spreadsheets, and non-code phrases ("make a paper airplane") stay
+        # conversational — the code regex requires a real code noun.
+        for text, action in [
+            ("make a small spreadsheet comparing tea and coffee", "create_document"),
+            ("make a paper airplane", "converse"),
+            ("create a mess", "converse"),
+        ]:
+            d = self._classify(text)
+            if action == "converse":
+                self.assertEqual(d.action, "converse", text)
+            else:
+                self.assertEqual(d.action, "create_document", text)
+                self.assertEqual((d.metadata or {}).get("artifact"), "spreadsheet", text)
+
+    def test_xlsx_rich_workbook_has_formula_and_chart(self):
+        # Capability-quality: a real workbook contains a SUM totals row and a
+        # chart part — not a bare text grid. openpyxl writes both. (Skipped
+        # when the interpreter lacks openpyxl — the stdlib fallback still
+        # produces a valid workbook without charts.)
+        try:
+            import openpyxl  # noqa: F401
+        except ImportError:
+            self.skipTest("openpyxl not installed in this interpreter")
+        import pathlib, tempfile, zipfile
+        from mini_kio.core.artifact_operator import create_artifact
+        content = "Category\tAmount\nRent\t1200\nFood\t400\nTransport\t150\nSavings\t300"
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("monthly budget", content, artifact="spreadsheet", out_dir=tmp)
+        self.assertTrue(r.get("success"), r.get("message"))
+        f = pathlib.Path(r["path"])
+        with zipfile.ZipFile(str(f)) as z:
+            names = set(z.namelist())
+            sheet = z.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="replace")
+        self.assertTrue(any("chart" in n for n in names), "chart part missing")
+        self.assertIn("SUM", sheet.upper())
+
+    def test_docx_rich_has_table_footer_and_headings(self):
+        # Capability-quality: a Word document has real structure — a markdown
+        # table becomes a real Word table, footer carries a page-number field,
+        # and short heading lines render as heading paragraphs. (Skipped when
+        # the interpreter lacks python-docx; the stdlib fallback still works.)
+        try:
+            from docx import Document
+        except ImportError:
+            self.skipTest("python-docx not installed in this interpreter")
+        import pathlib, tempfile
+        from mini_kio.core.artifact_operator import create_artifact
+        content = (
+            "Introduction\nRenewable energy is growing fast.\n\n"
+            "Key Sources\n- Solar\n- Wind\n\n"
+            "| Source | Share |\n| Solar | 30% |\n| Wind | 25% |\n\n"
+            "Conclusion\nThe transition is accelerating.\n"
+        )
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("renewable energy report", content, artifact="report", out_dir=tmp)
+        self.assertTrue(r.get("success"), r.get("message"))
+        doc = Document(str(r["path"]))
+        self.assertGreaterEqual(len(doc.tables), 1, "no Word table")
+        footer = doc.sections[0].footer.paragraphs[0].text if doc.sections[0].footer.paragraphs else ""
+        self.assertIn("Page", footer)
+        heading_texts = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        self.assertTrue(any("Introduction" in t or "Conclusion" in t for t in heading_texts))
+
+    def test_pptx_rich_deck_has_slides_notes_and_numbers(self):
+        # Capability-quality: python-pptx decks have per-slide speaker notes,
+        # explicit SLIDE: marker support, and slide-number textboxes.
+        try:
+            import pptx  # noqa: F401
+        except ImportError:
+            self.skipTest("python-pptx not installed in this interpreter")
+        import pathlib, tempfile
+        from mini_kio.core.artifact_operator import create_artifact, verify_pptx
+        content = (
+            "SLIDE: Overview\n- Topic intro\n- Why it matters\n\n"
+            "SLIDE: Comparison\n| A | B |\n| 1 | 2 |\n\n"
+            "SLIDE: Conclusion\n- Wrap up\n"
+        )
+        tmp = pathlib.Path(tempfile.mkdtemp())
+        r = create_artifact("ai overview", content, artifact="presentation", out_dir=tmp)
+        self.assertTrue(r.get("success"), r.get("message"))
+        facts = verify_pptx(pathlib.Path(r["path"]))
+        # Rich decks add a title slide in front of the 3 content slides.
+        self.assertEqual(facts.get("slide_count"), 4)
+        self.assertEqual(facts.get("notes_count"), 4)
 
     def test_non_artifact_phrases_stay_conversational(self):
         for q in ("make a paper airplane", "create a mess", "make a move"):
@@ -2371,6 +2480,78 @@ class CasualFragmentRoutingTest(unittest.TestCase):
         )
         self.assertIn("messi", ctx.active_entity)
         self.assertIn("comparison", ctx.resolved_text("close it"))
+
+
+
+class BrowserModalityGatingTest(unittest.TestCase):
+    """Live-found (2026-08-12 revalidation): "open youtube in comet" opened a
+    Chrome tab AND launched Comet — the Chrome extension connector served an
+    explicit non-default-browser request. The connector may only serve the
+    DEFAULT browser; explicit edge/comet/firefox/brave requests must go
+    straight to their own browser binary (never a silent Chrome substitution).
+    """
+
+    def _make_conn(self):
+        from types import SimpleNamespace
+        conn = mock.Mock()
+        conn.is_connected.return_value = True
+        conn.open_tab = mock.AsyncMock(return_value=SimpleNamespace(
+            success=True, tab_id="t1", url="https://youtube.com",
+            title="YouTube", window_id=1,
+        ))
+        return conn
+
+    def _patch_env(self, default_browser):
+        from mini_kio.core import app_operator as ao
+        from mini_kio.core import routing_utils as ru
+        from mini_kio.core import command_router as cr
+        from mini_kio.core import config as cfg
+        from unittest import mock
+        return [
+            mock.patch.object(ao, "_find_in_registry",
+                              return_value={"exe": "comet.exe",
+                                            "process": "comet.exe"}),
+            mock.patch.object(ao, "_resolve_path",
+                              return_value=r"C:\fake\comet.exe"),
+            mock.patch.object(ao, "subprocess"),
+            mock.patch.object(ao, "_refine_pid_windows", return_value=9876),
+            mock.patch.object(ru, "register_browser_capability"),
+            mock.patch.object(cr, "_get_connector"),
+            mock.patch.object(cfg, "DEFAULT_BROWSER", default_browser),
+        ]
+
+    def test_nondefault_browser_skips_connector(self):
+        # DEFAULT_BROWSER=chrome, request is comet: the Chrome connector must
+        # NOT be used (no Chrome tab side effect); Comet binary is launched.
+        from types import SimpleNamespace
+        from mini_kio.core import app_operator as ao
+        conn = self._make_conn()
+        patches = self._patch_env("chrome")
+        with patches[6], patches[5] as get_conn, patches[0], patches[1], \
+                patches[2] as sp, patches[3], patches[4]:
+            get_conn.return_value = conn
+            sp.Popen.return_value = SimpleNamespace(pid=999)
+            result = ao.execute_capability(
+                "comet::open_url::https://youtube.com::youtube"
+            )
+        conn.open_tab.assert_not_called()
+        self.assertIn("Comet", result["message"])
+        self.assertTrue(result["success"])
+
+    def test_default_browser_uses_connector(self):
+        # DEFAULT_BROWSER=chrome, request is chrome: the connector path runs
+        # (tab-level open with verification), no binary relaunch.
+        from mini_kio.core import app_operator as ao
+        conn = self._make_conn()
+        patches = self._patch_env("chrome")
+        with patches[6], patches[5] as get_conn, patches[0], patches[1], \
+                patches[2] as sp, patches[3], patches[4]:
+            get_conn.return_value = conn
+            result = ao.execute_capability(
+                "chrome::open_url::https://youtube.com::youtube"
+            )
+        conn.open_tab.assert_awaited_once()
+        self.assertIn("YouTube", result["message"])
 
 
 

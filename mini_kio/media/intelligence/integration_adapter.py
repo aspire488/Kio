@@ -4,6 +4,144 @@ import re
 from typing import Optional, Callable, Any
 
 logger = logging.getLogger(__name__)
+
+# Stopwords excluded from evidence-relevance matching. These are grammatical
+# glue, not claim content: "passed away" is anchored by "passed", not "away".
+_EVIDENCE_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "but", "if", "of", "to", "in", "on",
+    "at", "for", "with", "without", "from", "by", "about", "as", "into",
+    "through", "during", "before", "after", "over", "under", "between",
+    "out", "off", "up", "down", "again", "then", "than", "that", "this",
+    "these", "those", "there", "here", "when", "where", "which", "what",
+    "who", "whom", "whose", "why", "how", "all", "any", "both", "each",
+    "few", "more", "most", "other", "some", "such", "no", "nor", "not",
+    "only", "own", "same", "so", "too", "very", "can", "will", "just",
+    "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't",
+    "won't", "can't", "cant", "cannot", "wouldn't", "couldn't", "shouldn't",
+    "would", "could", "should", "may", "might", "must", "shall",
+    "has", "have", "had", "been", "being", "was", "were", "are", "is",
+    "do", "does", "did", "be", "am", "me", "my", "you", "your", "yours",
+    "he", "him", "his", "she", "her", "hers", "it", "its", "we", "us",
+    "our", "ours", "they", "them", "their", "theirs", "i", "im", "ive",
+    # Contracted referential forms — the same semantic class as "it"/"its":
+    # a degenerate provider answer ("It's 2:52 AM.") must not satisfy the
+    # synthesis grounding gate via a pronoun that merely appears in the
+    # evidence snippets (live: a long multi-claim verification prompt was
+    # answered with "It's 2:52 AM." because the token "it's" overlapped an
+    # evidence excerpt).
+    "it's", "its'", "that's", "there's", "here's", "he's", "she's",
+    "we're", "they're", "you're", "what's", "who's", "where's",
+    "when's", "why's", "how's", "let's", "i'm", "you've", "we've",
+    "they've", "i've", "i'll", "you'll", "he'll", "she'll", "we'll",
+    "they'll", "that'll", "there'll",
+    "about", "into", "per", "via", "get", "got", "gets", "say", "said",
+    "says", "going", "one", "two", "thing", "things", "really", "actually",
+    "still", "even", "ever", "much", "many", "away", "back", "around",
+})
+
+def _meaningful_tokens(text: str) -> set:
+    """Extract non-stopword content tokens for evidence/synthesis relevance."""
+    toks = set()
+    for w in re.findall(r"[a-zA-Z][a-zA-Z0-9']{3,}", (text or "").lower()):
+        if w not in _EVIDENCE_STOPWORDS:
+            toks.add(w)
+    return toks
+
+
+# Pure verification words: "is that true", "did it really happen" — these
+# are the user ASKING, never a claim to verify. Kept for entityless detection.
+_VERIF_GENERIC_TOKENS = frozenset({
+    "true", "real", "happened", "happen", "say", "said", "says", "talking",
+    "people", "someone", "anyone", "saw", "read", "heard", "actually",
+    "really", "thing", "things", "stuff", "news", "rumor", "rumors",
+    "online", "around", "about", "right", "still", "actually", "supposedly",
+    "apparently", "reportedly", "allegedly", "rumored", "story", "stories",
+    # Inflected/contracted probe forms: "Did that actually happen?" yields
+    # the stem "happen" after stopword stripping, not "happened" — the
+    # generic-follow-up reclaim must treat it as a pure probe word or the
+    # reclaim never fires and the follow-up re-searches the bare phrase
+    # (live: a Warriors assertion was answered by a stale Ronaldo claim
+    # because the follow-up was NOT reclaimed).
+    "sure", "serious", "seriously", "confirm", "confirmed", "verify",
+    "verified", "correct", "fact", "facts", "exact", "exactly", "wait",
+    "hold", "mean", "meant", "explain", "really", "possible", "possible",
+})
+
+
+def _message_entity_name(text: str) -> str:
+    """First capitalized token that actually names an entity in this message
+    ("I heard Messi's father..." -> "Messi"). Sentence-initial capitals ("Is
+    that..."), capitals that start a NEW sentence after a period ("...project.
+    Is that true?"), interrogative/auxiliary verbs (Is/Are/Did/Has...), and
+    the pronoun "I" are all ignored; a later claim ("he said...") refers to
+    THIS entity, which outranks the memory anchor.
+    """
+    words = (text or "").split()
+    _skip_first = {"i", "a", "an", "the"}
+    _verb_start = {"is", "are", "was", "were", "do", "does", "did", "has",
+                   "have", "had", "will", "would", "could", "should", "can",
+                   "may", "might", "must", "am"}
+    _interrogatives = {"who", "what", "when", "where", "why", "how", "which", "whose"}
+    prev_end = ""
+    for w in words:
+        wc = w.strip(".,!?;:'\"")
+        wl = wc.lower()
+        # A capital right after sentence punctuation is the next sentence's
+        # first word ("...project. Is that true?"), never an entity name.
+        if prev_end in (".", "!", "?", ";"):
+            prev_end = ""
+            continue
+        # camelCase entities ("iPhone", "iPad", "macOS", "eBay") start
+        # lowercase but carry an internal capital — without this check they
+        # were missed and the verification subject fell back to the PREVIOUS
+        # query's entity (live: "is it true the new iPhone got delayed"
+        # registered subject "Tom" from the prior Tom Holland question, so
+        # the next follow-up anchored to the wrong person).
+        _camel_case = bool(wc) and any(ch.isupper() for ch in wc[1:])
+        if wc and (wc[0].isupper() or _camel_case) and wl not in _skip_first \
+                and wl not in _verb_start and wl not in _interrogatives:
+            # Strip possessive so the anchor is "Messi", never "Messi's".
+            return wc[:-2] if wl.endswith("'s") and len(wc) > 3 else wc
+        prev_end = w[-1] if w else ""
+    return ""
+
+
+# Generic category nouns: they name a CLASS, never a specific subject
+# ("the movie", "a player", "the company", "the lead actor"). A claim built
+# only from these + event verbs + stopwords has NO own subject — it refers to
+# the conversation's entity (anchor) or needs clarification. "Independence Day"
+# must not match here (it has no category noun), and "movie got delayed" MUST.
+_GENERIC_SUBJECT_NOUNS = frozenset({
+    "movie", "film", "flick", "picture", "game", "match", "fixture",
+    "race", "player", "actor", "actress", "singer", "artist", "band",
+    "album", "song", "track", "show", "series", "episode", "season",
+    "book", "novel", "company", "firm", "product", "device", "phone",
+    "console", "release", "project", "sequel", "remake", "prequel",
+    "studio", "director", "author", "writer", "character", "star",
+    "team", "club", "ceo", "boss", "president", "minister", "leader",
+    "owner", "founder", "chairman", "trailer", "preview", "poster",
+    "update", "rumor", "report", "story", "lead", "main", "new",
+    "old", "big", "whole", "other", "next", "last", "first",
+    "second", "third",
+})
+
+# Event/predicate verbs: describe what happened to a subject without naming
+# one ("got delayed", "left the project", "was cancelled"). Never a subject.
+_EVENT_VERBS = frozenset({
+    "delay", "delayed", "cancelled", "canceled", "cancel", "postponed",
+    "release", "released", "retired", "retire", "left", "quit",
+    "quitting", "fired", "hired", "injured", "transferred", "announced",
+    "announce", "confirmed", "confirm", "died", "passed", "said",
+    "say", "stepped", "stepping", "moved", "returned", "coming",
+    "walked", "departed", "leaving", "exit", "exited", "broke",
+    "ended", "paused", "halted", "changed", "shelved", "scrapped",
+    "axed", "dropped", "pushed", "back", "down", "out", "off",
+    "anymore", "longer", "long", "play", "playing", "continue",
+    "continuing", "stop", "stopping", "sign", "signed", "getting",
+    "coming", "cancel", "postpone", "happen", "happened", "happens",
+})
+
+
 from mini_kio.media.intelligence.media_intelligence_models import TopicType, ArtifactType, EventRecord, ArtifactRecord, IntelligenceResult
 from mini_kio.intelligence.retrieval_router import RetrievalResult
 from mini_kio.media.intelligence.topic_classifier import classify_topic
@@ -22,6 +160,151 @@ from mini_kio.media.intelligence.media_response_formatter import (
 )
 from mini_kio.media.intelligence.answer_composer import AnswerComposer
 from mini_kio.media.media_intelligence_models import EntityType, ResolvedEntity, MediaProvider
+from mini_kio.media.intelligence.relationship_extractor import (
+    canonical_predicate_for_role,
+    canonical_predicate_for_verb,
+    retrieval_keyword_for_predicate,
+    extract_relationships,
+    all_role_nouns,
+    all_role_verbs,
+    verb_regex,
+    verb_alternation,
+    relation_similarity,
+    semantic_extract_relationships,
+)
+
+
+_CLAIM_SELECT_RE = re.compile(
+    r"^\s*(?:which|what|what\u2019s|what's|which\s+one|which\s+parts?|\bthe\s+second\b|\bthe\s+first\b|\bthe\s+third\b|\bthe\s+last\b|\bthe\s+next\b)(?:\s+one\b)?\s*(?:of\s+(?:those|these|them|it|that))?"
+    r"\s*(?:is|are|was|were)?\s*(?:actually|really|even)?\s*(?:true|real|right|correct|accurate|legit|a\s+thing|going\s+on|happened)?\??\s*$",
+    re.I,
+)
+
+
+def _is_claim_selection_referent(query: str) -> bool:
+    """True when the message SELECTS from a prior proposition set ("which
+    part is true?", "the second one?", "which one?") instead of naming a
+    new claim — the ordinal/selection morphology, never per-phrase rules.
+    """
+    return bool(_CLAIM_SELECT_RE.match((query or "").strip()))
+
+
+def _recent_session_media_subject(sctx) -> Optional[str]:
+    """Best-effort extraction of the most recently discussed MEDIA subject
+    from a session context's exchange history (the conversational composer's
+    recommendations — "Try Arrival" — live there, never in the media adapter's
+    ContextStore). Returns the last clearly media-shaped entity mentioned by
+    either side, or None."""
+    try:
+        hist = sctx.get_history_window(12) if hasattr(sctx, "get_history_window") else []
+    except Exception:
+        return None
+    # Title-case candidates that are not ordinary prose words. Media names are
+    # almost always capitalized in natural conversation.
+    _prose = {"i", "the", "a", "an", "it", "you", "we", "they", "he", "she",
+              "this", "that", "these", "those", "there", "here", "movie",
+              "film", "book", "show", "series", "song", "album", "game",
+              "try", "watch", "read", "listen", "recommend", "recommended",
+              "something", "anything", "maybe", "like", "would", "could",
+              "should", "darker", "lighter", "better", "similar"}
+    # Recommendation-shape extraction: "I'd recommend X", "Try X", "I would
+    # go with X", "What about X" — the NAMED candidate is the anchor. A naive
+    # title-case scan grabs reply openers ("Because", "Yes", "I'd") instead
+    # (live: "what else has that director made" anchored on "I'd" after
+    # "I'd recommend Arrival" -> Macon Blair from stale memory).
+    _rec_shape = re.compile(
+        r"(?:i['\u2019]?d\s+(?:recommend|go\s+with|pick|choose|try)\s+|i\s+would\s+(?:recommend|go\s+with|pick|choose|try)\s+|try\s+|go\s+with\s+|what\s+about\s+|recommend(?:ing|ed)?\s+|check\s+out\s+|you\s+might\s+(?:enjoy|like|love)\s+|you\s+may\s+(?:enjoy|like|love)\s+|give\s+)[*\u201c\"'\u2018(]*([A-Z][A-Za-z0-9 .'\u2019-]{1,40})\b",
+        re.I,
+    )
+    # Generic English pronouns/placeholders that a shape can capture when the
+    # entity comes AFTER the pronoun ("give it a try — *Arrival*"): the
+    # captured word is not the entity, skip it and keep scanning.
+    _placeholder = {
+        "it", "this", "that", "these", "those", "them", "one", "you",
+        "me", "us", "him", "her", "something", "anything", "everything",
+        "what", "which", "there", "here", "it's", "it\u2019s", "that's",
+        "that\u2019s", "you'll", "you\u2019ll", "let's", "let\u2019s",
+        "try", "reading", "watching", "listening", "playing", "giving",
+    }
+    # Role-verb work scan (general morphology, never per-entity): a reply like
+    # "Alex Garland directed Annihilation." names the WORK after the role verb
+    # ("directed/wrote/developed/founded/created/composed Annihilation") —
+    # the work is the correct role-catalog referent anchor ("what else has
+    # that director made" -> the director OF Annihilation), NOT the answer
+    # person. Passive "directed by X" (holder after the verb) is skipped so
+    # the scan lands on the work, never the person.
+    _role_verb_work = re.compile(
+        r"\b(?:directed|directs|wrote|writes|developed|develops|founded|co-founded|"
+        r"created|creates|composed|composes|produced|produces|published|publishes|"
+        r"sang|sings|performed|performs|recorded|records|starred|stars\s+in)\s+"
+        r"(?!by\b)([A-Z][A-Za-z0-9 '\u2019\-]{1,40})\b",
+        re.I,
+    )
+    for _u, _r in reversed(hist or []):
+        for _txt in (_r, _u):
+            if not _txt:
+                continue
+            _rv = _role_verb_work.search(_txt)
+            if _rv:
+                _cand = _rv.group(1).strip(".,!?;:\u2019'\"()")
+                if len(_cand) >= 2 and _cand[0].isupper():
+                    _words = _cand.split()
+                    for _wi, _w in enumerate(_words):
+                        if _wi > 0 and not (_w[0].isupper() or _w.isdigit()):
+                            _cand = " ".join(_words[:_wi])
+                            break
+                    if len(_cand) >= 2:
+                        return _cand
+    for _u, _r in reversed(hist or []):
+        for _txt in (_r, _u):
+            if not _txt:
+                continue
+            _m = _rec_shape.search(_txt)
+            if _m:
+                _cand = _m.group(1).strip(".,!?;:\u2019'\"()")
+                # Titles are sequences of Capitalized words/digits; trim any
+                # trailing lowercase continuation ("The Expanse if you like it"
+                # -> "The Expanse"). re.I makes [A-Z] match lowercase, so
+                # "recommend me a sci-fi movie" (USER text) captures "me a
+                # sci-fi movie". A real media entity is capitalized in the
+                # reply — require the first captured char to be an actual
+                # uppercase letter (live: anchor "me a sci-fi movie" ->
+                # ROLE_CATALOG_RESOLVE garbage).
+                if len(_cand) >= 2 and _cand[0].isupper() \
+                        and _cand.lower() not in _placeholder:
+                    _words = _cand.split()
+                    for _wi, _w in enumerate(_words):
+                        if _wi > 0 and not (_w[0].isupper() or _w.isdigit()):
+                            _cand = " ".join(_words[:_wi])
+                            break
+                    if len(_cand) >= 2:
+                        return _cand
+        # No recommendation shape in this exchange's replies — fall back to a
+        # title-case token that is not an opener/contraction. Sentence-initial
+        # verb openers ("Give it a try", "Check out X") are skipped via the
+        # first-token+lowercase-next rule so the scan lands on the actual
+        # entity mid-sentence instead of the opener.
+        for _txt in (_r, _u):
+            _toks = (_txt or "").split()
+            for _i, _tok in enumerate(_toks):
+                _t = _tok.strip(".,!?;:'\"()[]-—*_\u2018\u2019\u201c\u201d")
+                if len(_t) >= 3 and _t[0].isupper() and not _t.isupper():
+                    if _i == 0 and _i + 1 < len(_toks) and _toks[_i + 1][:1].islower():
+                        # "Give it..." / "Try reading..." — opener verb, skip.
+                        continue
+                    if _t.lower() not in _prose and not _t.lower().startswith(("i'd", "i\u2019d", "i'm", "i\u2019m", "it's", "it\u2019s", "that\u2019s", "that's", "because", "yes", "no", "definitely", "sure", "exactly", "yeah", "try", "give")):
+                        # Multi-word title: consume the run of Capitalized
+                        # words/digits ("Animal Well is..." -> "Animal Well"),
+                        # not just the first token.
+                        _run = [_t]
+                        for _j in range(_i + 1, len(_toks)):
+                            _nxt = _toks[_j].strip(".,!?;:'\"()[]-—*_\u2018\u2019\u201c\u201d")
+                            if _nxt and (_nxt[0].isupper() or _nxt.isdigit()):
+                                _run.append(_nxt)
+                            else:
+                                break
+                        return " ".join(_run)
+    return None
 
 
 class MediaIntelligenceAdapter:
@@ -45,8 +328,24 @@ class MediaIntelligenceAdapter:
         pending_action_fn: Optional[Callable[[str], Optional[dict]]] = None,
         max_context_entries: int = 50,
         session_state: Optional["SessionState"] = None,
+        retrieve_evidence_fn: Optional[Callable[[str, Optional[str], int], list]] = None,
     ) -> None:
         self.retrieve = retrieval_fn
+        # Multi-source evidence collection (currentness): a callable returning
+        # a LIST of RetrievalResults (ideally with published_date) so the
+        # verification path can rank by freshness and reconcile contradictions
+        # instead of trusting the single first provider hit. Falls back to a
+        # single-result wrapper so callers that don't wire it still work.
+        if retrieve_evidence_fn is None:
+            def _single_evidence(q: str, topic: Optional[str] = None, max_results: int = 1) -> list:
+                try:
+                    res = self.retrieve(q, topic, "")
+                    return [res] if res else []
+                except Exception:
+                    return []
+            self._retrieve_evidence = _single_evidence
+        else:
+            self._retrieve_evidence = retrieve_evidence_fn
         self.play = play_fn
         self._ctx = ContextStore(max_context_entries)
         self._art = ArtifactMemory()
@@ -94,6 +393,9 @@ class MediaIntelligenceAdapter:
         )
 
         self._llm_fn: Optional[Callable[[str], Optional[str]]] = None
+        # Dedicated verification synthesis function (longer budget); falls back
+        # to _llm_fn when a caller only wired the generic one.
+        self._verify_llm_fn: Optional[Callable[[str], Optional[str]]] = None
         self._composer = AnswerComposer(llm_fn=None)
 
         # Track last answer-person for pronoun resolution (who-directed questions)
@@ -350,10 +652,377 @@ class MediaIntelligenceAdapter:
             logger.info("[ENTITY_REGISTER] subject=%s topic=%s response_len=%d", subject, topic.value, len(raw_response))
         else:
             logger.info("[ENTITY_REGISTER] subject=%s topic=%s", subject, topic.value)
+        # Semantic relationship knowledge: every piece of evidence about an
+        # entity is turned into structured facts ONCE (LLM reads meaning,
+        # free-form relation labels — no vocabulary). Later relationship
+        # questions ("who made that again?") and role-catalog callbacks
+        # ("what else has that studio made") resolve from the store instead
+        # of re-deriving from fresh retrieval every time.
+        self._extract_and_store_relationships(subject, raw_response)
         # Sync to unified SessionState using DomainContinuationType-compatible value
         if self._session_state:
             _dom_val = self._topic_to_continuity_domain(topic)
             self._session_state.set_entity_and_domain(subject, _dom_val)
+        # Sync to unified SessionState using DomainContinuationType-compatible value
+        if self._session_state:
+            _dom_val = self._topic_to_continuity_domain(topic)
+            self._session_state.set_entity_and_domain(subject, _dom_val)
+
+    # ── canonical relationship store (generalized semantic mechanism) ─────────
+
+    # Store answers are a fast path, never the authority: any stored fact
+    # older than this TTL (or any CURRENT-state question) falls through to
+    # the live retrieval path, so newer evidence always supersedes obsolete
+    # store state (temporal invariant) without needing a catalog of
+    # "mutable" predicates — the clock is the general arbiter.
+    _STORE_ANSWER_TTL_S = 14 * 24 * 3600
+
+    def _get_relationship(self, subject: str, role_noun: str,
+                          session_id: str = "") -> str:
+        """Semantic relationship lookup: best stored fact about `subject`
+        whose free-form relation label matches `role_noun` by MEANING
+        (relation_similarity — "director" matches a stored "directed",
+        "CEO" matches "is CEO of"). No vocabulary: the store's own labels
+        are compared lexically, so any role word works."""
+        try:
+            rels = self._ctx.find_relationships(subject=subject,
+                                                session_id=session_id)
+        except Exception:
+            rels = []
+        best, best_score = "", 0.0
+        for r in rels:
+            s = relation_similarity(role_noun, r.predicate)
+            if s > best_score:
+                best, best_score = r.object, s
+        return best if best_score >= 0.45 else ""
+
+    def _store_relationship_triple(self, subject: str, predicate: str,
+                                   obj: str, *, method: str = "marker",
+                                   session_id: str = "", confidence: float = 0.7,
+                                   evidence: str = "") -> None:
+        try:
+            from mini_kio.media.intelligence.media_intelligence_models import (
+                RelationshipRecord,
+            )
+            self._ctx.add_relationship(RelationshipRecord(
+                subject=subject, predicate=predicate, object=obj,
+                confidence=confidence, evidence=evidence,
+                source=method, session_id=session_id,
+            ))
+        except Exception:
+            pass
+
+    def _extract_and_store_relationships(self, subject: str,
+                                         raw_response: Optional[str],
+                                         session_id: str = "") -> None:
+        """Turn retrieved evidence about a subject into structured knowledge
+        ONCE per evidence — SEMANTIC extraction first (the LLM reads the
+        text and emits free-form (relation, object) pairs, so arbitrary
+        English formulations and arbitrary domains need no vocabulary),
+        with the deterministic scanner as the offline no-LLM fallback."""
+        import logging
+        logger = logging.getLogger(__name__)
+        if not subject or not raw_response:
+            return
+        rels: list = []
+        if self._llm_fn:
+            try:
+                rels = semantic_extract_relationships(
+                    subject, raw_response, self._llm_fn, session_id=session_id,
+                )
+                if rels:
+                    logger.info(
+                        "[RELATIONSHIP_STORE] subject=%s triples=%d source=semantic (%s)",
+                        subject, len(rels),
+                        ", ".join(f"{r.predicate}:{r.object}" for r in rels[:8]),
+                    )
+            except Exception as exc:
+                logger.debug("[RELATIONSHIP_EXTRACT] semantic failed: %s", exc)
+                rels = []
+        if not rels:
+            try:
+                rels = extract_relationships(raw_response, anchor=subject,
+                                             session_id=session_id)
+            except Exception as exc:
+                logger.debug("[RELATIONSHIP_EXTRACT] deterministic failed: %s", exc)
+                return
+            if rels:
+                logger.info(
+                    "[RELATIONSHIP_STORE] subject=%s triples=%d source=marker (%s)",
+                    subject, len(rels),
+                    ", ".join(f"{r.predicate}:{r.object}" for r in rels[:8]),
+                )
+        for r in rels:
+            self._ctx.add_relationship(r)
+
+    # Question-shape detection for store-first relationship answering.
+    # Generic morphology (role verbs + role nouns from the canonical
+    # vocabulary), never per-entity.
+    def _relationship_question(self, query: str) -> Optional[list]:
+        ql = (query or "").strip()
+        if not ql:
+            return None
+        # Grammar-based question parsing — NO role vocabulary. The subject is
+        # whatever entity phrase the question names; the relation is the words
+        # that describe it. The store lookup below grounds which split is the
+        # intended one, so arbitrary relation wording works with zero catalog.
+        cands: list[dict] = []
+        # "who is the X of Y" / "who was the X of Y" -> subject=Y, relation=X
+        m = re.match(
+            r"^who\s+(?:is|are|was|were)\s+(?:the\s+)?(.+?)\s+of\s+(?:the\s+)?(.+?)\s*[?.!]*$",
+            ql, re.I,
+        )
+        if m:
+            _rel = m.group(1).strip()
+            _subj = m.group(2).strip()
+            if len(_subj) >= 2 and len(_rel) >= 2:
+                cands.append({"subject": _subj, "relation": _rel})
+        # "who X Y" (X = relation phrase, Y = subject): try every split point;
+        # the store resolves which one names a real subject.
+        m = re.match(r"^who\s+(.+?)\s*[?.!]*$", ql, re.I)
+        if m:
+            _tail = m.group(1).strip()
+            _words = _tail.split()
+            for _k in range(1, len(_words)):
+                _rel_w = " ".join(_words[:_k])
+                _subj_w = " ".join(_words[_k:])
+                if len(_subj_w) >= 2 and len(_rel_w) >= 2:
+                    cands.append({"subject": _subj_w, "relation": _rel_w})
+        # "Y's X" (possessive role question) -> subject=Y, relation=X
+        m = re.match(
+            r"^([\w.'\u2019-]+(?:\s+[\w.'\u2019-]+)*)'s\s+(.+?)\s*[?.!]*$",
+            ql, re.I,
+        )
+        if m:
+            _subj = m.group(1).strip()
+            _rel = m.group(2).strip()
+            if len(_subj) >= 2 and len(_rel) >= 2:
+                cands.append({"subject": _subj, "relation": _rel})
+        if not cands:
+            return None
+        return cands
+
+    def _maybe_relationship_answer(self, query: str,
+                                   session_id: str = "") -> Optional[IntelligenceResult]:
+        """Store-first relationship answering: when the store already holds a
+        fact whose subject and relation label match the question by MEANING,
+        answer directly — no fresh retrieval. The store was populated by
+        semantic extraction of evidence on an earlier turn, so this is a
+        lookup over previously verified evidence, never a fabrication.
+
+        Matching is vocabulary-free: the question is parsed by grammar into
+        (subject, relation-words) candidates, each candidate is looked up in
+        the store, and stored relation labels are compared to the question's
+        relation words with relation_similarity (lexical shared meaning). A
+        CURRENT-state question ("who is the CEO now") always goes live, and
+        any stored fact older than _STORE_ANSWER_TTL_S falls through too —
+        newer credible evidence supersedes obsolete store state."""
+        import logging
+        logger = logging.getLogger(__name__)
+        ql = query.lower()
+        _fresh_words = ("current", "currently", "now", "latest", "today",
+                        "new", "recent", "still", "right now")
+        if any(w in ql for w in _fresh_words):
+            return None
+        cands = self._relationship_question(query)
+        if not cands:
+            return None
+        import time as _t
+        _now = _t.time()
+        best: Optional[tuple] = None
+        best_score = 0.0
+        for cand in cands:
+            subject = cand["subject"]
+            relation_words = cand["relation"]
+            try:
+                rels = self._ctx.find_relationships(subject=subject,
+                                                    session_id=session_id)
+            except Exception:
+                rels = []
+            inverted = False
+            if not rels:
+                try:
+                    rels = self._ctx.find_relationships(object_=subject,
+                                                        session_id=session_id)
+                except Exception:
+                    rels = []
+                inverted = bool(rels)
+            for r in rels:
+                if (_now - r.timestamp) > self._STORE_ANSWER_TTL_S:
+                    continue
+                score = relation_similarity(relation_words, r.predicate)
+                if score > best_score:
+                    best = (subject, relation_words, r, inverted)
+                    best_score = score
+        if not best or best_score < 0.5:
+            # SEMANTIC adjudication: the store holds facts about the subject
+            # but no stored relation label lexically matches the question's
+            # relation words ("who made the game X" vs stored "developed by"
+            # — same meaning, different words). The LLM — the meaning
+            # interpreter — picks which stored fact answers the question.
+            # This is the vocabulary-free generalization: no synonym table,
+            # no per-relation mapping; the interpreter reads meaning. When
+            # the LLM is unavailable the lookup simply misses and the live
+            # retrieval path answers (correct, just slower).
+            if self._llm_fn:
+                try:
+                    _cand_subjects = {c["subject"] for c in cands}
+                    for _subj in _cand_subjects:
+                        _facts = self._ctx.find_relationships(
+                            subject=_subj, session_id=session_id)
+                        if not _facts:
+                            continue
+                        _facts = [f for f in _facts
+                                  if (_now - f.timestamp) <= self._STORE_ANSWER_TTL_S]
+                        if not _facts:
+                            continue
+                        _lines = "\n".join(
+                            f"- {f.predicate} {f.object}" for f in _facts[:10]
+                        )
+                        _prompt = (
+                            f"The user asked: {query!r}\n\n"
+                            f"Stored facts about {_subj}:\n{_lines}\n\n"
+                            f"Which stored fact, if any, directly answers the "
+                            f"question? Reply with ONLY the object(s) of the "
+                            f"matching fact(s), separated by ' | ', or exactly "
+                            f"NONE if no fact answers."
+                        )
+                        _raw = self._llm_fn(_prompt)
+                        _DEGEN = {"none", "unknown", "n/a", "na", "no", "none.",
+                                  "not sure", "i don't know", "i dont know",
+                                  "does not answer", "no fact answers"}
+                        if _raw and _raw.strip().upper() != "NONE":
+                            _objs = [o.strip() for o in re.split(r"\s*\|\s*", _raw)
+                                     if o.strip()
+                                     and o.strip().lower().strip(".") not in _DEGEN
+                                     and len(o.strip()) >= 2]
+                            if _objs:
+                                # Use the fact whose OBJECT was actually
+                                # returned, so the reply carries the matched
+                                # relation label ("Team Cherry developed by
+                                # Hollow Knight" -> "Team Cherry developed
+                                # Hollow Knight"), not the store's first fact.
+                                _matched_fact = None
+                                for _f in _facts:
+                                    if any(
+                                        re.sub(r"[^a-z0-9]+", "", _f.object.lower())
+                                        == re.sub(r"[^a-z0-9]+", "", o.lower())
+                                        for o in _objs
+                                    ):
+                                        _matched_fact = _f
+                                        break
+                                if _matched_fact is None:
+                                    _matched_fact = _facts[0]
+                                return self._relationship_store_result(
+                                    query, _subj, _matched_fact, _objs,
+                                    session_id, source="relationship_store_semantic",
+                                )
+                except Exception as exc:
+                    logger.debug("[RELATIONSHIP_ADJUDICATE] failed: %s", exc)
+            return None
+        subject, relation_words, rel_record, inverted = best
+        # Collect EVERY stored fact matching the same (subject, relation)
+        # meaning — "who founded tesla" returns BOTH co-founders ("Martin
+        # Eberhard and Marc Tarpenning"), never just the last one written.
+        answers = []
+        try:
+            _all = self._ctx.find_relationships(subject=subject,
+                                                session_id=session_id)
+            for _r in _all:
+                if (_now - _r.timestamp) > self._STORE_ANSWER_TTL_S:
+                    continue
+                if relation_similarity(relation_words, _r.predicate) >= 0.5:
+                    answers.append(_r.object if not inverted else _r.subject)
+        except Exception:
+            answers = [rel_record.object if not inverted else rel_record.subject]
+        if not answers:
+            answers = [rel_record.object if not inverted else rel_record.subject]
+        return self._relationship_store_result(
+            query, subject, rel_record, answers, session_id,
+            source="relationship_store",
+        )
+
+    def _relationship_store_result(self, query: str, subject: str,
+                                   rel_record, answers: list, session_id: str,
+                                   source: str) -> Optional[IntelligenceResult]:
+        """Compose the store-first reply and keep session state aligned."""
+        import logging
+        logger = logging.getLogger(__name__)
+        _seen, _uniq = set(), []
+        for a in answers:
+            k = re.sub(r"[^a-z0-9]+", "", a.lower())
+            if k and k not in _seen:
+                _seen.add(k)
+                _uniq.append(a)
+        if not _uniq:
+            return None
+        # Reply reuses the stored free-form relation label ("founded", "is
+        # CEO of", "directed") — the semantic extractor emits labels that
+        # read naturally in "{object} {relation} {subject}" order, so no
+        # phrasing table is needed.
+        _display_subject = subject
+        if _display_subject and _display_subject.islower():
+            _display_subject = _display_subject.title()
+        _joined = _uniq[0] if len(_uniq) == 1 else (
+            ", ".join(_uniq[:-1]) + " and " + _uniq[-1]
+        )
+        # The stored label may carry a passive trailing "by" ("developed by")
+        # from the interpreter — strip it for the natural active-voice reply
+        # ("Team Cherry developed Hollow Knight.").
+        _pred = re.sub(r"\s+by$", "", rel_record.predicate.strip())
+        text = f"{_joined} {_pred} {_display_subject}."
+        logger.info("[RELATIONSHIP_ANSWER] q=%s subject=%s relation=%s objects=%s",
+                    query, subject, rel_record.predicate, _uniq)
+        _topic = classify_topic(query).topic or TopicType.UNKNOWN
+        self._register_entity(subject, _topic, confidence=0.9)
+        self._continuity.update_context(query, _topic, subject, 0.9)
+        return IntelligenceResult(
+            topic=_topic,
+            response_text=text,
+            subject=subject,
+            confidence=0.9,
+            source=source,
+        )
+
+    def _resolve_relationship(self, subject: str, role_noun: str,
+                              evidence_text: str,
+                              session_id: str = "") -> tuple[str, str]:
+        """Resolve {subject}'s {role} from evidence — semantic LLM first
+        (arbitrary surface forms), canonical extractor fallback. Returns
+        (name, method)."""
+        name = ""
+        if self._llm_fn:
+            try:
+                snippet = re.sub(r"\s+", " ", (evidence_text or "")[:3000]).strip()
+                prompt = (
+                    f"Text about the work {subject!r}:\n\n{snippet}\n\n"
+                    f"What is the name of {subject}'s {role_noun}? If the text "
+                    f"does not name a {role_noun}, answer exactly UNKNOWN. "
+                    f"Otherwise answer with ONLY the name — no explanation, "
+                    f"no extra words."
+                )
+                raw = self._llm_fn(prompt)
+                if raw:
+                    raw = raw.strip().strip('"').strip("'")
+                    _first = raw.splitlines()[0].strip().rstrip(".!?;: ")
+                    _lower = _first.lower()
+                    if (
+                        _first and _first.upper() != "UNKNOWN" and len(_first) <= 60
+                        and not _lower.startswith(("the ", "based ", "according ", "i ",
+                                                   "it is ", "there ", "sorry", "unknown"))
+                    ):
+                        name = _first
+            except Exception:
+                name = ""
+        if name:
+            return (name, "llm")
+        from mini_kio.media.intelligence.relationship_extractor import (
+            RelationshipExtractor,
+        )
+        holder = RelationshipExtractor().role_holder_from_text(
+            evidence_text or "", role_noun, anchor=subject, session_id=session_id,
+        )
+        return (holder, "marker") if holder else ("", "none")
 
     def _try_memory_resolve(self, query: str, topic: TopicType) -> Optional[IntelligenceResult]:
         import logging
@@ -803,7 +1472,7 @@ class MediaIntelligenceAdapter:
         }
         return mapping.get(name, name.lower().replace(" ", "_"))
 
-    def handle(self, query: str, execute: bool = True) -> IntelligenceResult:
+    def handle(self, query: str, execute: bool = True, session_id: str = "") -> IntelligenceResult:
         import logging
         logger = logging.getLogger(__name__)
 
@@ -811,6 +1480,184 @@ class MediaIntelligenceAdapter:
         last_e = self._mem.get_last_entity()
         if last_e:
             self._media_context.set_last_entity(last_e)
+
+        # 0a. Role-catalog referent: "what else has that director made",
+        # "what other films has this actor been in", "what else has that
+        # author written" — the ROLE noun (director/author/actor/...) points
+        # back at the most recently discussed subject (the movie/book just
+        # recommended). The catalog answer CHANGES over time (a working
+        # director keeps releasing), so it must come from LIVE research, never
+        # the LLM's memory (live: Nolan's filmography answered from memory
+        # after The Odyssey had already released). Resolve the referent to a
+        # research query naming the role holder of the recent subject, e.g.
+        # "what else has that director made" after Annihilation ->
+        # "Annihilation director other films" — the provider resolves the
+        # actual person (Alex Garland) and returns a CURRENT filmography.
+        # Generic determiner + role-noun morphology, never per-entity.
+        _ROLE_CATALOG_RE = re.compile(
+            r"^\s*(?:what|which)\s+(?:else|other\s+films|other\s+movies|other\s+works|other\s+albums|other\s+books|other\s+games|other\s+titles|other\s+projects)?\s*(?:has|did)\s+"
+            r"(?:that|this|the)\s+(director|author|writer|actor|actress|artist|band|singer|composer|creator|producer|developer|screenwriter|studio|company|team|label)\s+"
+            r"(?:made|make|done|did|directed|direct|written|write|created|create|produced|produce|composed|compose|released|release|recorded|record|starred|star|been\s+in|put\s+out|working\s+on|worked\s+on)\b.*",
+            re.I,
+        )
+        # Second role-catalog form: "did that director do any tv shows?",
+        # "has that studio made any games?" — the role holder's OTHER WORK
+        # scope (now including TV/series), same referent semantics as the
+        # "what else has that director made" form. Live: answered from
+        # hallucinated memory because it never matched the catalog route and
+        # fell to the followup/memory path.
+        _ROLE_CATALOG_RE2 = re.compile(
+            r"^\s*(?:did|has)\s+(?:that|this|the)\s+(director|author|writer|actor|actress|artist|band|singer|composer|creator|producer|developer|screenwriter|studio|company|team|label)\s+"
+            r"(?:do|make|direct|write|create|produce|compose|release|record|star|work|have)\s+"
+            r"(?:any\s+|more\s+|other\s+)?(?:tv|tv\s+shows|shows|series|films?|movies?|albums?|books?|games?|projects?|work|works|stuff)\b.*",
+            re.I,
+        )
+        _role_catalog_m = _ROLE_CATALOG_RE.match(query.strip())
+        if not _role_catalog_m:
+            _role_catalog_m2 = _ROLE_CATALOG_RE2.match(query.strip())
+            if _role_catalog_m2:
+                _role_catalog_m = _role_catalog_m2
+        if _role_catalog_m:
+            _role_noun = _role_catalog_m.group(1).lower()
+            # The anchor MUST come from THIS conversation first. The media
+            # adapter's ContextStore / MediaEntityMemory hold entity state
+            # shared across ALL sessions and persisted to disk — a stale entity
+            # from an unrelated earlier session ("Idiots"/Macon Blair) would
+            # otherwise hijack the referent (live: after "recommend me a
+            # sci-fi movie" -> Arrival, "what else has that director made"
+            # answered Macon Blair from stale memory instead of Villeneuve).
+            # The SESSION's own last entity (SessionContext.active_entity —
+            # set by the previous turn's result subject) is the authoritative
+            # anchor: after "who directed Annihilation" the session entity is
+            # "annihilation", never the reply's answer person.
+            _recent = None
+            if session_id:
+                try:
+                    from mini_kio.core.context_manager import get_context_manager as _gsc
+                    _sctx = _gsc(session_id)
+                    _recent = getattr(_sctx, "active_entity", None) or None
+                except Exception:
+                    _recent = None
+            if not _recent and session_id:
+                try:
+                    from mini_kio.core.context_manager import get_context_manager as _gsc
+                    _sctx = _gsc(session_id)
+                    _recent = _recent_session_media_subject(_sctx)
+                except Exception:
+                    _recent = None
+            if not _recent:
+                _recent = self._ctx.recent_subject() or (last_e.name if last_e else None)
+            if _recent:
+                _topic = classify_topic(query).topic or TopicType.MOVIES
+                _pred = canonical_predicate_for_role(_role_noun)
+                # Two-step resolution: FIRST identify the role holder of the
+                # recent work ("Moon director" -> Duncan Jones), THEN query
+                # that person's works. The old single-shot ("Moon director
+                # other works filmography latest") let the provider return an
+                # UNRELATED page (live: an article about director "Juno Hong"
+                # whose film "Only the Moon Knows" merely contains "Moon"),
+                # and the role-stem relevance bypass accepted it -> a
+                # fabricated filmography. Disambiguating the work by type
+                # ("Moon film director") keeps step 1 on the right article.
+                _type_word = {
+                    TopicType.MOVIES: "film", TopicType.TV: "series",
+                    TopicType.BOOKS: "book", TopicType.GAMING: "game",
+                    TopicType.MUSIC: "song", TopicType.SPORTS: "team",
+                }.get(_topic, "")
+                # Relationship-state reuse (canonical store): if evidence from
+                # an earlier turn already established (work -> role -> holder),
+                # reuse it — later callbacks ("what else has that director
+                # made?" asked twice, or after a topic round-trip) must answer
+                # from the SAME relationship, never re-extract from fresh
+                # evidence and drift. Only when the store misses do we retrieve
+                # fresh evidence and resolve semantically.
+                _holder_name = ""
+                _holder_method = "none"
+                _holder_raw = ""
+                if _pred:
+                    # Semantic holder lookup: pass the surface ROLE NOUN
+                    # ("director", "ceo", "developer") — _get_relationship now
+                    # matches stored free-form relation labels by meaning, so
+                    # the canonical-predicate fold is not required.
+                    _holder_name = self._get_relationship(_recent, _role_noun, session_id)
+                    if _holder_name:
+                        _holder_method = "store"
+                if not _holder_name:
+                    _holder_q = f"{_recent} {_role_noun}"
+                    if _type_word:
+                        _holder_q = f"{_recent} {_type_word} {_role_noun}"
+                    _holder_res = self._safe_retrieve(_holder_q, topic=_topic.value)
+                    _holder_raw = ((_holder_res.raw_content or _holder_res.summary or "") if _holder_res else "")
+                    # SEMANTIC role-holder resolution (canonical NLU owner):
+                    # the LLM names the {work}'s {role} from the retrieved
+                    # evidence — form-agnostic across all sentence shapes and
+                    # domains — with the canonical relationship extractor as
+                    # the deterministic fallback. Never a per-example regex.
+                    _holder_name, _holder_method = self._resolve_relationship(
+                        _recent, _role_noun, _holder_raw, session_id,
+                    ) if _holder_raw else ("", "none")
+                    if _holder_name and _pred:
+                        self._store_relationship_triple(
+                            _recent, _pred, _holder_name, method=_holder_method,
+                            session_id=session_id, confidence=0.7,
+                            evidence=_holder_raw[:220],
+                        )
+                # Domain-appropriate "other works" vocabulary (general map,
+                # never per-entity): a director has a filmography, an author a
+                # bibliography, an artist a discography, a studio a game list.
+                # Querying "works filmography" for a game studio retrieved the
+                # studio's latest patch notes instead of its games (live).
+                _works_word = {
+                    TopicType.MOVIES: "filmography",
+                    TopicType.TV: "shows and series",
+                    TopicType.BOOKS: "bibliography",
+                    TopicType.MUSIC: "discography",
+                    TopicType.GAMING: "list of games",
+                    TopicType.SPORTS: "career highlights",
+                }.get(_topic, "works")
+                # "Wikipedia" biases the works query toward the stable
+                # reference page (a director's filmography section, a studio's
+                # game list) instead of the holder's latest news/patch notes.
+                if _holder_name and len(_holder_name.split()) <= 4:
+                    _resolved_q = f"{_holder_name} {_works_word} Wikipedia"
+                    _subject = _holder_name
+                else:
+                    _resolved_q = f"{_recent} {_role_noun} {_works_word} Wikipedia"
+                    _subject = f"{_recent} {_role_noun}"
+                logger.info("[ROLE_CATALOG_RESOLVE] query=%s role=%s recent=%s holder=%s method=%s resolved=%s",
+                            query, _role_noun, _recent, _holder_name or "none", _holder_method or "none", _resolved_q)
+                _text, _res = self._retrieve_and_summarize(_resolved_q, _topic, _subject)
+                self._register_entity(_subject, _topic, result=_res, confidence=0.7)
+                self._continuity.update_context(query, _topic, _subject, 0.7)
+                return IntelligenceResult(
+                    topic=_topic,
+                    response_text=_text,
+                    subject=_recent,
+                    confidence=0.7,
+                    source="role_catalog",
+                )
+
+        # 0a-prime. Store-first relationship answering: "who directed that
+        # again?", "who founded X", "who is the CEO of X" resolve directly
+        # from the canonical relationship store (populated by evidence
+        # extraction on earlier turns) — instant, grounded, no fresh
+        # retrieval. Fresh entities still flow through the live retrieval
+        # path below, which extracts and stores for the next turn.
+        _rel_answer = self._maybe_relationship_answer(query, session_id)
+        if _rel_answer is not None:
+            logger.info("[RELATIONSHIP_ANSWER_RESOLVED] query=%s source=%s",
+                        query, _rel_answer.source)
+            return _rel_answer
+
+        # 0a-prime2. Claim-selection referent ("the second one", "which part
+        # is true", "which one") with pending verification claims MUST reach
+        # verification BEFORE the artifact-acceptance path steals the ordinal
+        # (live: after a 3-claim verification, "the second one" resolved to a
+        # $5.99 app listing instead of the second claim).
+        if _is_claim_selection_referent(query) and self.has_pending_verif_claims(session_id):
+            vres = self._handle_verification(query, session_id)
+            if vres is not None:
+                return vres
 
         # 0a. Acceptance handler for yes/ok/sure/show it
         accept_res = self._handle_acceptance(query)
@@ -826,7 +1673,22 @@ class MediaIntelligenceAdapter:
         if any(w in query.lower() for w in rec_triggers):
             return self._handle_recommendation(query)
 
-        # 2. check continuity first
+        # 1.5 Verification / currentness gate — BEFORE continuity. A message
+        # carrying its OWN verification claim ("I read that the new F1 car got
+        # banned and the team principal resigned. Any truth to that?") is a
+        # new changing-world request, never a followup of the previous topic:
+        # the followup path would rewrite it into "<last entity> latest news"
+        # and answer a completely different question (live: F1 claim answered
+        # with Ferrari engine speculation). Pure referential followups ("is
+        # that actually true?") still reach the gate and are anchored/reclaimed
+        # inside the verification handler.
+        if self._is_verification_query(query) or self._is_verif_elaboration_followup(query, session_id):
+            logger.info("[VERIFICATION_PATH] query=%s", query)
+            vres = self._handle_verification(query, session_id)
+            if vres is not None:
+                return vres
+
+        # 2. check continuity next
         if self._continuity.is_followup(query):
             logger.info("[FOLLOWUP_DETECTED] query=%s", query)
             followup_res = self._handle_followup(query, execute=execute)
@@ -1108,6 +1970,781 @@ class MediaIntelligenceAdapter:
             confidence=0.0,
             source="none",
         )
+
+    # ── verification / currentness (multi-claim, temporal) ────────────────────
+
+    _VERIF_FRAMES = (
+        "i heard", "i read", "i saw", "someone told me", "apparently",
+        "people are saying", "there's a rumor", "there is a rumor",
+        "is it true", "is it confirmed", "is that actually true",
+        "is this actually true", "is it official", "is there news",
+        "has it been confirmed", "has it been announced", "did you hear",
+        "rumor has it", "is that real", "is this real",
+    )
+    _VERIF_STATE = (
+        "passed away", "died", "death", "retire", "retired", "cancelled",
+        "canceled", "delayed", "released", "confirmed", "announced", "left",
+        "quit", "fired", "hired", "injured", "arrested", "married",
+        "divorced", "born", "transferred", "stepped down", "is still",
+        "still alive", "still ceo", "still playing", "still available",
+        "dead", "alive", "really happen", "actually happen", "actually say",
+        "really say", "what happened to", "is true", "really true",
+        # General state/event predicates — the same semantic class: a
+        # changing-world assertion ("The Warriors won last night") registers
+        # as a verifiable proposition only if its predicate is in this
+        # vocabulary, and "did X win" routes as a verification query. Without
+        # these the assertion was never registered and the follow-up reclaim
+        # fell back to STALE claims from an earlier turn (live: "Did that
+        # actually happen?" after a Warriors assertion verified the previous
+        # Ronaldo claim instead).
+        "won", "lost", "beat", "defeated", "signed", "joined", "rejoined",
+        "acquired", "bought", "sold", "merged", "launched", "unveiled",
+        "promoted", "demoted", "replaced", "appointed", "elected",
+        "nominated", "resigned", "suspended", "banned", "returned",
+        "moved", "broke", "broken", "crashed", "shut down", "postponed",
+        "pulled", "scrapped", "delisted", "downgraded", "upgraded",
+    )
+
+    def _is_verif_elaboration_followup(self, query: str, session_id: str = "") -> bool:
+        """Context-aware verification gate: is this an ELABORATION follow-up of
+        the previous verification turn ("what exactly did Messi say?", "when
+        did that happen?", "what did he announce?") rather than a fresh
+        topic?
+
+        The bare phrase carries no verification frame ("say" is not a state
+        verb), so the text-only gate misses it and it falls to the topic
+        router — which answered "what exactly did Messi say?" with an
+        unrelated World Cup quote (live failure). When the previous turn
+        stored verification claims AND this query only names the SAME entity
+        plus pure question/elaboration words (no new state verb/proposition:
+        "did Messi retire" names a new predicate and stays a fresh claim),
+        route it to verification so the reclaim logic reuses the prior claims.
+        """
+        try:
+            _last = self._ctx.get(self._claims_key(session_id))
+        except Exception:
+            _last = None
+        _last_claims = getattr(_last, "value", None) if _last is not None else None
+        if not (isinstance(_last_claims, list) and _last_claims):
+            return False
+        _q_toks = _meaningful_tokens(query)
+        if not _q_toks:
+            return False
+        _elab = frozenset({
+            "exactly", "explain", "mention", "mentioned", "tell", "told",
+            "mean", "meant", "about", "happen", "happened", "doing",
+            "react", "reacted", "response", "announce", "announced",
+            "said", "say", "says", "talk", "talking", "talked", "detail",
+            "details", "elaborate", "actually", "really", "what", "when",
+            "where", "why", "how", "who", "which", "that", "this", "it",
+            "then", "after", "before", "next", "again", "now",
+        }) | _VERIF_GENERIC_TOKENS
+        _msg_entity_l = (_message_entity_name(query) or "").lower()
+        _entity_in_claims = bool(
+            _msg_entity_l
+            and any(_msg_entity_l in (c or "").lower() for c in _last_claims)
+        )
+        _leftover = _q_toks - _elab
+        if _msg_entity_l:
+            _leftover = _leftover - {_msg_entity_l}
+        # Entity-named elaboration OR fully-referential elaboration
+        # ("when did that happen" — no entity, all question words).
+        if not _leftover and (_entity_in_claims or not _msg_entity_l):
+            logger.info(
+                "[VERIF_ELAB_GATE] query=%s entity=%s last_claims=%s",
+                query, _msg_entity_l, _last_claims,
+            )
+            return True
+        return False
+
+    def _is_verification_query(self, query: str) -> bool:
+        """Detect verification/currentness-style requests.
+
+        "I heard X" / "did X die" / "is it true that X" / "is X still ..."
+        are requests to check the CURRENT state of a changing world — they
+        must use live multi-source evidence. Ordinary statements ("I heard
+        that movie was amazing") carry no verification frame and skip.
+        """
+        ql = (query or "").lower().strip()
+        if not ql:
+            return False
+        if any(f in ql for f in self._VERIF_FRAMES):
+            return True
+        if re.search(
+            r"\b(?:did|has|is|was|were)\s+(?:[a-z]+\s+){0,4}(?:die|died|death|retire|retired|cancelled|delayed|released|confirmed|announced|left|quit|fired|hired|injured|arrested|transferred|stepped\s+down|dead|alive|win|won|lose|lost|beat|beaten|drop|dropped|score|scored|play|played|resign|resigned|join|joined|signed|debut|return|returned|release)\b",
+            ql,
+        ):
+            return True
+        # TRAILING verification suffix ("... Is any of that true?", "...
+        # actually true?", "... real?"): the claim is checked BEFORE the
+        # suffix, so leading-frame checks above miss it. Requires a state
+        # verb or named entity in the claim part to stay a real verification
+        # request ("That sounds great, is it really that good?" stays
+        # conversational).
+        _trail = re.search(
+            r"^(.*?)\s*[,;:.!-]?\s*"
+            r"(?:is\s+(?:any\s+of\s+)?that\s+(?:actually\s+|really\s+)?true\b|"
+            r"is\s+this\s+(?:actually\s+|really\s+)?true\b|is\s+that\s+(?:actually\s+|really\s+)?real\b|"
+            r"is\s+it\s+(?:actually\s+|really\s+)?(?:true|real)\b|"
+            r"(?:is\s+that\b|is\s+this\b|is\s+it\b|right\b|actually\s+true\b|"
+            r"really\b|true\b|real\b))[?.!\s]*$",
+            ql,
+        )
+        if _trail:
+            _claim_part = (_trail.group(1) or "").strip()
+            _has_state_verb = any(v in _claim_part for v in self._VERIF_STATE)
+            # Sentence-initial capitals ("The fix works...") are ordinary
+            # capitalization, not a named entity — exclude the leading token.
+            _tokens = (query or "").strip().split()
+            _first_is_cap = bool(_tokens) and bool(re.search(r"[A-Z][A-Za-z0-9]", _tokens[0]))
+            _rest_text = " ".join(_tokens[1:]) if _tokens else ""
+            _has_cap = bool(re.search(r"[A-Z][A-Za-z0-9]", _rest_text)) if _first_is_cap else bool(re.search(r"[A-Z][A-Za-z0-9]", query or ""))
+            # Habitual grumbling ("keeps breaking things again") is not a
+            # discrete verifiable event.
+            _habitual = bool(re.search(r"\b(?:keeps?|always|constantly)\b.*\b(?:again|breaking)\b", _claim_part))
+            if not _habitual and len(_claim_part.split()) >= 3 and (_has_state_verb or _has_cap):
+                return True
+        return any(v in ql for v in self._VERIF_STATE)
+
+    # ── User-assertion proposition registration ────────────────────────────
+    # A declarative user statement ("Ronaldo got married too", "Apple
+    # released a new device") is a PROPOSITION with provenance=user and
+    # verification=unknown. It must become discourse state so a later bare
+    # probe ("Is this true?", "Really?", "Did that actually happen?") can
+    # resolve its reference against it. This registers into the SAME
+    # last_verif_claims store the follow-up reclaim reads — one proposition
+    # store, one reclaim mechanism, zero phrase rules.
+    def _claims_key(self, session_id: str = "") -> str:
+        """Session-scoped claim-store key. Claims are discourse state of ONE
+        conversation: user A's pending proposition must never be reclaimable
+        by user B's probe, and a claim from a previous conversation must not
+        survive into a new one. Scoping by session (the pipeline's
+        tg_<uid> / browser_<uid> id) isolates the store per conversation
+        owner; the unscoped key remains the legacy fallback for callers that
+        do not thread a session."""
+        return f"last_verif_claims:{session_id}" if session_id else "last_verif_claims"
+
+    def register_user_assertion(self, text: str, session_id: str = "") -> None:
+        try:
+            claims = self._split_claims(text or "")
+            claims = [c for c in claims if len(c.split()) >= 2]
+            if claims:
+                self._ctx.put(self._claims_key(session_id), claims, source="user_assertion")
+        except Exception:
+            pass
+
+    def has_pending_verif_claims(self, session_id: str = "") -> bool:
+        try:
+            _last = self._ctx.get(self._claims_key(session_id))
+            _claims = getattr(_last, "value", None) if _last is not None else None
+            return bool(isinstance(_claims, list) and _claims)
+        except Exception:
+            return False
+
+    def clear_user_claims(self, session_id: str = "") -> None:
+        """Consume the session's pending claims. Called when the user moves
+        to a new topic (a bare probe refers to the IMMEDIATELY preceding
+        proposition — an old claim must never be resurrected by a later
+        "is that true?")."""
+        try:
+            self._ctx.remove(self._claims_key(session_id))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _split_claims(query: str) -> list[str]:
+        """Split a multi-claim message into individual claims.
+
+        "I heard Messi's father passed away and he said he can't play long
+        anymore" -> ["Messi's father passed away", "he said he can't play
+        long anymore"]. Splits on coordinating conjunctions, sentence
+        boundaries, AND comma-separated independent clauses ("X happened,
+        Y happened, and Z happened" -> [X, Y, Z] — without the comma split
+        a 4-proposition message collapses into one claim and synthesis
+        wanders into retrieved evidence); trims verification prefixes from
+        each claim. Bounded so a long rumor dump cannot explode into a
+        giant loop.
+        """
+        text = query.strip()
+        # Split on clause conjunctions and sentence punctuation, keeping the
+        # conjunction-separated fragments as claims. Commas split when the
+        # fragment after them is a NEW independent clause: it starts with a
+        # capitalized token, a pronoun, OR a lowercase subject followed by an
+        # event/state verb ("...rocket, spotify bought a podcast company" —
+        # live failure: the lowercase "spotify" after the comma blocked the
+        # split and the whole 3-proposition message collapsed into one claim).
+        # Relative-clause continuations ("which released...", "who is
+        # known...") and title-internal commas never split.
+        parts = re.split(
+            r"\s+(?:and|also|then|plus)\s+|\s*[;.]\s*|,?\s+and\s+"
+            r"|,\s+(?=(?-i:[A-Z])(?:[a-z]|\s)|I\b|he\b|she\b|they\b|it\b|we\b|you\b"
+            r"|(?!(?:which|that|who|whose|where|when|while)\b)[^,.]{0,90}\b"
+            r"(?:bought|launched|released|won|lost|died|passed|retired|announced|signed|left|quit|stepped|delayed|cancelled|canceled|happened|confirmed|fired|hired|joined|transferred|said|told|got|became|resigned|sold|acquired|merged|started|ended|returned|came|went)\b)",
+            text,
+            flags=re.I,
+        )
+        parts = [p.strip(" ,;.\"'") for p in parts if p and p.strip(" ,;.\"'")]
+        claims: list[str] = []
+        for part in parts:
+            low = part.lower()
+            for frame in (
+                "i heard that ", "i heard ", "i read that ", "i read ",
+                "i saw that ", "i saw ", "someone told me that ",
+                "someone told me ", "apparently ", "people are saying that ",
+                "people are saying ", "there's a rumor that ", "is it true that ",
+                "is it confirmed that ", "rumor has it that ",
+            ):
+                if low.startswith(frame):
+                    part = part[len(frame):].strip()
+                    break
+            part = part.strip(" ,;.\"'?!")
+            if len(part) >= 4:
+                claims.append(part)
+        if not claims:
+            claims = [text.strip(" ,;.\"'?!")]
+        # Drop pure verification-suffix fragments ("is that true", "is this
+        # real", "right?") — they are the user ASKING for verification, not a
+        # claim to verify. "I heard X and Y. Is that true?" must yield
+        # [X, Y], never [X, Y, "is that true"].
+        _verif_tail = re.compile(
+            r"^(?:is|was)\s+(?:any\s+of\s+)?(?:that|this|it)\s+(?:actually\s+|really\s+|even\s+)?"
+            r"(?:true|real|right|correct|a\s+thing|legit|accurate)\??$"
+            r"|^(?:is|was)\s+(?:any\s+of\s+)?(?:that|this)\s+(?:true|real)\??$"
+            r"|^(?:is\s+any\s+of\s+that\b|right|yeah|yes|correct)\??$"
+            r"|^(?:any\s+truth\s+(?:to|in)\s+that|any\s+truth\s+(?:to|in)\s+this|how\s+much\s+truth\s+(?:to|in)\s+that)\??$"
+            r"|^(?:what|which)\s*(?:'s|'re|\u2019s|\u2019re|\s+is|\s+are|\s+was|\s+were)\s+(?:any\s+of\s+)?"
+            r"(?:actually\s+|really\s+|even\s+)?(?:true|real|right|correct|legit|accurate|the\s+truth|going\s+on)\??$"
+            r"|^(?:what|which)\s+(?:part|parts|bits|one|ones|claim|claims)\??$",
+            re.I,
+        )
+        filtered = [
+            c for c in claims
+            if not _verif_tail.match(c.strip())
+            and not _is_claim_selection_referent(c.strip())
+        ]
+        return filtered[:6] if filtered else (claims[:6] or [text.strip(" ,;.\"'?!")])
+
+    def _handle_verification(self, query: str, session_id: str = "") -> Optional[IntelligenceResult]:
+        """Verify current claims through live multi-source evidence.
+
+        Decomposes the message into claims, builds a claim-specific query for
+        each, collects evidence from ALL healthy providers (with dates when
+        exposed), ranks by freshness, reconciles contradictions, and asks the
+        LLM to synthesize an evidence-bounded answer. Returns None only if
+        nothing could be verified AND no LLM is available (caller falls back
+        to the normal topic router).
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        claims = self._split_claims(query)
+
+        # A fully generic verification follow-up ("Is that actually true?",
+        # "did that really happen?", "is this real?") has NO claim content of
+        # its own — every meaningful token is a verification word. It refers
+        # to the claims of the PREVIOUS verification turn ("I heard X and Y"
+        # -> "is that actually true?"). Reuse those stored claims instead of
+        # re-searching the bare anchored phrase (live failure: the follow-up
+        # searched "Spider-Man is that actually true..." and returned an
+        # unrelated Tobey Maguire rumor).
+        _reclaimed = False
+        _q_toks = _meaningful_tokens(query)
+        # Entity named in THIS message ("what exactly did Messi say" -> Messi;
+        # "I heard Messi's father..." -> Messi). Computed before the reclaim
+        # check so an entity-named elaboration follow-up can reuse the prior
+        # claims anchored to that entity.
+        _msg_entity = _message_entity_name(query)
+        _last = None
+        try:
+            _last = self._ctx.get(self._claims_key(session_id))
+        except Exception:
+            _last = None
+        _last_claims = (
+            getattr(_last, "value", None)
+            if _last is not None
+            else None
+        )
+        _last_claims = _last_claims if isinstance(_last_claims, list) and _last_claims else None
+        # SELECTION referent over the stored claim set: "which part is true?",
+        # "which one?", "the second one?", "what's true?", "any of that?"
+        # names NO new proposition — it selects FROM the prior claims. Without
+        # this the bare phrase fell to the conversational LLM, which answered
+        # from memory and CONTRADICTED the just-verified answer (live: after
+        # a 4-claim verification, "which part is true" re-verified nothing
+        # and the LLM asserted the opposite of the evidence).
+        _select_m = _is_claim_selection_referent(query)
+        if _select_m and _last_claims:
+            logger.info("[VERIFY_SELECT_RECLAIM] query=%s last_claims=%s", query, _last_claims)
+            claims = _last_claims
+            _reclaimed = True
+        elif _q_toks and _q_toks <= _VERIF_GENERIC_TOKENS:
+            if _last_claims:
+                logger.info("[VERIFY_FOLLOWUP_RECLAIM] query=%s last_claims=%s", query, _last_claims)
+                claims = _last_claims
+                _reclaimed = True
+        elif _last_claims:
+            # Entity-named ELABORATION follow-up: "what exactly did Messi
+            # say?", "when did he announce that?", "how did the team react?"
+            # names only the SAME entity as the stored claims plus pure
+            # question/elaboration words — it asks about the PRIOR claim's
+            # content, never a new proposition ("did Messi retire" names a
+            # NEW state verb and stays a fresh claim). Without this the bare
+            # phrase got searched and returned an unrelated Messi quote
+            # (live: "what exactly did Messi say?" -> a World Cup remark).
+            _msg_entity_l = (_msg_entity or "").lower()
+            _elab_extra = frozenset({
+                "exactly", "explain", "mention", "mentioned", "tell", "told",
+                "mean", "meant", "about", "happen", "happened", "doing",
+                "react", "reacted", "response", "announce", "announced",
+                "said", "say", "says", "talk", "talking", "talked", "detail",
+                "details", "elaborate", "actually", "really", "what", "when",
+                "where", "why", "how", "who", "which", "that", "this", "it",
+            })
+            _entity_in_claims = bool(
+                _msg_entity_l
+                and any(
+                    _msg_entity_l in (c or "").lower()
+                    for c in _last_claims
+                )
+            )
+            _new_content = _q_toks - _VERIF_GENERIC_TOKENS - _elab_extra - {
+                _msg_entity_l} if _msg_entity_l else _q_toks - _VERIF_GENERIC_TOKENS - _elab_extra
+            if _entity_in_claims and not _new_content:
+                logger.info(
+                    "[VERIFY_FOLLOWUP_RECLAIM_ENTITY] query=%s entity=%s last_claims=%s",
+                    query, _msg_entity, _last_claims,
+                )
+                claims = _last_claims
+                _reclaimed = True
+
+        logger.info("[VERIFY_CLAIMS] query=%s claims=%s", query, claims)
+
+        # Context anchor for entity-less follow-ups ("Is that actually true?",
+        # "did that really happen"): the last known media entity carries the
+        # subject the follow-up refers to. Without it the bare phrase gets
+        # searched and returns unrelated content (live: "Is that actually
+        # true? I saw people talking about it" searched the bare words).
+        last_e = self._mem.get_last_entity()
+        anchor = (last_e.name if last_e and last_e.name else "").strip()
+
+        # Pre-scan for unresolvable referents BEFORE any slow retrieval: a
+        # claim built only from generic category nouns + event verbs ("movie
+        # got delayed", "the lead actor left the project") names no subject
+        # of its own — it refers to an entity in this message, or the last
+        # discussed entity, or it must ASK which subject is meant (live
+        # failure: "that movie got delayed" was searched bare and returned
+        # random film news plus a hallucinated "meme reference").
+        _generic_toks = _VERIF_GENERIC_TOKENS
+        _anchor_name = _msg_entity or anchor
+        _anchor_is_media = False
+        if _anchor_name:
+            if _msg_entity or _reclaimed:
+                # Named in this message, or the follow-up reclaims the claims
+                # the anchor already resolved: always usable.
+                _anchor_is_media = True
+            else:
+                # Memory anchor usable for a category-noun claim only when it is
+                # a media instance (a movie/show/actor the user was discussing),
+                # never a bare verification subject ("Messi's father passed
+                # away" must not resolve "the movie").
+                _anchor_is_media = (
+                    bool(last_e) and last_e.entity_type != EntityType.UNKNOWN
+                )
+        _unresolved: list[str] = []
+        for _c in claims:
+            _cw = _c.split()
+            _cr = re.sub(r"\bI\b", " ", " ".join(_cw[1:])) if _cw else ""
+            _cproper = bool(re.search(r"[A-Z]", _cr)) if _cw else False
+            _ctoks = _meaningful_tokens(_c)
+            _cown = _ctoks - _generic_toks - _GENERIC_SUBJECT_NOUNS - _EVENT_VERBS
+            _has_cat_noun = bool(_ctoks & _GENERIC_SUBJECT_NOUNS)
+            if _cproper or _cown:
+                continue  # names its own subject
+            if _anchor_name and (not _has_cat_noun or _anchor_is_media):
+                continue  # referent resolvable
+            _unresolved.append(_c)
+        if _unresolved:
+            # Natural clarification — never a bare-phrase search for an
+            # un-named referent, never a fabricated answer.
+            _cat = next(
+                (w for w in sorted(_meaningful_tokens(_unresolved[0]))
+                 if w in _GENERIC_SUBJECT_NOUNS),
+                "that",
+            )
+            _noun = {"movie": "movie", "film": "film", "game": "game",
+                     "player": "player", "actor": "actor", "show": "show",
+                     "series": "show", "album": "album", "book": "book",
+                     "company": "company", "product": "product"}.get(_cat, "subject")
+            _clarify = (
+                f"Which {_noun} do you mean? I don't want to guess and check "
+                f"the wrong one — name it and I'll look into whether that "
+                f"actually happened."
+            )
+            logger.info("[VERIFY_CLARIFY] query=%s unresolved=%s", query, _unresolved)
+            return IntelligenceResult(
+                topic=TopicType.UNKNOWN, response_text=_clarify,
+                subject=query, confidence=0.5, source="verification_clarify",
+            )
+
+        # ── per-claim evidence collection ────────────────────────────────────
+        evidence_by_claim: list[tuple[str, list]] = []
+        all_failed = True
+        for claim in claims:
+            # Claim-specific query: keep the entity + predicate + current year.
+            # Never reduce to a bare entity lookup ("Messi" -> "Jorge Messi
+            # death 2026"); never pass the whole multi-claim sentence.
+            year = ""
+            try:
+                import datetime as _dt
+                year = str(_dt.datetime.now().year)
+            except Exception:
+                year = "2026"
+            # Entity-less claim (pronouns / "that" / bare verification words):
+            # anchor the query to the last discussed entity so "is that
+            # actually true" verifies the Messi claim, not the words
+            # "actually true". A claim naming its own subject ("the game",
+            # "the movie", a capitalized name) is NOT entity-less and keeps
+            # its own subject.
+            _claim_toks = _meaningful_tokens(claim)
+            _generic_toks = _VERIF_GENERIC_TOKENS
+            # Sentence-initial capitals ("Is that...") and the pronoun "I" are
+            # NOT proper-noun evidence — only a capitalized word after the
+            # first word names a subject ("Is Messi's...", "Did Taylor...").
+            _claim_words = claim.split()
+            _rest = " ".join(_claim_words[1:])
+            # drop the standalone pronoun "I" ("Is that true? I saw...")
+            _rest = re.sub(r"\bI\b", " ", _rest)
+            _proper_after_first = bool(re.search(r"[A-Z]", _rest)) if _claim_words else False
+            # Generic category nouns ("movie", "actor", "project") and event
+            # verbs ("got delayed", "left") never constitute an own subject:
+            # "movie got delayed" is referential (which movie?), not a named
+            # subject. Only a proper noun or other specific content token does.
+            _own_content = _claim_toks - _generic_toks - _GENERIC_SUBJECT_NOUNS - _EVENT_VERBS
+            _has_own_subject = _proper_after_first or bool(_own_content)
+            _entityless = not _has_own_subject
+            # Referential claims anchor to the message's own entity first
+            # ("I heard Messi's father... and he said..." -> claim 2 anchors to
+            # Messi), then to the last memory entity (only a media instance for
+            # category-noun claims like "the movie got delayed").
+            _has_cat_noun = bool(_claim_toks & _GENERIC_SUBJECT_NOUNS)
+            _usable_anchor = _msg_entity or (anchor if (not _has_cat_noun or _anchor_is_media) else "")
+            _base = f"{_usable_anchor} {claim}" if _entityless and _usable_anchor else claim
+            cq = f"{_base} {year}" if year and year not in _base else _base
+            logger.info("[VERIFY_QUERY] claim=%s entityless=%s query=%s", claim, _entityless, cq)
+            items = []
+            try:
+                # Bounded per-claim evidence (2) so a two-claim message does not
+                # balloon into 6-8 provider round-trips; enough for a dated
+                # contradiction to surface.
+                items = self._retrieve_evidence(cq, None, 2) or []
+            except Exception:
+                items = []
+            if not items:
+                # Provider fallback: try without the year in case the year
+                # suffix hurt provider recall.
+                try:
+                    items = self._retrieve_evidence(claim, None, 2) or []
+                except Exception:
+                    items = []
+            # Claim-relevance gate: a retrieved page about Lane Johnson must
+            # NEVER reach synthesis for a Messi claim — irrelevant evidence is
+            # plumbing, not content. Filter against the claim AND the whole
+            # user message (so a later "he said..." clause still anchors to
+            # the entity named in claim 1).
+            items = self._filter_claim_evidence(query, claim, items)
+            if items:
+                all_failed = False
+            evidence_by_claim.append((claim, items))
+
+        if all_failed:
+            logger.info("[VERIFY_NO_EVIDENCE] query=%s", query)
+            # Honest failure — never fabricate a current answer from memory.
+            if self._llm_fn:
+                try:
+                    reply = self._llm_fn(
+                        "The user asked to verify a current claim, but live "
+                        "verification returned no evidence right now. Reply "
+                        "naturally, 1-2 sentences, saying you can't verify it "
+                        "live at the moment and don't guess."
+                    )
+                    if reply and len(reply) > 20:
+                        return IntelligenceResult(
+                            topic=TopicType.UNKNOWN, response_text=reply,
+                            subject=query, confidence=0.0, source="verification_failed",
+                        )
+                except Exception:
+                    pass
+                return IntelligenceResult(
+                    topic=TopicType.UNKNOWN,
+                    response_text="I can't verify that live right now — I couldn't find current reports on it.",
+                    subject=query, confidence=0.0, source="verification_failed",
+                )
+            return None
+
+        # ── build the evidence-bounded synthesis prompt ──────────────────────
+        try:
+            import datetime as _dt
+            now = _dt.datetime.now()
+            today_label = now.strftime("%B %d, %Y")
+        except Exception:
+            today_label = "today"
+
+        # The synthesis input is INTERNAL research context. Provider names
+        # (Tavily/Exa/DDG) are implementation details and must never reach the
+        # user; only dated excerpts go in, so the model cannot recite retrieval
+        # mechanics it was never shown.
+        sections = []
+        for claim, items in evidence_by_claim:
+            lines = [f"Point {len(sections) + 1}: {claim}"]
+            if not items:
+                lines.append("  (no relevant evidence retrieved)")
+            for res in items:
+                raw = (getattr(res, "raw_content", None) or "") or (getattr(res, "summary", None) or "")
+                raw = re.sub(r"<[^>]+>", "", raw or "")
+                raw = re.sub(r"\s+", " ", raw).strip()
+                date = getattr(res, "published_date", None)
+                date_label = f"{date}" if date else "recent"
+                lines.append(f"  - [{date_label}] {raw[:400]}")
+            sections.append("\n".join(lines))
+
+        # A reclaimed follow-up ("what exactly did Messi say?", "when did
+        # that happen?") asks about the PRIOR claims' content — the prompt
+        # must carry the follow-up question so the answer addresses it, not
+        # just re-verifies the claims (live failure: the follow-up about the
+        # retirement quote was answered with an unrelated World Cup remark).
+        _followup_ctx = ""
+        if _reclaimed:
+            _followup_ctx = (
+                f"The user's current message is: {query!r}. Answer THAT question "
+                "specifically, using the excerpts below.\n\n"
+            )
+        prompt = (
+            f"Today's date is {today_label}. You checked the current reporting on what the "
+            "user just said and this is what you found. You are NOT to answer from your own "
+            "prior knowledge — reason only over the excerpts below.\n\n"
+            + _followup_ctx
+            + "\n\n".join(sections)
+            + "\n\nNow reply to the user directly, in KIO's normal conversational voice. "
+            "Give a clear verdict up front in your own words — true / mostly true / not "
+            "quite what's being said / unverified — as a person checking something for a "
+            "friend would say it, NOT as a fixed label. Never start with a report-style "
+            "header such as 'Bottom line:', 'Summary:', 'Quick rundown:', or any other "
+            "formatted prefix — just answer naturally, like you're telling a friend what "
+            "you found. Then briefly explain each point of their "
+            "message. Be natural and concise — you are a person checking something for a "
+            "friend, not a search engine or a news anchor. Do NOT mention any search service, "
+            "provider, or retrieval step (never say 'Tavily', 'Exa', 'my research', 'sources "
+            "show', 'according to my search'). Do NOT use labels like 'Point 1', bullet lists, "
+            "[date] brackets, or markdown formatting (no **bold**, no asterisks, no headers). "
+            "Mention a specific outlet only if it genuinely strengthens the "
+            "answer (e.g. 'ABC reported...'); otherwise just say what happened. If the excerpts "
+            "contradict each other, prefer the NEWEST dated one and don't dwell on trivia that "
+            "doesn't change the answer. If a part of their message cannot be verified, say so "
+            "plainly and don't guess. Distinguish a confirmed event from a direct quote from a "
+            "paraphrase. Keep it conversational, 2-5 sentences per point."
+            " DATES: state the event date EXACTLY as the excerpts give it — including "
+            "the year. Never assume an event happened in the current year just because "
+            "today's date is recent: an event in the excerpts is dated by the excerpts, "
+            "not by today. If an excerpt gives a month/day without a year, keep that exact "
+            "form instead of inventing a year, or say the year isn't clear from what you found."
+        )
+
+        _synth_fn = self._verify_llm_fn or self._llm_fn
+        if _synth_fn:
+            try:
+                answer = _synth_fn(prompt)
+                if answer and len(answer) > 20:
+                    answer = answer.strip()
+                    # Anti-hallucination gate: a synthesis reply that shares NO
+                    # meaningful token with the user's query or the evidence is
+                    # not an answer to this claim (live failure: the provider
+                    # chain answered a long verification prompt with "It's
+                    # 9:10 AM."). Discard and use the deterministic verdict.
+                    _answer_toks = _meaningful_tokens(answer)
+                    _ground_toks = _meaningful_tokens(query) | set().union(
+                        *[_meaningful_tokens(
+                            (getattr(r, "raw_content", None) or "") or (getattr(r, "summary", None) or "")
+                        ) for _, items in evidence_by_claim for r in items]
+                    ) if evidence_by_claim else set()
+                    # A degenerate provider reply ("It's 2:52 AM.", "Yes.",
+                    # "Ok.") carries NO content tokens — it cannot be an
+                    # answer to the claim even if a referential token happens
+                    # to appear in the evidence. Reject empty-token answers
+                    # outright (the overlap check below would otherwise pass
+                    # vacuously once referential forms are stopwords).
+                    if not _answer_toks:
+                        logger.info("[VERIFY_SYNTH_REJECT] answer has no content tokens")
+                    elif _ground_toks and not (_answer_toks & _ground_toks):
+                        logger.info("[VERIFY_SYNTH_REJECT] answer shares no ground tokens")
+                    else:
+                        # Deterministic markdown scrub: even with the prompt
+                        # guard, the model sometimes emits **bold** verdicts
+                        # ("**mostly true**"). Strip bold/italic asterisks and
+                        # stray markdown so the reply is always plain KIO prose.
+                        answer = re.sub(r"\*\*(.+?)\*\*", r"\1", answer)
+                        answer = re.sub(r"\*(.+?)\*", r"\1", answer)
+                        answer = re.sub(r"#{1,6}\s*", "", answer)
+                        answer = answer.replace("`", "").strip()
+                        if not answer.endswith((".", "!", "?")) and len(answer) < 120:
+                            answer = answer + "."
+                        # Register the verified subject so an entity-less
+                        # follow-up ("Is that actually true?") anchors to THIS
+                        # entity, not a stale one. Prefer the resolved anchor
+                        # ("Spider-Man") over a bare referential claim text
+                        # ("movie got delayed") so the next follow-up anchors
+                        # to the real subject.
+                        _subj = _msg_entity or anchor or (claims[0] if claims else query)
+                        self._register_entity(_subj, TopicType.UNKNOWN, confidence=0.8)
+                        try:
+                            self._ctx.put(self._claims_key(session_id), claims, source="verification")
+                        except Exception:
+                            pass
+                        return IntelligenceResult(
+                            topic=TopicType.UNKNOWN,
+                            response_text=answer,
+                            subject=_subj,
+                            confidence=0.8,
+                            source="verification",
+                        )
+            except Exception:
+                pass
+
+        # ── deterministic fallback: concise verdict, never a source dump ─────
+        def _date_key(res) -> tuple:
+            d = getattr(res, "published_date", None)
+            if not d:
+                return (0, 0, 0)
+            try:
+                return tuple(int(x) for x in d.split("-"))
+            except Exception:
+                return (0, 0, 0)
+
+        def _verdict_sentence(raw: str, claim: str) -> str:
+            """Extract a clean, claim-relevant verdict sentence from evidence.
+
+            Strips provider UI chrome (fund ads, nav labels, "daily newspaper
+            available online now") and query echoes, then prefers the sentence
+            sharing the most meaningful tokens with the claim — the actual
+            answer sentence, never a headline or an ad.
+            """
+            raw = re.sub(r"<[^>]+>", "", raw or "")
+            raw = re.sub(r"\s+", " ", raw).strip()
+            if not raw:
+                return ""
+            # Cut at common UI/chrome markers that precede footer garbage.
+            for marker in ("Featured Funds", "FEATURED FUNDS", "Read More", "Also Read",
+                           "Advertisement", "daily newspaper is available online"):
+                idx = raw.find(marker)
+                if idx > 0:
+                    raw = raw[:idx]
+            # Split into sentences.
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+            if not sentences:
+                return raw[:200].strip()
+            claim_toks = _meaningful_tokens(claim)
+            # Query-echo/headline detection: lines that restate the user's own
+            # words ("did messi retire: Is Messi retiring...", "Here's what he
+            # actually said") are provider noise, never a verdict sentence.
+            claim_first = " ".join((claim or "").lower().split()[:4])
+            def _is_echo(s: str) -> bool:
+                low = s.lower()
+                if claim_first and claim_first.split()[0] and low.startswith(claim_first.split()[0]):
+                    return True
+                if "here's what" in low or "here is what" in low:
+                    return True
+                if low.endswith("?") and len(low) < 80:
+                    return True  # headline question, not a fact
+                return False
+            best = ""
+            best_score = -1
+            for s in sentences:
+                low = s.lower()
+                if low.startswith(("featured", "read more", "advertisement", "invest now",
+                                   "business news", "trending")):
+                    continue
+                if _is_echo(s):
+                    continue
+                # Prefer sentences containing a date/event marker.
+                date_bonus = 1 if re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|20\d{2}|yesterday|today)\b", low) else 0
+                score = len(_meaningful_tokens(s) & claim_toks) + date_bonus
+                if score > best_score:
+                    best, best_score = s, score
+            if not best:
+                best = sentences[0]
+            if not best.endswith((".", "!", "?")):
+                best += "."
+            return best[:300]
+
+        parts = []
+        for i, (claim, items) in enumerate(evidence_by_claim):
+            if not items:
+                parts.append(
+                    f"I couldn't verify that part about '{claim}' right now."
+                )
+                continue
+            newest = max(items, key=_date_key)
+            raw = (getattr(newest, "raw_content", None) or "") or (getattr(newest, "summary", None) or "")
+            snippet = _verdict_sentence(raw, claim)
+            lead = "The first part" if i == 0 and len(evidence_by_claim) > 1 else "As for that"
+            if snippet:
+                parts.append(f"{lead} — recent reporting says: {snippet}")
+            else:
+                parts.append(f"{lead} — recent reporting covers it, but I couldn't pull a clean summary right now.")
+        reply = " ".join(parts) or "I couldn't verify that live right now."
+        _subj = _msg_entity or anchor or (claims[0] if claims else query)
+        self._register_entity(_subj, TopicType.UNKNOWN, confidence=0.6)
+        try:
+            self._ctx.put(self._claims_key(session_id), claims, source="verification")
+        except Exception:
+            pass
+        return IntelligenceResult(
+            topic=TopicType.UNKNOWN,
+            response_text=reply[:700],
+            subject=_subj,
+            confidence=0.6,
+            source="verification",
+        )
+
+    def _filter_claim_evidence(self, full_query: str, claim: str, items: list) -> list:
+        """Keep only evidence that actually concerns the claim's entity.
+
+        Live bug: a Messi claim retrieved a DuckDuckGo/Tavily page about Lane
+        Johnson's retirement, which the synthesis then recited verbatim
+        ("there is also a report from Tavily, but it's about Lane Johnson, not
+        Messi"). Irrelevant retrieval is plumbing, not content — it must be
+        discarded before synthesis, never narrated to the user.
+
+        Relevance = the evidence text shares a meaningful token with the claim
+        OR with the entity named elsewhere in the user's message (later claims
+        often say just "he said..."). Pronoun-only claims inherit the first
+        claim's entity terms.
+        """
+        if not items:
+            return []
+
+        claim_toks = _meaningful_tokens(claim)
+        query_toks = _meaningful_tokens(full_query)
+        # Anchor terms: everything meaningful in the whole message (catches the
+        # entity "messi" in claim 1 that a pronoun-only claim 2 relies on).
+        anchor_toks = claim_toks | query_toks
+        if not anchor_toks:
+            return items
+
+        kept = []
+        for res in items:
+            raw = (getattr(res, "raw_content", None) or "") or (getattr(res, "summary", None) or "")
+            raw = re.sub(r"<[^>]+>", "", raw or "")
+            text_toks = _meaningful_tokens(raw)
+            if not text_toks:
+                continue
+            overlap = anchor_toks & text_toks
+            # Require at least one shared meaningful token, and prefer items
+            # that share the strongest (longest) anchor term.
+            if not overlap:
+                continue
+            kept.append(res)
+        return kept[:2]
+
+    # ── sports ─────────────────────────────────────────────────────────────────
 
     # ── sports ─────────────────────────────────────────────────────────────────
 
@@ -1474,6 +3111,10 @@ class MediaIntelligenceAdapter:
         self._llm_fn = fn
         self._composer._llm_fn = fn
 
+    def set_verify_llm_fn(self, fn: Callable[[str], Optional[str]]) -> None:
+        """Wire a dedicated verification-synthesis LLM (longer budget)."""
+        self._verify_llm_fn = fn
+
     def _compose_answer(self, result: RetrievalResult, query: str,
                         subject: Optional[str] = None) -> str:
         """Use AnswerComposer to build a structured, topic-appropriate answer.
@@ -1638,7 +3279,24 @@ class MediaIntelligenceAdapter:
             rewritten = disambiguated
 
         # ── Freshness queries ────────────────────────────────────────────────
-        if not rewritten and is_current:
+        # Full interrogative questions keep their OWN semantics: "Which country
+        # is celebrating independence day today" must NOT become "Which latest
+        # update news 2026" (a garbage query built from a failed subject
+        # extraction). A question already contains its entity + predicate +
+        # temporal constraint — rewriting it into a subject-template destroys
+        # the actual request. Only bare/entity queries ("messi", "spiderman
+        # trailer") get the topic-template treatment. A works-list query
+        # ("Team Cherry list of games latest") is ALSO preserved verbatim —
+        # the freshness template ("Team Cherry latest update patch news 2026")
+        # would retrieve the studio's latest patch notes instead of its games
+        # (live: role-catalog callback answered with a patch-notes dump).
+        _full_question = bool(re.match(
+            r"^(?:which|what|who|when|where|why|how)\b", ql,
+        ))
+        _works_query = re.search(
+            r"\b(?:filmography|discography|bibliography|list\s+of\s+games|works)\b", ql,
+        )
+        if not rewritten and is_current and not _full_question and not _works_query:
             if topic == TopicType.SPORTS:
                 rewritten = f"{subject} latest results standings fixtures scores news 2026"
             elif topic in (TopicType.MOVIES, TopicType.TV):
@@ -1652,63 +3310,84 @@ class MediaIntelligenceAdapter:
             else:
                 rewritten = f"{subject} latest update news 2026"
 
+        # ── Temporal resolution for full questions (deterministic owner) ────
+        # "today" / "tonight" in a current question must be resolved to the
+        # ACTUAL date BEFORE the query reaches retrieval — the provider should
+        # never have to guess which "today" is meant. LLM is not the authority
+        # for the current date; datetime is. "Which country is celebrating
+        # independence day today" -> "...independence day august 15 2026".
+        if _full_question and re.search(r"\b(?:today|tonight)\b", ql):
+            try:
+                import datetime as _dt
+                _now = _dt.datetime.now()
+                _date_str = _now.strftime("%B %d %Y").replace(" 0", " ")
+                _temporal_q = re.sub(r"\b(?:today|tonight)\b", _date_str, ql)
+                if _temporal_q != ql:
+                    rewritten = _temporal_q.strip()
+            except Exception:
+                pass
+
         # ── "who" questions ──────────────────────────────────────────────────
         if not rewritten:
-            who_m = re.match(r"who\s+(played|plays|directed|directs|sang|sings|composed|composes|scored|scores|wrote|writes|created|creates|voiced|voices|made|produced|published|developed|designed|edited|screenplayed)\s+(.+)$", ql)
+            _who_verbs = sorted(all_role_verbs(), key=len, reverse=True)
+            who_m = re.match(
+                rf"who\s+(?:is\s+)?(?:{verb_alternation(_who_verbs)})\s+(.+)$",
+                ql,
+            )
             if who_m:
-                role = who_m.group(1)
-                who_obj = re.sub(r"[?.!]+$", "", who_m.group(2)).strip()
-                if role in ("directed", "directs"):
-                    rewritten = f"{subject} director"
-                elif role in ("played", "plays"):
-                    rewritten = f"{subject} cast {who_obj} actor"
-                elif role in ("sang", "sings"):
-                    rewritten = f"{subject} singer artist"
-                elif role in ("composed", "composes", "scored", "scores"):
-                    rewritten = f"{subject} composer music"
-                elif role in ("made", "produced"):
-                    rewritten = f"{subject} producer"
-                elif role in ("developed", "designed"):
-                    rewritten = f"{subject} developer studio"
-                elif role in ("wrote", "writes", "created", "creates", "screenplayed"):
-                    if topic == TopicType.BOOKS:
-                        rewritten = f"{subject} author"
-                    elif topic == TopicType.MUSIC:
-                        rewritten = f"{subject} songwriter"
-                    elif topic in (TopicType.MOVIES, TopicType.TV):
-                        rewritten = f"{subject} creator" if role in ("created", "creates") else f"{subject} writer"
+                _matched = ""
+                _p = None
+                for v in _who_verbs:
+                    _p = re.compile(
+                        rf"^who\s+(?:is\s+)?{verb_regex(v)}\s+",
+                        re.I,
+                    )
+                    if _p.match(ql):
+                        _matched = v
+                        break
+                if _matched:
+                    role = _matched
+                    who_obj = re.sub(r"[?.!]+$", "", _p.sub("", ql)).strip()
+                    _pred = canonical_predicate_for_verb(role)
+                    if role in ("played", "plays", "starred", "stars"):
+                        rewritten = f"{subject} cast {who_obj} actor"
+                    elif _pred in ("written_by", "created_by"):
+                        if topic == TopicType.BOOKS:
+                            rewritten = f"{subject} author"
+                        elif topic == TopicType.MUSIC:
+                            rewritten = f"{subject} songwriter"
+                        elif _pred == "created_by" and topic in (TopicType.MOVIES, TopicType.TV):
+                            rewritten = f"{subject} creator"
+                        elif _pred == "written_by" and topic in (TopicType.MOVIES, TopicType.TV):
+                            rewritten = f"{subject} writer"
+                        else:
+                            rewritten = f"{subject} writer creator"
+                    elif _pred:
+                        # canonical predicate -> retrieval keyword (directed_by
+                        # -> director, founded_by -> founder, led_by -> CEO,
+                        # developed_by -> developer, ...)
+                        rewritten = f"{subject} {retrieval_keyword_for_predicate(_pred)}"
                     else:
-                        rewritten = f"{subject} writer creator"
-                elif role == "published":
-                    rewritten = f"{subject} publisher"
-                elif role in ("voiced", "voices"):
-                    rewritten = f"{subject} voice actor"
-                elif role in ("edited",):
-                    rewritten = f"{subject} editor"
-                else:
-                    rewritten = f"{subject} {role}"
+                        rewritten = f"{subject} {role}"
             elif ql.startswith("who "):
                 rest = ql[4:].strip()
                 if rest:
                     rewritten = f"{subject} {rest}"
 
-        # ── "who is the author/writer/director" pattern ──────────────────────
+        # ── "who is the author/writer/director/CEO/founder..." pattern ────────
         if not rewritten:
-            who_is_m = re.match(r"who\s+is\s+(the\s+)?(author|writer|creator|director|composer|producer|singer|publisher)\s*(of\s+.+)?$", ql)
+            _who_nouns = sorted(all_role_nouns(), key=len, reverse=True)
+            who_is_m = re.match(
+                rf"who\s+is\s+(?:the\s+)?((?:{'|'.join(re.escape(n) for n in _who_nouns)}))\s*(?:of\s+.+)?$",
+                ql,
+            )
             if who_is_m:
-                role = who_is_m.group(2)
-                if role == "author" or (role in ("writer", "creator") and topic == TopicType.BOOKS):
+                role = who_is_m.group(1)
+                _pred = canonical_predicate_for_role(role)
+                if role in ("writer", "creator") and topic == TopicType.BOOKS:
                     rewritten = f"{subject} author"
-                elif role == "publisher":
-                    rewritten = f"{subject} publisher"
-                elif role == "director":
-                    rewritten = f"{subject} director"
-                elif role == "composer":
-                    rewritten = f"{subject} composer"
-                elif role == "producer":
-                    rewritten = f"{subject} producer"
-                elif role == "singer":
-                    rewritten = f"{subject} singer"
+                elif _pred:
+                    rewritten = f"{subject} {retrieval_keyword_for_predicate(_pred)}"
                 else:
                     rewritten = f"{subject} {role}"
 
@@ -1844,7 +3523,51 @@ class MediaIntelligenceAdapter:
             raw = res.raw_content or res.summary
             if not self._is_relevant(raw, query, subject):
                 logger.info("[RELEVANCE_REJECT] query=%s subject=%s len=%d", query, subject, len(raw))
-                res = None  # reject irrelevant content
+                # Typo tolerance: the REWRITTEN query extracts a bare (often
+                # misspelled) entity ("whts the latest on tesal" -> "Tesal")
+                # which search engines can misfire on (Exa returned a LinkedIn
+                # person "Tes Sal"), while the user's FULL original query is
+                # typo-tolerant at the provider and returns the real entity
+                # (live: original -> 14KB of Tesla content). Retry with the
+                # original query before rejecting — never fabricate a result.
+                _orig_res = self._safe_retrieve(query, topic=topic.value, mode=mode)
+                if _orig_res:
+                    _orig_raw = _orig_res.raw_content or _orig_res.summary
+                    if _orig_raw and self._is_relevant(_orig_raw, query, subject):
+                        logger.info("[RETRIEVAL_ORIGINAL_FALLBACK] original query relevant (len=%d)", len(_orig_raw))
+                        res = _orig_res
+                    else:
+                        logger.info("[RETRIEVAL_ORIGINAL_FALLBACK] original query also irrelevant (len=%d)", len(_orig_raw or ""))
+                        res = None
+                else:
+                    res = None  # reject irrelevant content
+
+        # Multi-provider fallback for typo'd/ambiguous entities (generalized,
+        # never a dictionary): when BOTH the rewritten and the original query
+        # produced irrelevant content, ANOTHER provider may autocorrect the
+        # typo. Exa's neural search returned a LinkedIn "Tes Sal" page for
+        # "tesal" while Tavily returned real current Tesla news — the first
+        # provider hit must not be the last word. Collect evidence from ALL
+        # healthy providers for both query forms and keep the most relevant
+        # result (live: "whts latest on tesal" answered "I don't have
+        # information on Tesal yet." despite Tavily having Tesla content).
+        if not res:
+            _candidates = []
+            for _q in dict.fromkeys((rewritten, query)):
+                try:
+                    for _c in (self._retrieve_evidence(_q, topic.value, max_results=6) or []):
+                        _raw = getattr(_c, "raw_content", None) or getattr(_c, "summary", "") or ""
+                        if _raw and self._is_relevant(_raw, query, subject):
+                            _candidates.append((len(_raw), _c))
+                except Exception:
+                    continue
+            if _candidates:
+                _candidates.sort(key=lambda x: x[0], reverse=True)
+                res = _candidates[0][1]
+                logger.info(
+                    "[RETRIEVAL_EVIDENCE_FALLBACK] picked source=%s for subject=%s (query=%s) len=%d",
+                    getattr(res, "source", "?"), subject, query, len(getattr(res, "raw_content", "") or ""),
+                )
         
         if res:
             self._discover_artifacts(res, topic, subject)
@@ -1859,18 +3582,104 @@ class MediaIntelligenceAdapter:
         if len(text) < 50:
             return False
         text_lower = text.lower()
-        # Role queries ("who directed X") return the person's page, which
-        # legitimately never names the movie/subject — accept it.
-        _role_stems = ("direct", "writ", "compos", "produc", "creat", "design",
-                       "star", "actor", "voice", "sing", "cast", "develop", "score")
+        # Works-list queries ("Alex Garland filmography", "Team Cherry list
+        # of games") must retrieve content that IS a works list — a page that
+        # merely mentions the subject but is release-note/patch-notes shaped
+        # ("Added", "Fixed", "Refined", "localisation") is NOT a
+        # filmography/bibliography (live: a studio's latest patch notes
+        # answered its "what else has that studio made" callback). Reject
+        # only that clear release-note shape; reference pages (Wikipedia) and
+        # genuine list content pass. The vocabulary is domain-general.
+        _works_words = ("filmography", "discography", "bibliography",
+                        "list of games", "games list", "works", "film list",
+                        "book list")
+        if any(w in query.lower() for w in _works_words) and not any(
+            w in text_lower for w in _works_words
+        ):
+            _patch_signal = sum(
+                1 for w in ("added", "fixed", "improved", "refined",
+                            "localisation", "translation", "patch notes",
+                            "bug report", "hotfix", "changelog", "fixed ")
+                if w in text_lower
+            )
+            if _patch_signal >= 2:
+                return False
+        # Role queries ("who directed X", "who wrote Dune") return the
+        # person's page, which legitimately never names the movie/subject —
+        # accept it. The stems must cover INFLECTED forms too ("wrote",
+        # "written", "director", "author") or the bypass misses and the
+        # correctly retrieved person page is rejected as irrelevant (live:
+        # "who wrote the book Dune" -> RELEVANCE_REJECT -> "I don't have
+        # information").
+        _role_stems = ("direct", "director", "writ", "wrote", "written",
+                       "author", "compos", "composer", "produc", "producer",
+                       "creat", "creator", "design", "designer", "star",
+                       "starring", "actor", "voice", "voiced", "sing",
+                       "sang", "cast", "develop", "developer", "score",
+                       "scored", "screenwriter", "writer", "playwright",
+                       "directed", "produced")
         if any(t in query.lower() for t in _role_stems):
-            return True
-        q_words = {w for w in query.lower().split() if len(w) > 2}
-        s_words = {w for w in subject.lower().split() if len(w) > 2}
+            # Role queries ("who directed X", "who wrote Dune") return the
+            # PERSON's page, which often does not repeat the work title — but
+            # the result must still be ABOUT the person or mention the work.
+            # The old blanket bypass accepted UNRELATED pages (live: "who
+            # wrote dune" returned a "Capital Asset Management Co., Ltd."
+            # page because the 'writ' stem short-circuited relevance; a
+            # role-catalog retrieval accepted a Juno Hong article that merely
+            # contained "Moon"). Require either a subject mention (fuzzy) or
+            # a strong person/role identification signal (biography language,
+            # role markers).
+            _key = (subject or "").strip().lower()
+            _first_tok = _key.split()[0] if _key.split() else ""
+            if _key and len(_first_tok) >= 3 and (_key in text_lower or _first_tok in text_lower):
+                return True
+            _person_signal = re.search(
+                r"\b(?:born\s+|directed\s+by|written\s+by|created\s+by|produced\s+by|"
+                r"composed\s+by|developed\s+by)\b|"
+                r"\bis\s+an?\s+(?:american|british|australian|canadian|"
+                r"french|german|indian|english|welsh|scottish|irish|spanish|italian|japanese|chinese|russian|"
+                r"singer|actor|actress|musician|author|novelist|writer|playwright|screenwriter|director|artist)\b|"
+                r"\b(?:filmography|discography|bibliography)\b",
+                text_lower,
+            )
+            if _person_signal:
+                return True
+            # Role-query pages that name neither the subject nor a person are
+            # irrelevant — fall through to the generic ratio (will reject and
+            # trigger the multi-provider fallback).
+        # Relevance must hinge on the ENTITY (subject), not the query's
+        # interrogative openers and fillers ("what is the latest on X"
+        # should not need "what"/"latest"/"on" to appear in the text).
+        # Live: typo'd "whts the latest on tesal" -> subject "Whts The
+        # Tesal" -> noise tokens dragged the ratio below 0.3 and a good
+        # 4305-char Tesla retrieval was rejected as irrelevant.
+        _noise = {"what", "whats", "whts", "wat", "wht", "who", "whos", "whose",
+                  "where", "when", "why", "how", "which", "is", "are", "was",
+                  "were", "the", "a", "an", "of", "in", "on", "at", "for",
+                  "to", "with", "by", "about", "and", "or", "latest", "update",
+                  "updates", "news", "new", "current", "recent", "tell", "me",
+                  "show", "give", "do", "does", "did", "has", "have", "had",
+                  "it", "its", "this", "that", "any", "some", "out", "yet",
+                  "still", "now", "please", "bro", "yo", "hey", "like", "just"}
+        q_words = {w for w in query.lower().split() if len(w) > 2 and w not in _noise}
+        s_words = {w for w in subject.lower().split() if len(w) > 2 and w not in _noise}
         key_terms = q_words | s_words
         if not key_terms:
             return True
-        match_count = sum(1 for t in key_terms if t in text_lower)
+        # Fuzzy token match (edit distance) so a typo'd entity in the query
+        # ("tesal" vs retrieved "tesla") still counts as relevant — generic
+        # typo tolerance, never entity-specific.
+        def _fuzzy_hit(token: str) -> bool:
+            if token in text_lower:
+                return True
+            if len(token) < 5:
+                return False
+            from difflib import SequenceMatcher
+            for w in text_lower.split():
+                if len(w) >= 5 and SequenceMatcher(None, token, w).ratio() >= 0.78:
+                    return True
+            return False
+        match_count = sum(1 for t in key_terms if _fuzzy_hit(t))
         ratio = match_count / len(key_terms)
         return ratio >= 0.3
 
@@ -1881,13 +3690,42 @@ class MediaIntelligenceAdapter:
         preserves the last entity from memory instead of extracting a garbage
         subject like "Who Composed Soundtrack" from "who composed the soundtrack".
         """
+        # Normalize "what's" -> "what is" so interrogative handling sees it
+        # ("What's the latest Spider-Man news?" must never extract subject
+        # "What'S The Spider-Man Movie ?"). Also covers the apostrophe-less
+        # typo contractions real users type ("whts", "whats", "wats", "wat",
+        # "whos", "wht") — same semantic family as the 's forms, so "whts
+        # the latest on tesal" extracts subject "Tesal" (the entity), never
+        # the garbage "Whts The Tesal" (live failure: typo'd opener became
+        # the subject and the good retrieval was rejected as irrelevant).
+        _q_orig = query
+        query = re.sub(
+            r"\b(what|who|where|when|why|how|which)'s\b",
+            lambda m: m.group(1) + " is",
+            query,
+            flags=re.I,
+        )
+        query = re.sub(
+            r"\b(whts|whats|wats|wat|wht|whos|whse|hows|whens|wys|y)\b",
+            lambda m: {
+                "whts": "what is", "whats": "what is", "wats": "what is",
+                "wat": "what", "wht": "what", "whos": "who is",
+                "whse": "whose", "hows": "how is", "whens": "when is",
+                "wys": "why is", "y": "why",
+            }[m.group(1).lower()],
+            query,
+            flags=re.I,
+        )
         ql = query.lower().strip()
         # Role queries about the current entity — preserve memory entity name
         _role_words = {"composed", "composer", "soundtrack", "score", "scored",
                        "directed", "director", "wrote", "writer", "created",
                        "creator", "produced", "producer", "developed", "developer",
                        "designed", "designer", "voiced", "voice", "voices",
-                       "sang", "sings", "sing",
+                       "sang", "sings", "sing", "singer", "performed",
+                       "performs", "performer", "performed",
+                       "founded", "founder", "co-founded", "founds", "established",
+                       "plays", "play", "played", "plays for", "played for",
                        "cast", "actor", "actress", "starred", "stars",
                        "features", "featuring"}
         _first_w = ql.split()[0] if ql.split() else ""
@@ -1930,7 +3768,35 @@ class MediaIntelligenceAdapter:
                                      for w in orig_words_after_first 
                                      if w.strip(".,!?;:\"'") and w.strip(".,!?;:\"'")[0].isupper()}
                         has_proper = any(w.lower() in orig_caps for w in reconstructed)
-                        if has_proper:
+                        # Lowercase-but-real entities: "who wrote dune" typed
+                        # all-lowercase must extract "Dune", NEVER a stale
+                        # disk-persisted entity from an unrelated earlier
+                        # session (live: answered with a previously-registered
+                        # "Capital Asset Management Co., Ltd." instead of
+                        # Frank Herbert). The reconstruction names the work
+                        # when it contains a word that is NOT generic
+                        # role/artifact vocabulary ("dune" is real;
+                        # "movie"/"song"/"book" are generic).
+                        _generic_terms = _role_words | {
+                            "the", "a", "an", "is", "are", "was", "were", "in",
+                            "on", "at", "for", "to", "of", "with", "by", "from",
+                            "about", "and", "or", "this", "that", "these", "those",
+                            "it", "its", "like", "watch", "show", "give", "tell",
+                            "i", "me", "my", "we", "you", "your", "he", "she",
+                            "they", "them", "their", "can", "could", "would",
+                            "will", "shall", "do", "did", "does", "has", "have",
+                            "had", "been", "being", "get", "got", "some", "any",
+                            "very", "just", "also", "now", "please", "into",
+                            "biggest", "compared", "new", "best", "big", "latest",
+                            "movie", "film", "show", "series", "book", "novel",
+                            "song", "album", "game", "soundtrack", "trailer",
+                            "release", "project", "sequel", "remake", "prequel",
+                            "main", "members", "cast", "soundtrack", "score", "music",
+                        }
+                        _has_real_term = any(
+                            w.lower() not in _generic_terms for w in reconstructed
+                        )
+                        if has_proper or _has_real_term:
                             # Comparison queries ("compared to GTA V", "vs old version") 
                             # extract the comparison target, not the subject entity.
                             # Prefer memory entity in this case.
@@ -1956,6 +3822,20 @@ class MediaIntelligenceAdapter:
             "currently", "leading",
             "biggest", "new", "compared",
             "first", "second", "third", "one", "two", "three",
+            # generic action/role words so event queries extract the entity:
+            # "wat happened with apple" -> "Apple", "whos the ceo of nvidia"
+            # -> "Nvidia" (never "Happened Apple" / "Ceo Nvidia").
+            "happened", "happening", "happens", "ceo", "cfo", "founder",
+            "leader", "president", "owner", "manager", "head", "chief",
+            "announced", "announcement", "announces", "released", "launched",
+            "launches", "launch", "signed", "retired", "retirement", "won",
+            "win", "wins", "beat", "lost", "transferred", "transfer",
+            "injured", "injury",
+            "star", "stars", "starring", "cast", "directed", "director",
+            "wrote", "writer", "produced", "producer", "created", "creator",
+            # typo forms of common openers ("abt" = "about", "tho" = "though",
+            # "rn" = "right now") — same semantic class as the clean words above.
+            "abt", "tho", "rn", "btw", "tbh", "ngl", "idk", "imo", "wbu", "wbt",
         ]
         q = query.lower()
         for w in strip_words:
@@ -1972,7 +3852,8 @@ class MediaIntelligenceAdapter:
         # Garbage detection: if extracted subject looks like a full sentence
         # (question/command structure, or >5 words), fall back to memory entity.
         q_words = q.split()
-        garbage_indicators = {"who", "what", "when", "where", "why", "how", "can",
+        garbage_indicators = {"who", "what", "when", "where", "why", "how", "which", "whose",
+                              "whom", "can",
                               "would", "could", "should", "will", "shall", "do",
                               "does", "did", "is", "are", "was", "were", "has",
                               "have", "had", "get", "got", "make", "made", "want",
@@ -1999,7 +3880,7 @@ class MediaIntelligenceAdapter:
             _skip = {"play", "show", "watch", "the", "a", "an", "i", "me", "my",
                      "we", "you", "he", "she", "it", "they", "them", "this",
                      "that", "these", "those", "who", "what", "where", "when",
-                     "why", "how", "can", "will", "would", "could", "should",
+                     "why", "how", "which", "whose", "whom", "can", "will", "would", "could", "should",
                      "do", "does", "did", "has", "have", "had", "is", "are",
                      "was", "were", "be", "been", "get", "got", "go", "went",
                      "come", "came", "make", "made", "want", "like", "need",
@@ -2010,10 +3891,28 @@ class MediaIntelligenceAdapter:
                      "now", "here", "there", "some", "any", "all", "both",
                      "each", "every", "first", "last", "next", "more", "much",
                      "many", "too", "again", "once", "never", "always",
-                     "ending", "explain", "spoilers", "major", "currently"}
+                     "ending", "explain", "spoilers", "major", "currently",
+                     "honestly", "honest", "though", "although", "anyway",
+                     "yeah", "yep", "ok", "okay", "well", "wait", "so",
+                     "but", "and", "actually", "literally", "tbh", "ngl",
+                     "man", "dude", "bro", "haha", "lol", "omg", "wow",
+                     "happened", "happening", "happens", "ceo", "cfo", "founder",
+                     "leader", "president", "owner", "manager", "head", "chief",
+                     "announced", "announcement", "announces", "released",
+                     "launched", "launches", "launch", "signed", "retired",
+                     "retirement", "won", "win", "wins", "beat", "lost",
+                     "transferred", "transfer", "injured", "injury", "star",
+                     "stars", "starring", "directed", "director", "wrote",
+                     "writer", "produced", "producer", "created", "creator",
+                     "abt", "tho", "rn", "btw", "tbh", "ngl", "idk", "imo",
+                     "wbu", "wbt"}
             proper = []
             for w in orig_words:
                 wc = w.strip(".,!?;:'\"")
+                # Strip possessive so "Marvel's" registers as "Marvel" (never
+                # a truncated "Marvel's" entity name).
+                if wc.lower().endswith("'s") and len(wc) > 3:
+                    wc = wc[:-2]
                 if wc and wc[0].isupper() and wc.lower() not in _skip:
                     proper.append(wc)
             if proper:
@@ -2062,3 +3961,4 @@ class MediaIntelligenceAdapter:
     @property
     def artifact_memory(self) -> ArtifactMemory:
         return self._art
+

@@ -1,0 +1,169 @@
+{
+  "turns": [
+    {
+      "id": "01",
+      "cat": "casual",
+      "msg": "Hey KIO",
+      "reply": "Hey!",
+      "latency_ms": 4150.4,
+      "status": "PASS"
+    },
+    {
+      "id": "02",
+      "cat": "capability",
+      "msg": "What can you actually help me with?",
+      "reply": "(no reply)",
+      "latency_ms": 60720.3,
+      "status": "FAIL"
+    },
+    {
+      "id": "03",
+      "cat": "capability_follow",
+      "msg": "Can you open apps for me?",
+      "reply": "I couldn't find apps for me? installed on your computer, and I couldn't find a usable web version either.",
+      "latency_ms": 4168.5,
+      "status": "PASS"
+    },
+    {
+      "id": "04",
+      "cat": "architecture",
+      "msg": "How is your system built?",
+      "reply": "My core is a locally‑run transformer‑based LLM wrapped in a deterministic orchestration engine that routes calls to the toolset (app control, file operations, browser automation, etc.) and records everything in a persistent semantic memory, all monitored by a lightweight health‑check layer.",
+      "latency_ms": 6229.7,
+      "status": "PASS"
+    },
+    {
+      "id": "05",
+      "cat": "personal",
+      "msg": "Give me a picture of where I am right now",
+      "reply": "I can capture a screenshot of your current desktop using my command system.",
+      "latency_ms": 8327.1,
+      "status": "PASS"
+    },
+    {
+      "id": "06",
+      "cat": "runtime",
+      "msg": "Is everything running okay?",
+      "reply": "(no reply)",
+      "latency_ms": 31625.1,
+      "status": "FAIL"
+    },
+    {
+      "id": "07",
+      "cat": "memory",
+      "msg": "Show me my memory usage",
+      "reply": "Your RAM is at about 94 % – roughly 14.5 GB of 15.2 GB in use.",
+      "latency_ms": 6384.9,
+      "status": "PASS"
+    },
+    {
+      "id": "08",
+      "cat": "continuity",
+      "msg": "What did you just say you could do?",
+      "reply": "I can open/close apps, check system stats, manage files/documents (docx/xlsx/pdf), play media, set reminders, do calculations/conversions, automate web tasks when the browser's connected, and use the toolset with my semantic memory.",
+      "latency_ms": 35412.0,
+      "status": "PASS"
+    },
+    {
+      "id": "09",
+      "cat": "topic_switch",
+      "msg": "Tell me a joke",
+      "reply": "Why do programmers prefer dark mode? Because light attracts bugs.",
+      "latency_ms": 4169.9,
+      "status": "PASS"
+    },
+    {
+      "id": "10",
+      "cat": "topic_return",
+      "msg": "Going back to the architecture thing — walk me through it",
+      "reply": "(no reply)",
+      "latency_ms": 60858.9,
+      "status": "FAIL"
+    },
+    {
+      "id": "11",
+      "cat": "project",
+      "msg": "What have I been focused on this week?",
+      "reply": "You’ve been concentrating on the aura integration layer, waiting for the opencode review before you can continue, and you’ve dropped the planner idea.",
+      "latency_ms": 4159.7,
+      "status": "PASS"
+    },
+    {
+      "id": "12",
+      "cat": "waiting",
+      "msg": "Is there anything I am waiting on?",
+      "reply": "Yes—you’re waiting on the opencode review before you can continue work on the aura integration layer.",
+      "latency_ms": 4163.9,
+      "status": "PASS"
+    },
+    {
+      "id": "13",
+      "cat": "waiting_reverse",
+      "msg": "What are YOU waiting on from ME?",
+      "reply": "KIO — Kernel for Intelligent Orchestration.\n\nA personal operating companion built by Joel.\n\nI help with desktop automation, system operations and conversational assistance.",
+      "latency_ms": 2069.8,
+      "status": "PASS"
+    },
+    {
+      "id": "14",
+      "cat": "identity",
+      "msg": "Who are you exactly?",
+      "reply": "KIO — Kernel for Intelligent Orchestration.\n\nA personal operating companion built by Joel.\n\nI help with desktop automation, system operations and conversational assistance.",
+      "latency_ms": 2081.7,
+      "status": "PASS"
+    },
+    {
+      "id": "15",
+      "cat": "identity_llm",
+      "msg": "So are you an LLM or not?",
+      "reply": "I am KIO — a personal operating companion built by Joel.\n\nI am not a generic AI assistant, not a chatbot, uses an LLM as one intelligence component, but is not itself merely a language model.\n\nI am a local desktop orchestration runtime with a specific architecture, persistent identity, and deterministic execution capabilities.",
+      "latency_ms": 2126.5,
+      "status": "PASS"
+    },
+    {
+      "id": "16",
+      "cat": "identity_chatbot",
+      "msg": "How are you different from a regular chatbot?",
+      "reply": "(no reply)",
+      "latency_ms": 46131.1,
+      "status": "FAIL"
+    },
+    {
+      "id": "17",
+      "cat": "recall",
+      "msg": "What was the very first thing I said to you?",
+      "reply": "You asked what we were discussing earlier about your capabilities.",
+      "latency_ms": 4161.1,
+      "status": "PASS"
+    },
+    {
+      "id": "18",
+      "cat": "topic_switch2",
+      "msg": "What is the weather like?",
+      "reply": "I can't check live weather from this machine right now — no weather service is connected.",
+      "latency_ms": 2081.6,
+      "status": "PASS"
+    },
+    {
+      "id": "19",
+      "cat": "topic_return2",
+      "msg": "Anyway, going back to what you said about my projects",
+      "reply": "You’re focused on the aura integration layer, holding off on work until the opencode review comes through, and the planner idea is on the cutting room floor. What’s the latest on the review, or would you like to adjust the integration approach?",
+      "latency_ms": 10376.7,
+      "status": "PASS"
+    },
+    {
+      "id": "20",
+      "cat": "personal_broad",
+      "msg": "What patterns do you notice about me?",
+      "reply": "(no reply)",
+      "latency_ms": 45935.4,
+      "status": "FAIL"
+    }
+  ],
+  "summary": {
+    "passed": 15,
+    "failed": 5,
+    "total": 20
+  }
+}

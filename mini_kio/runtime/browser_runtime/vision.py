@@ -18,6 +18,8 @@ class OCREngine:
     (e.g. canvas-rendered text, images, PDF-in-browser).
     """
 
+    _WIN_FLAGS = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+
     def __init__(self, tesseract_path: str | None = None) -> None:
         self._tesseract_path = tesseract_path or self._find_tesseract()
         self._available: bool | None = None
@@ -26,7 +28,10 @@ class OCREngine:
         candidates = ["tesseract", "tesseract.exe"]
         for c in candidates:
             try:
-                result = subprocess.run([c, "--version"], capture_output=True, text=True, timeout=5)
+                _kw: dict = dict(capture_output=True, text=True, timeout=5)
+                if self._WIN_FLAGS:
+                    _kw["creationflags"] = self._WIN_FLAGS
+                result = subprocess.run([c, "--version"], **_kw)
                 if result.returncode == 0:
                     return c
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -44,9 +49,12 @@ class OCREngine:
         if not self.available:
             return {"success": False, "text": "", "error": "Tesseract not installed", "confidence": 0}
         try:
+            _kw: dict = dict(capture_output=True, text=True, timeout=30)
+            if self._WIN_FLAGS:
+                _kw["creationflags"] = self._WIN_FLAGS
             result = subprocess.run(
                 [self._tesseract_path, str(image_path), "stdout", "-l", lang, "--psm", "6"],
-                capture_output=True, text=True, timeout=30,
+                **_kw,
             )
             if result.returncode == 0:
                 text = result.stdout.strip()
@@ -60,9 +68,12 @@ class OCREngine:
         if not self.available:
             return {"success": False, "words": [], "error": "Tesseract not installed"}
         try:
+            _kw: dict = dict(capture_output=True, text=True, timeout=30)
+            if self._WIN_FLAGS:
+                _kw["creationflags"] = self._WIN_FLAGS
             result = subprocess.run(
                 [self._tesseract_path, str(image_path), "stdout", "-l", lang, "--psm", "6", "tsv"],
-                capture_output=True, text=True, timeout=30,
+                **_kw,
             )
             if result.returncode != 0:
                 return {"success": False, "words": [], "error": result.stderr[:200]}

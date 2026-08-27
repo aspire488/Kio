@@ -15,7 +15,27 @@ logger = logging.getLogger(__name__)
 _DIAG: Dict[str, int] = {
     "runtime_response_formatted": 0,
     "response_already_natural": 0,
+    "provider_artifact_sanitized": 0,
 }
+
+# Provider-UI artifacts that must NEVER reach the user as the KIO reply
+# (search-widget controls, time/date widgets, provider chrome). Generic
+# patterns — this is a last-resort boundary guard; the source fix is that
+# utility/utility-shaped requests are owned deterministically and never
+# reach a provider in the first place.
+_PROVIDER_UI_RE = re.compile(
+    r"\b(related searches|people also ask|more info\b|sign up or log in|"
+    r"open result\b|search instead|see more\b|recent searches|"
+    r"feedback about|week \d{1,2}\b|sunrise|sunset|favorite locations|"
+    r"make \w[\w ]{0,30}? default|remove from (favorite|favourites)|\|\s*more info)",
+    re.IGNORECASE,
+)
+_TIME_WIDGET_RE = re.compile(
+    r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE,
+)
+_TIME_WIDGET_LOC_RE = re.compile(
+    r"\btime\s+in\s+([a-z][a-z .'-]{1,40}?)(?:,|\.|\s+now\b|\s+$)", re.IGNORECASE,
+)
 _DEV_PATTERNS = re.compile(
     r'\b(Routed|search_fallback|capability lookup|execution classification|'
     r'outcome_class|verification_status|failure_class|'
@@ -32,6 +52,16 @@ _PREREQUISITE_LABELS = {
     "browser_backend": "the browser to be connected",
 }
 _GENERIC_PREREQUISITE_PHRASE = "some setup before I can do that"
+
+# KIO-authored deterministic result types (utility seam owners): these
+# messages are ALREADY the user reply — never provider UI, never re-rendered
+# by the artifact sanitizer even when they contain time/date-shaped text.
+_KIO_OWNED_TYPES = frozenset({
+    "time", "date", "weather", "convert", "package", "feed", "calculate",
+    "project", "watch", "reminder", "research", "air_quality", "holiday",
+    "earthquake", "book", "utility",
+})
+
 
 _PROVIDER_DISPLAY = {
     "google": "Google",
@@ -283,6 +313,45 @@ def _format_prerequisite(details: Dict[str, Any]) -> str:
     return f"I need {', '.join(labels[:-1])}, and {labels[-1]} before I can do that."
 
 
+def _sanitize_provider_artifact(message: str) -> str:
+    """Last-resort clean-up of raw provider/search/utility UI text.
+
+    Two cases:
+      1. Time/date widget ("Time in New York, United States now:
+         18:52:09 Thursday, 13 August, 2026, week 33 Sun: ..."): extract the
+         actual time and rebuild a clean KIO answer.
+      2. Any other provider-UI text: cut at the first UI-control marker so
+         KIO never reproduces the provider's interface.
+    If nothing useful remains, fall back to an honest short answer — never
+    pass the raw UI through.
+    """
+    if not message:
+        return message
+    m_loc = _TIME_WIDGET_LOC_RE.search(message)
+    m_time = _TIME_WIDGET_RE.search(message)
+    if m_time:
+        try:
+            h, mi = int(m_time.group(1)), int(m_time.group(2))
+            suffix = "AM" if h < 12 else "PM"
+            h12 = h % 12 or 12
+            time_str = f"{h12}:{mi:02d} {suffix}"
+            if m_loc:
+                loc = m_loc.group(1).strip().title()
+                return f"It's {time_str} in {loc}."
+            return f"It's {time_str}."
+        except Exception:
+            pass
+    cut = _PROVIDER_UI_RE.search(message)
+    if cut:
+        prefix = message[: cut.start()].strip()
+        prefix = prefix.rstrip(" -|,")
+        if len(prefix) > 4 and not _PROVIDER_UI_RE.search(prefix):
+            if not prefix[-1:].isalnum():
+                prefix = prefix[:-1]
+            return prefix + "."
+    return "I couldn't pull that up cleanly — try asking me directly."
+
+
 def format_result(
     action: str, target: str, success: bool, details: Dict[str, Any]
 ) -> str:
@@ -292,6 +361,24 @@ def format_result(
         _DIAG["runtime_response_formatted"] += 1
         return _format_prerequisite(details)
     message = _ensure_str(details.get("message", ""))
+    # Result-ownership boundary: raw provider/utility UI text must never
+    # become the KIO reply. When the message carries provider chrome or a
+    # time/date widget, synthesize the clean answer instead of passing the
+    # raw text through the "natural message" fast path. KIO's OWN
+    # deterministic answers are exempt: they are authored replies that carry
+    # a result "type" (watch / reminder / research / air_quality / holiday /
+    # earthquake / book / ...), and their content can legitimately contain
+    # time-like strings ("remind me ... at 2026-08-16T11:36" in a reminder
+    # list) that must NEVER be re-rendered as a provider widget. Without this
+    # boundary, a reminder LIST was mangled into "It's 12:27 PM.".
+    if details.get("type") not in _KIO_OWNED_TYPES and (
+        _PROVIDER_UI_RE.search(message)
+        or (_TIME_WIDGET_RE.search(message) and len(message) > 120)
+    ):
+        cleaned = _sanitize_provider_artifact(message)
+        if cleaned and cleaned != message:
+            _DIAG["provider_artifact_sanitized"] += 1
+            return cleaned
     # BUG 7: a PARTIAL close (primary terminated, background components remain)
     # must be rendered by the structured formatter so the residual note
     # surfaces even though the operator message ("Closed Chrome.") is itself

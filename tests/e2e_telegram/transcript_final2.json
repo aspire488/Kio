@@ -1,0 +1,105 @@
+{
+  "turns": [
+    {
+      "id": "01",
+      "cat": "greeting",
+      "msg": "Hey KIO",
+      "reply": "Hey!",
+      "latency_ms": 6238.1,
+      "status": "PASS"
+    },
+    {
+      "id": "02",
+      "cat": "capability",
+      "msg": "What can you actually help me with?",
+      "reply": "I can pull system stats, launch or close apps, create and edit documents, run calculations or unit conversions, set reminders, play media, and automate web tasks when the browser’s connected.",
+      "latency_ms": 6287.6,
+      "status": "PASS"
+    },
+    {
+      "id": "03",
+      "cat": "arch",
+      "msg": "How is your system built?",
+      "reply": "My core is a large‑language model that handles natural‑language reasoning, wrapped by a deterministic that orchestrates tool calls, a semantic‑memory store for persistent user context, and plug‑in modules for system control, file operations, media playback, and browser automation when a connection is available. All parts communicate through a lightweight message bus so actions stay auditable and the whole stack stays modular.",
+      "latency_ms": 8422.7,
+      "status": "PASS"
+    },
+    {
+      "id": "04",
+      "cat": "personal",
+      "msg": "Tell me about myself",
+      "reply": "You’re an engineering student at SCMS College of Engineering, currently in semester 3 with a CGPA of 8.13. You’ve said you want to drop the planner idea, are waiting on the opencode review before resuming the work, and are focused on the Aura integration layer. You also noted that someone corrected herself and now sees it as valid criticism.",
+      "latency_ms": 4271.9,
+      "status": "PASS"
+    },
+    {
+      "id": "05",
+      "cat": "runtime",
+      "msg": "Is everything running okay?",
+      "reply": "All systems are nominal— ready, health 80 %, RAM at 98 % of 15.2 GB, though the browser is currently disconnected.",
+      "latency_ms": 4275.9,
+      "status": "PASS"
+    },
+    {
+      "id": "06",
+      "cat": "continuity",
+      "msg": "What did you just say you could do?",
+      "reply": "I can pull system stats, launch or close apps, create and edit documents, run calculations or unit conversions, set reminders, play media, automate web tasks when the browser’s connected, and keep our conversation history for precise guidance.",
+      "latency_ms": 4165.7,
+      "status": "PASS"
+    },
+    {
+      "id": "07",
+      "cat": "topic_return",
+      "msg": "Going back to the system design",
+      "reply": "The core consists of a large‑language model for natural‑language reasoning, wrapped by a deterministic that queues and audits tool calls. Around that sit modular plug‑ins—semantic memory for persistent context, system‑control agents for apps and files, media playback, and (when connected) browser automation—each communicating through a lightweight message bus so the whole stack stays auditable and extensible.",
+      "latency_ms": 6236.8,
+      "status": "PASS"
+    },
+    {
+      "id": "08",
+      "cat": "waiting",
+      "msg": "What am I waiting on?",
+      "reply": "You're waiting on: the opencode review before continuing the mcp work.",
+      "latency_ms": 2099.9,
+      "status": "PASS"
+    },
+    {
+      "id": "09",
+      "cat": "waiting_rev",
+      "msg": "What are you waiting on from me?",
+      "reply": "KIO — Kernel for Intelligent Orchestration.\n\nA personal operating companion built by Joel.\n\nI help with desktop automation, system operations and conversational assistance.",
+      "latency_ms": 2083.7,
+      "status": "PASS"
+    },
+    {
+      "id": "10",
+      "cat": "identity",
+      "msg": "Who are you exactly?",
+      "reply": "KIO — Kernel for Intelligent Orchestration.\n\nA personal operating companion built by Joel.\n\nI help with desktop automation, system operations and conversational assistance.",
+      "latency_ms": 2078.2,
+      "status": "PASS"
+    },
+    {
+      "id": "11",
+      "cat": "recall",
+      "msg": "What was the very first thing I said?",
+      "reply": "Your first message was just “ping”.",
+      "latency_ms": 4278.3,
+      "status": "PASS"
+    },
+    {
+      "id": "12",
+      "cat": "battery",
+      "msg": "Battery status",
+      "reply": "Battery is at 46% and the system is running on battery.",
+      "latency_ms": 4157.8,
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "passed": 12,
+    "failed": 0,
+    "total": 12
+  }
+}

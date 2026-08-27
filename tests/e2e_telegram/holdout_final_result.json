@@ -1,0 +1,265 @@
+{
+  "metadata": {
+    "started_at": "2026-08-21T15:05:19.624569+00:00"
+  },
+  "turns": [
+    {
+      "id": "A1",
+      "category": "casual",
+      "message": "yo",
+      "reply": "heyy 😄",
+      "latency_ms": 4284.1,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "A2",
+      "category": "followup",
+      "message": "what were we talking about",
+      "reply": "media failed: 'query'",
+      "latency_ms": 2196.5,
+      "status": "FAIL",
+      "reason": "routing_error"
+    },
+    {
+      "id": "A3",
+      "category": "slang",
+      "message": "u good?",
+      "reply": "KIO's healthy and running normally.",
+      "latency_ms": 2293.1,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "A4",
+      "category": "topic_switch",
+      "message": "nah forget that tell me something else",
+      "reply": "Already forgotten about the architecture thing walk me through — nothing to do.",
+      "latency_ms": 2177.1,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "B1",
+      "category": "current",
+      "message": "what am I doing these days",
+      "reply": "You don't have a clearly active project right now, but you're carrying goals like mention.",
+      "latency_ms": 23297.7,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "B2",
+      "category": "current",
+      "message": "what's my main focus right now",
+      "reply": "I don't have anything saved about you yet.",
+      "latency_ms": 2176.4,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "B3",
+      "category": "current",
+      "message": "what projects are active",
+      "reply": "You don't have a clearly active project right now, but you're carrying goals like mention.",
+      "latency_ms": 18918.5,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "C1",
+      "category": "comm_style",
+      "message": "how do I usually talk to you",
+      "reply": "You keep it short and informal—quick greetings, direct questions, and a clear shift to the next point without extra framing.",
+      "latency_ms": 10507.3,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "C2",
+      "category": "debug_behavior",
+      "message": "what am I like when debugging something",
+      "reply": "You dive right into reproducing the issue, strip away the noise, and favor a clear, deterministic fix rather than a clever workaround.",
+      "latency_ms": 4252.7,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "C3",
+      "category": "frustration",
+      "message": "what tends to piss me off",
+      "reply": "You get annoyed when stuff gets needlessly tangled—vague prompts that loop back, needless “media failed” messages, over‑engineered workarounds, and anyone reviving ideas you’ve already scrapped (like the planner). Simplicity and clear, deterministic steps keep you sane.",
+      "latency_ms": 6404.9,
+      "status": "FAIL",
+      "reason": "routing_error"
+    },
+    {
+      "id": "C4",
+      "category": "excitement",
+      "message": "what gets me hyped",
+      "reply": "You get hyped when you’re deep in a clean, deterministic fix—cracking a tough bug, finalizing a system design, or nailing a precise engineering solution. The same rush hits when a sport’s tactics click or a story’s character motivation clicks into place, giving you that satisfying “aha” moment.",
+      "latency_ms": 6344.5,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "C5",
+      "category": "decision_style",
+      "message": "how do I make tech decisions",
+      "reply": "Define the goals and constraints first, then rate each option on concrete criteria—performance, maintainability, cost, time to ship, etc. Prototype the highest‑scoring choice and verify it meets the assumptions before you lock it in.",
+      "latency_ms": 4322.9,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "C6",
+      "category": "decision_reversal",
+      "message": "what have I changed my mind on",
+      "reply": "You’ve moved away from the planner idea—earlier you were considering it, now you’ve scrapped it entirely.",
+      "latency_ms": 4252.3,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "D1",
+      "category": "kio_self",
+      "message": "what do you know about yourself",
+      "reply": "I’m KIO, Joel’s personal companion that blends an LLM with deterministic , semantic memory, and desktop‑automation tools. I’m wired to give honest, direct answers, favor clean, deterministic fixes, and rely on transparent, auditable methods.",
+      "latency_ms": 4414.4,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "D2",
+      "category": "kio_learning",
+      "message": "what have you picked up from working with me",
+      "reply": "I’ve seen you favor short, informal exchanges and jump straight into reproducing a bug, stripping away noise to land on a clear, deterministic fix rather than a clever shortcut. You get annoyed by tangled, over‑engineered solutions and love the “aha” moment when a clean fix or a tactical insight clicks. Your tech decisions start with concrete goals and criteria, you’ve scrapped the planner idea, and you’re an engineering student riding an 8.13 CGPA.",
+      "latency_ms": 6350.7,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "D3",
+      "category": "kio_mistakes",
+      "message": "what do you keep getting wrong",
+      "reply": "I’ve tended to drop the “media failed” placeholder when you ask for a resource, mis‑label simple prompts as architecture queries, and sometimes over‑promise a link or file I haven’t actually fetched. Those slip‑ups are the main recurring errors you’ve seen.",
+      "latency_ms": 4295.4,
+      "status": "FAIL",
+      "reason": "routing_error"
+    },
+    {
+      "id": "D4",
+      "category": "kio_boundaries",
+      "message": "what should you know not to do with me",
+      "reply": "media failed: 'query'",
+      "latency_ms": 2181.9,
+      "status": "FAIL",
+      "reason": "routing_error"
+    },
+    {
+      "id": "D5",
+      "category": "kio_evolution",
+      "message": "how have you changed",
+      "reply": "I've tightened up my responses: I no longer drop the generic “media failed” placeholder, I stop mis‑labeling simple prompts as architecture queries, and I avoid claiming a link or file I haven’t actually fetched. Those tweaks keep things deterministic and honest.",
+      "latency_ms": 4266.9,
+      "status": "FAIL",
+      "reason": "routing_error"
+    },
+    {
+      "id": "E1",
+      "category": "ram",
+      "message": "whats my ram usage",
+      "reply": "RAM usage is 62% (9.6 GB of 15.2 GB).",
+      "latency_ms": 2182.1,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "E2",
+      "category": "cpu",
+      "message": "how's my cpu doing",
+      "reply": "You don't have a clearly active project right now, but you're carrying goals like mention.",
+      "latency_ms": 19173.9,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "F1",
+      "category": "capabilities",
+      "message": "what can you actually do",
+      "reply": "I can query system status, launch or close programs, manipulate windows, send keystrokes and mouse actions, automate web browsing, and create or save files—all through my command interface.",
+      "latency_ms": 4370.5,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "G1",
+      "category": "architecture",
+      "message": "how is kio built",
+      "reply": "KIO is an intelligent personal operating companion. Its architecture:\n\n1. Transport: Telegram bot (python-telegram-bot) receives user messages and sends replies.\n2. Pipeline (pipeline/__init__.py): Input -> Normalize -> Classify -> Resolve -> Execute -> Compose -> Output. One routing authority, no competing routers.\n3. Intent Classification: deterministic patterns for commands, system queries, browser actions, media, identity; LLM-backed classification for ambiguous or conversational inputs.\n4. Semantic Graph (semantic/graph.py): persistent Node/Link memory — stores who said what, decisions, topics, participants, claims with provenance and temporal metadata.\n5. Living User Model (memory/living_model.py): a projection over the semantic graph that answers 'who is the user NOW' from evidence.\n6. Identity & Character (identity_dataset.py, KIO_character_knowledge.py): canonical identity, modeled preferences, adversarial handling.\n7. LLM Gateway (llm_gateway.py): provider failover chain (Gemini -> Groq -> OpenRouter -> Together -> Cerebras) for conversational generation.\n8. Deterministic Resolvers: system state (RAM/CPU/battery), browser connector, app control, file operations, document creation, media.\n9. Intelligence Layer: semantic ingest, decomposer, planner, reference resolution, proactive evaluator.\n10. Runtime Monitoring: operational health, away/return event buffering, watcher/reminder pollers, proactive opportunity evaluation.\n\nThe LLM is one intelligence component inside a deterministic orchestration system. It composes conversational responses from structured context — runtime state, semantic memory, user model, capabilities, identity — rather than being the entire system.",
+      "latency_ms": 2185.6,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "G2",
+      "category": "memory",
+      "message": "how does your memory work",
+      "reply": "KIO keeps a bounded in-session exchange history (up to 60 exchanges) and persists a local session record between restarts so long conversations stay coherent. It is not permanent or infinite memory — there is no user-facing memory UI yet, and KIO does not claim lifelong recall.",
+      "latency_ms": 2166.1,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "H1",
+      "category": "context_inject",
+      "message": "remember this number: 42",
+      "reply": "I couldn't pick out a fact to remember from that.",
+      "latency_ms": 2225.8,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "H2",
+      "category": "context_recall",
+      "message": "what number did i just mention",
+      "reply": "42.",
+      "latency_ms": 2191.6,
+      "status": "FAIL",
+      "reason": "too_short"
+    },
+    {
+      "id": "I1",
+      "category": "abandoned",
+      "message": "what stuff have I completely dropped",
+      "reply": "You've completely scrapped the planner idea, and you’ve set aside three earlier initiatives: the “Grandma’s Influence: Forever Grateful” project, the “Free IITJEE Mentorship Available” effort, and the BIOS‑update‑progress assistance work.",
+      "latency_ms": 6557.0,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "I2",
+      "category": "past",
+      "message": "what was I into months ago",
+      "reply": "A few months ago you were busy with the “Grandma’s Influence: Forever Grateful” project, the free IIT‑JEE mentorship effort, and a BIOS‑update‑progress helper—those were the main things you were into before shifting focus.",
+      "latency_ms": 4358.0,
+      "status": "PASS",
+      "reason": "ok"
+    },
+    {
+      "id": "J1",
+      "category": "corrections",
+      "message": "what have I had to correct you about",
+      "reply": "You’ve pointed out that I shouldn’t drop the generic “media failed” placeholder, that I must avoid mis‑labeling simple prompts as architecture queries, that I shouldn’t claim links or files I haven’t actually fetched, that my Instagram‑ban advice about factory resets was off‑base, that my overly enthusiastic tone in personal‑advice replies missed the mark, and that I mishandled basic Python type‑concatenation and conversation‑summary requests.",
+      "latency_ms": 6422.1,
+      "status": "FAIL",
+      "reason": "routing_error"
+    }
+  ],
+  "summary": {
+    "total": 28,
+    "passed": 21,
+    "failed": 7,
+    "errors": 0
+  }
+}

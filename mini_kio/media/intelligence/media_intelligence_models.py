@@ -126,6 +126,88 @@ class ArtifactRecord:
 
 
 @dataclass
+class RelationshipRecord:
+    """A semantic entity relationship: subject --predicate--> object.
+
+    Canonical representation of attribution/membership facts extracted from
+    evidence ("Annihilation --directed_by--> Alex Garland", "Nvidia
+    --led_by--> Jensen Huang", "Stephen Curry --plays_for--> Golden State
+    Warriors"). Predicates come from the closed semantic vocabulary in
+    relationship_extractor.py — every surface form (founder/CEO/leader/
+    president, developer/studio/maker, artist/singer/band, ...) folds into an
+    existing canonical family; there is never a per-entity or per-role code
+    path.
+    """
+    subject: str
+    predicate: str
+    object: str
+    confidence: float = 1.0
+    timestamp: float = field(default_factory=time.time)
+    evidence: str = ""
+    source: str = ""
+    session_id: str = ""
+
+    def is_valid(self) -> bool:
+        if not self.subject or not self.predicate or not self.object:
+            return False
+        if len(self.subject) < 2 or len(self.object) < 2:
+            return False
+        # The relationship must connect TWO DISTINCT entities — a self-loop
+        # ("X directed X") is never evidence, it is a scan artifact.
+        if self.subject.strip().lower() == self.object.strip().lower():
+            return False
+        _filler = {"a", "an", "the", "in", "at", "of", "to", "by", "and",
+                   "or", "with", "for", "is", "are", "was", "were", "it",
+                   "this", "that", "he", "she", "they", "him", "her"}
+        if self.object.strip().lower() in _filler:
+            return False
+        return self.confidence >= 0.5
+
+    def inverse_predicate(self) -> Optional[str]:
+        """Canonical inverse predicate (directed_by <-> directed_work)."""
+        _INV = {
+            "directed_by": "directed_work",
+            "written_by": "wrote_work",
+            "developed_by": "developed_work",
+            "published_by": "published_work",
+            "manufactured_by": "manufactured_work",
+            "composed_by": "composed_work",
+            "produced_by": "produced_work",
+            "created_by": "created_work",
+            "performed_by": "performed_work",
+            "founded_by": "founded_org",
+            "led_by": "led_org",
+            "owned_by": "owned_org",
+            "starring": "starred_in",
+            "narrated_by": "narrated_work",
+            "voiced_by": "voiced_work",
+            "plays_for": "has_player",
+            "member_of": "has_member",
+            "works_at": "employs",
+            # inverses of the above, so inverse_predicate() is idempotent
+            "directed_work": "directed_by",
+            "wrote_work": "written_by",
+            "developed_work": "developed_by",
+            "published_work": "published_by",
+            "manufactured_work": "manufactured_by",
+            "composed_work": "composed_by",
+            "produced_work": "produced_by",
+            "created_work": "created_by",
+            "performed_work": "performed_by",
+            "founded_org": "founded_by",
+            "led_org": "led_by",
+            "owned_org": "owned_by",
+            "starred_in": "starring",
+            "narrated_work": "narrated_by",
+            "voiced_work": "voiced_by",
+            "has_player": "plays_for",
+            "has_member": "member_of",
+            "employs": "works_at",
+        }
+        return _INV.get(self.predicate)
+
+
+@dataclass
 class IntelligenceResult:
     topic: TopicType
     sports_mode: Optional[SportsMode] = None

@@ -342,7 +342,7 @@ def play_youtube(query: str) -> Dict[str, Any]:
         return _normalize_public_result(
             "youtube_play",
             "youtube",
-            {"success": True, "message": f"Playing on YouTube: {query}"},
+            {"success": True, "message": f"Opened YouTube for: {query}. Click the first video to play."},
             start_time,
         )
     except Exception as exc:

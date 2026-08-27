@@ -153,6 +153,18 @@ class DirectHTTPProvider(LLMProvider):
             logger.warning(f"{self._name} API: empty content")
             return None
 
+        # A stream cut by max_tokens must NOT be returned as a successful
+        # reply — the provider would surface a half-sentence as complete
+        # ("I'd highlight its engineering rigor, particularly"). Reject it
+        # (None) so the gateway chain falls through to the next provider.
+        try:
+            _finish = data["choices"][0].get("finish_reason") or data["choices"][0].get("finish_reason_phrase")
+        except (IndexError, KeyError, TypeError, AttributeError):
+            _finish = None
+        if _finish == "length":
+            logger.warning(f"{self._name} API: truncated by max_tokens (finish_reason=length)")
+            return None
+
         return content.strip()
 
     def _classify_http_error(self, status_code: int, body: str) -> str:

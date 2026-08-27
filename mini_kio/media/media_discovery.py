@@ -22,21 +22,31 @@ _TOPIC_PATTERNS = {
 }
 
 _OPPORTUNITY_KEYWORDS = [
-    "what's new", "what is", "tell me about", "explain", "how to",
+    # Media-SEEKING intent only. Bare "what is"/"explain" are general
+    # knowledge questions — offering a video after every one would make KIO
+    # a search bot (live over-eagerness: "what is the capital of France"
+    # triggered an educational-video offer). The opportunity model must
+    # fire only when the user is actually LOOKING for media/current
+    # material, not after every topic answer.
+    "what's new", "how to", "tutorial", "documentary", "watch", "listen",
     "latest", "new", "upcoming", "trailer", "review", "unveiled",
-    "announced", "released", "keynote", "presentation", "demo",
+    "announced", "released", "keynote", "presentation", "demo", "clip",
+    "clips", "highlights", "trailers", "teaser", "teasers",
 ]
 
 _MEDIA_OFFER_TEMPLATES: dict[str, str] = {
-    MediaType.MOVIE_TRAILER: "I found the official trailer. Would you like me to play it?",
-    MediaType.TV_TRAILER: "I found the trailer. Want me to play it?",
-    MediaType.TUTORIAL: "I found a visual tutorial that explains this well. Want to watch it?",
-    MediaType.EDUCATIONAL: "I found educational content about this topic. Want me to play it?",
-    MediaType.MUSIC: "I found music related to this. Want me to play it?",
-    MediaType.PODCAST: "I found a podcast discussing this. Want to listen?",
-    MediaType.LIVESTREAM: "There's a live stream about this. Want to watch?",
-    MediaType.SPORTS: "I found highlights. Want to watch?",
-    MediaType.NEWS: "I found a news segment about this. Want me to play it?",
+    # Natural KIO-voiced, restrained offers — an OPTION the user can take,
+    # never an automatic dump. Wording mirrors how KIO speaks in
+    # conversation ("if you want"/"want me to"), not a search-engine prompt.
+    MediaType.MOVIE_TRAILER: "There's an official trailer if you want to see what it actually looks like — want me to pull it up?",
+    MediaType.TV_TRAILER: "There's a trailer for it if you'd like a look — want me to play it?",
+    MediaType.TUTORIAL: "There's a visual walkthrough that explains this well, if you'd rather watch than read.",
+    MediaType.EDUCATIONAL: "There's a solid video explainer on this if you'd like me to play it.",
+    MediaType.MUSIC: "There's music along these lines if you want to hear something fitting.",
+    MediaType.PODCAST: "There's a podcast that digs into this, if you'd rather listen.",
+    MediaType.LIVESTREAM: "There's a live stream covering this right now, if you want to check it out.",
+    MediaType.SPORTS: "There are highlights of it if you want to see the actual moment.",
+    MediaType.NEWS: "There's a news segment about this if you'd like the fuller picture.",
 }
 
 

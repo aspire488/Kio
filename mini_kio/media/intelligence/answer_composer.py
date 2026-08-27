@@ -93,23 +93,83 @@ class AnswerComposer:
         raw = re.sub(r"\s+", " ", raw).strip()
         max_input = raw[:4000]
 
+        # Simple factual questions ("what's the capital of japan", "who
+        # wrote dune", "when was X founded") demand a ONE-FACT answer
+        # ("Tokyo.", "Frank Herbert.") — never a padded paragraph (live:
+        # "what's the capital of japan" returned a tourism essay). Generic
+        # morphology: a fact-noun/fact-verb + short question shape. Anything
+        # else keeps the full conversational depth.
+        _ql = (query or "").lower().strip()
+        _simple_fact = bool(re.search(
+            r"\b(?:capital|official\s+language|currency|population|president|ceo|founder|"
+            r"author|writer|creator|director|composer|inventor|born|founded|founding|"
+            r"written|wrote|directed|created|made|released|year|date|age|old|call(?:ed)?|"
+            r"name(?:d)?|mean(?:s|ing)?|stand(?:s)?\s+for|located|where\s+is)\b",
+            _ql,
+        )) and not any(k in _ql for k in (
+            "tell me more", "tell me about", "everything", "all about",
+            "history", "in depth", "compare", "explain why", "why did",
+            "what do you think", "your favorite", "which is better",
+            "recommend", "review",
+        ))
+
         prompt = (
             f"Source text about {subject}:\n\n{max_input}\n\n"
-            f"Answer naturally about {subject} (topic: {topic.value}).\n"
-            "Write a concise, conversational reply like a knowledgeable friend "
-            "(2-4 sentences). No headings, no 'Quick rundown', no bullet lists, "
-            "no markdown, no URLs."
+            f"The user's question was: {query!r}\n"
+            f"Answer THAT question directly (topic: {topic.value}).\n"
+            "Answer the user's actual question DIRECTLY first — if they asked "
+            "'what is X' or 'who is Y' or 'what's the capital of Z', the fact "
+            "they asked for must be stated explicitly in the first sentence "
+            "(e.g. for 'what's the capital of Japan' the answer starts 'Tokyo.'), "
+            "then you may add color. Never answer around the question without "
+            "ever giving the answer itself. Write a concise, conversational "
+            "reply like a knowledgeable friend (2-4 sentences). No headings, no "
+            "'Quick rundown', no bullet lists, no markdown, no URLs."
         )
+        if _simple_fact:
+            prompt += (
+                "\n\nIMPORTANT: this is a SIMPLE FACTUAL question — reply with "
+                "ONLY the fact, in ONE short sentence (e.g. 'Tokyo.' or 'Frank "
+                "Herbert.'). No extra sentences, no color, no padding."
+            )
         try:
             answer = self._llm_fn(prompt)
-            if answer and len(answer) > 30:
+            # Short-but-complete answers are legitimate: "Franklin Patrick
+            # Herbert Jr." (28 chars, no period) is a perfect answer to "who
+            # wrote Dune", and simple facts are one word ("Tokyo."). The old
+            # >30 gate rejected them, forcing the deterministic extractor,
+            # which dumped raw list content (live: "who wrote dune" answered
+            # with a Dune Universe short-story list). Simple facts allow even
+            # shorter answers.
+            _min_len = 3 if _simple_fact else 8
+            if answer and len(answer) >= _min_len:
                 answer = answer.strip()
-                # Reject truncated replies: a real 2-4 sentence answer ends with
-                # terminal punctuation. A cut-off stream ("Hey! Notepad is a
-                # super simple text") would otherwise surface as a broken reply —
-                # fall back to the deterministic extractor instead.
-                if not answer.endswith((".", "!", "?")) and len(answer) < 120:
+                # Reject TRUNCATED replies (not merely punctuation-less short
+                # ones): a cut-off stream is long without terminal punctuation
+                # ("Hey! Notepad is a super simple text") or ends mid-clause on
+                # a word that cannot end a sentence ("The concepts of"). A
+                # complete punctuation-less answer ("Franklin Patrick Herbert
+                # Jr.") is kept — fall back to the deterministic extractor
+                # only on genuine truncation.
+                _ends_mid_clause = bool(re.search(
+                    r"\b(of|the|and|but|or|to|with|that|which|because|is|are|was|were|"
+                    r"will|would|should|can|could|have|has|a|an|it|its|this|for)\s*$",
+                    answer.lower(),
+                ))
+                _cut = (
+                    not answer.endswith((".", "!", "?"))
+                    and (len(answer) >= 40 or _ends_mid_clause)
+                )
+                if _cut:
                     return None
+                # Simple-fact enforcement (defense in depth): even if the LLM
+                # ignores the one-sentence directive, truncate to the FIRST
+                # sentence for simple factual questions — "Tokyo. Japan's
+                # capital is a bustling city..." becomes "Tokyo."
+                if _simple_fact and re.search(r"[.!?]", answer):
+                    _first = re.split(r"(?<=[.!?])\s+", answer.strip())[0].strip()
+                    if len(_first) >= 4:
+                        answer = _first
                 return answer
         except Exception:
             pass

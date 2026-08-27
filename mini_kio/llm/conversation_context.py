@@ -36,7 +36,7 @@ class SessionMode(Enum):
     EXECUTION = "execution"
     EDUCATIONAL = "educational"
 
-_MAX_EXCHANGES = 10
+_MAX_EXCHANGES = 25  # widened from 10 for better conversation continuity
 
 _EXTRACT_TOPIC_PREFIXES = [
     "what is ", "what are ", "tell me about ", "what does ", "what do ",
@@ -281,6 +281,59 @@ class ConversationContext:
                     return result
 
         return text
+
+    def search_exchanges(self, topic: str, limit: int = 5) -> list[tuple[str, str]]:
+        """Search exchange history for topic-matching user statements.
+        Returns matching (user_text, kio_reply) pairs, most recent first."""
+        if not topic or not self._exchanges:
+            return []
+        topic_low = topic.lower().strip()
+        stop = {"the", "about", "what", "that", "this", "with", "from", "have",
+                "were", "was", "been", "being", "does", "doing", "will",
+                "would", "could", "should", "tell", "said", "asked"}
+        words = [w for w in re.findall(r'[a-z]{3,}', topic_low) if w not in stop]
+        if not words:
+            return []
+        matches: list[tuple[float, tuple[str, str]]] = []
+        for user_text, kio_reply in reversed(self._exchanges):
+            if not user_text:
+                continue
+            ul = user_text.lower()
+            score = 0.0
+            if topic_low in ul:
+                score = 1.0
+            else:
+                matched = sum(1 for w in words if w in ul)
+                if matched > 0:
+                    score = matched / len(words) * 0.8
+            if score > 0:
+                matches.append((score, (user_text, kio_reply)))
+            if len(matches) >= limit * 2:
+                break
+        matches.sort(key=lambda x: -x[0])
+        return [m[1] for m in matches[:limit]]
+
+    def recent_topics_summary(self, max_topics: int = 5) -> str:
+        """Compact summary of recent conversation topics."""
+        if not self._topic_stack:
+            return ""
+        unique = []
+        for t in reversed(self._topic_stack):
+            if not unique or t != unique[-1]:
+                unique.append(t)
+            if len(unique) >= max_topics:
+                break
+        if not unique:
+            return ""
+        return "Recent topics: " + ", ".join(reversed(unique)) + "."
+
+    def get_history_window(self, n: int = 10) -> list[tuple[str, str]]:
+        """Return last n exchange pairs. Compatible with SessionContext API."""
+        return self._exchanges[-n:] if self._exchanges else []
+
+    def exchange_count(self) -> int:
+        """Number of stored exchanges."""
+        return len(self._exchanges)
 
     def prune(self) -> None:
         while len(self._exchanges) > _MAX_EXCHANGES:

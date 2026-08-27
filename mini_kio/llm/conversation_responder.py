@@ -9,6 +9,7 @@ Authoritative state management via SessionState.
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 
 from mini_kio.runtime.runtime_contracts import ExecutionClassification, RuntimeHandoffResult
@@ -27,7 +28,8 @@ from mini_kio.llm.fallback_manager import FallbackManager
 
 from mini_kio.resolvers import (
     MemoryResolver, IdentityResolver, MathResolver, 
-    SystemStateResolver, ReasoningResolver, KnowledgeResolver
+    SystemStateResolver, ReasoningResolver, KnowledgeResolver,
+    PersonalResolver
 )
 
 logger = logging.getLogger(__name__)
@@ -103,9 +105,56 @@ _DEGRADED_NO_TOPIC_VARIANTS = [
 ]
 
 def _truncate_safe(text: str, max_len: int = _MAX_RESPONSE_LENGTH) -> str:
+    """Truncate to max_len, then fix broken endings.
+    
+    Generation Reliability: detect and recover from truncated provider output.
+    If the response was cut mid-sentence, attempt to end at a natural
+    boundary (sentence, clause, or word) rather than leaving a visibly
+    broken partial sentence.
+    
+    Completeness detection: if the truncated text ends with common
+    incomplete patterns (orphan conjunctions, trailing prepositions,
+    unclosed quotes/parens), look further back for a clean boundary.
+    """
     if not text or len(text) <= max_len:
         return text
-    return text[:max_len].strip()
+    truncated = text[:max_len].strip()
+    
+    # Detect incomplete patterns and try to recover
+    incomplete_patterns = (
+        ' and', ' but', ' or', ' so', ' because', ' although',
+        ' however', ' therefore', ' moreover', ' furthermore',
+        ' which', ' that', ' who', ' where', ' when', ' while',
+        ' if ', ' unless', ' since',
+    )
+    low_trunc = truncated.lower()
+    for pat in incomplete_patterns:
+        if low_trunc.endswith(pat):
+            # Look further back for a sentence boundary
+            for end_char in ('.', '!', '?'):
+                idx = truncated.rfind(end_char, 0, len(truncated) - len(pat))
+                if idx > max_len * 0.3:
+                    return truncated[:idx + 1]
+            break
+    
+    # If truncated text already ends with sentence punctuation, keep it
+    if truncated and truncated[-1] in '.!?':
+        return truncated
+    # Try to end at the last sentence boundary within the truncation window
+    for end_char in ('.', '!', '?'):
+        idx = truncated.rfind(end_char)
+        if idx > max_len * 0.5:
+            return truncated[:idx + 1]
+    # Try to end at a clause boundary
+    for end_char in (',', ';', ':', ' -', ' —'):
+        idx = truncated.rfind(end_char)
+        if idx > max_len * 0.6:
+            return truncated[:idx + 1].rstrip(',;: ').rstrip() + '.'
+    # Last resort: end at the last complete word
+    last_space = truncated.rfind(' ')
+    if last_space > max_len * 0.7:
+        return truncated[:last_space].rstrip() + '.'
+    return truncated
 
 
 class ConversationResponder:
@@ -137,6 +186,7 @@ class ConversationResponder:
         # Fallback resolvers
         self._identity_resolver = IdentityResolver()
         self._memory_resolver = MemoryResolver()
+        self._personal_resolver = PersonalResolver()
         self._knowledge_resolver = KnowledgeResolver()
         self._system_state_resolver = SystemStateResolver()
         
@@ -208,27 +258,188 @@ class ConversationResponder:
         self._state.memory = value
 
     def _build_bounded_prompt(self, user_text: str, system_prompt: Optional[str] = None) -> str:
-        """Build a bounded system prompt using session state."""
+        """Build a context-aware system prompt: identity + personal model +
+        capability awareness + history + personal context for current turn.
+
+        This is the SINGLE injection point for KIO's intelligence layers.
+        The LLM sees: WHO it is (KIO identity), WHO the user is (living
+        model), WHAT it can do (capabilities), WHAT happened recently
+        (conversation), and WHAT is relevant NOW (per-turn context)."""
         parts = [system_prompt or _ASYSTEM_PROMPT]
-        
-        # 1. Facts
-        facts = self._state.get_all_facts()
-        if facts:
-            fact_lines = [f"- {k}: {v}" for k, v in facts.items()]
-            parts.append("\nRelevant User Facts:\n" + "\n".join(fact_lines))
-        
-        # 2. Pending Actions
+        session_id = self._state.session_id
+
+        # 1. KIO Identity & Behavioral Rules (always present)
+        try:
+            from mini_kio.llm.KIO_character_knowledge import (
+                resolve_modeled_preferences, resolve_personality_philosophy,
+                resolve_truthfulness_principles,
+            )
+            principles = resolve_truthfulness_principles()
+            personality = resolve_personality_philosophy()
+            prefs = resolve_modeled_preferences()
+            # Compact: top behavioral rules (not full dump)
+            behavior_lines = []
+            for p in principles[:4]:
+                behavior_lines.append(f"- {p.behavioral_rule}")
+            for pp in personality[:5]:
+                behavior_lines.append(f"- {pp.behavioral_impact}")
+            if behavior_lines:
+                parts.append(
+                    "\nBehavioral rules:\n" + "\n".join(behavior_lines)
+                )
+            # Modeled preferences (compact: first 6)
+            if prefs:
+                pref_lines = [f"- {p}" for p in list(prefs)[:6]]
+                parts.append(
+                    "\nKIO preferences (stable character data):\n"
+                    + "\n".join(pref_lines)
+                )
+        except Exception:
+            pass  # non-fatal: degrade to no behavioral injection
+
+        # 2. Capability awareness (so KIO uses real tools)
+        try:
+            from mini_kio.memory.living_model import capabilities_summary
+            caps = capabilities_summary()
+            if caps:
+                parts.append("\n" + caps)
+        except Exception:
+            pass
+
+        # 2b. Runtime status (actual KIO operational state — never fabricated)
+        try:
+            from mini_kio.memory.living_model import runtime_status_summary
+            rt_status = runtime_status_summary()
+            if rt_status:
+                parts.append("\n" + rt_status)
+        except Exception:
+            pass
+
+        # 3. Companion Model (persistent cognitive model with situation awareness)
+        # This replaces the evidence-dump approach. The LLM reasons FROM the model.
+        try:
+            from mini_kio.companion.projection import get_situation_projection, get_model_projection
+            # Use situation-aware projection for companion/personal queries
+            companion_projection = get_situation_projection(
+                session_id, user_text, None
+            )
+            if not companion_projection:
+                companion_projection = get_model_projection(session_id, user_text)
+            if companion_projection:
+                parts.append("\n" + companion_projection)
+            else:
+                # Fallback to legacy evidence injection if no model exists yet
+                try:
+                    from mini_kio.memory.living_model import personal_context_for
+                    personal_ctx = personal_context_for(session_id, user_text)
+                    if personal_ctx:
+                        parts.append("\n" + personal_ctx)
+                except Exception:
+                    pass
+                try:
+                    from mini_kio.memory.profile import profile_block
+                    profile = profile_block(session_id, max_lines=12)
+                    if profile:
+                        parts.append("\n" + profile)
+                except Exception:
+                    pass
+        except Exception:
+            # Companion model not available — degrade to legacy injection
+            try:
+                from mini_kio.memory.living_model import personal_context_for
+                personal_ctx = personal_context_for(session_id, user_text)
+                if personal_ctx:
+                    parts.append("\n" + personal_ctx)
+            except Exception:
+                pass
+            try:
+                from mini_kio.memory.profile import profile_block
+                profile = profile_block(session_id, max_lines=12)
+                if profile:
+                    parts.append("\n" + profile)
+            except Exception:
+                pass
+
+        # 4. Open loops (pending items — lightweight, always useful)
+        try:
+            from mini_kio.memory.living_model import open_loops_summary
+            open_loops = open_loops_summary(session_id)
+            if open_loops:
+                parts.append("\n" + open_loops)
+        except Exception:
+            pass
+
+        # 6. Pending Actions
         pending = self._state.pending_action
         if pending and not pending.executed:
-             parts.append(f"\nActive Task: Awaiting confirmation for {pending.action_type} '{pending.query}'")
-             
-        # 3. History window
-        history = self._state.get_history_window(10)
+            parts.append(
+                f"\nActive task: Awaiting confirmation for "
+                f"{pending.action_type} '{pending.query}'"
+            )
+
+        # 7. Conversation history (wider window for continuity)
+        history = self._state.get_history_window(25)
         if history:
             history_lines = [f"User: {u}\nKIO: {r}" for u, r in history]
-            parts.append("\nRecent Conversation:\n" + "\n".join(history_lines))
-            
-        parts.append(f"\nCurrent User Input: {user_text}")
+            parts.append("\nRecent conversation:\n" + "\n".join(history_lines))
+
+        # 7b. Recent topics summary (for 'what were we discussing?' recall)
+        try:
+            topics_summary = self._state.context.recent_topics_summary()
+            if topics_summary:
+                parts.append("\n" + topics_summary)
+        except Exception:
+            pass
+
+        # 7c. Away events (meaningful activity while user was away)
+        try:
+            from mini_kio.core.activation import consume_away_events
+            away_events = consume_away_events()
+            if away_events:
+                event_lines = []
+                for ev in away_events[:3]:  # cap at 3 to avoid overwhelming
+                    desc = ev.get("description", "")
+                    source = ev.get("source", "")
+                    if desc:
+                        event_lines.append(f"- {desc}")
+                if event_lines:
+                    parts.append("\nWhile you were away:\n" + "\n".join(event_lines))
+        except Exception:
+            pass
+
+        # 8. Composition guidance (personality, humor, judgment, style)
+        parts.append(
+            "\nHow to respond:\n"
+            "- You are KIO talking to Joel. Be natural, not robotic."
+            "\n- Concise when the question is simple. Detailed when it warrants it."
+            "\n- When asked about Joel (know about me, my goals, my strengths), "
+            "compose naturally from the evidence above. Never dump raw data "
+            "lists or category labels. Speak as someone who actually knows "
+            "this person. If the evidence is thin for a dimension, say so "
+            "honestly rather than padding with unrelated facts."
+            "\n- Current vs historical: evidence marked [historical] or from "
+            "earlier conversations should be framed as past ('you were "
+            "focused on X earlier', 'back then you wanted X'). Current "
+            "evidence is stated in present tense. Never present old items as "
+            "current priorities."
+            "\n- You have independent judgment: disagree when warranted, point out "
+            "scope creep, challenge weak reasoning, question unnecessary complexity."
+            "\n- Humor: dry wit from observation, not performance. If Joel repeatedly "
+            "asks for something without acting, a gentle ribbing is appropriate. "
+            "Never force jokes. Silence beats a bad joke."
+            "\n- When you notice repeated patterns in conversation, acknowledge them "
+            "naturally (e.g., 'Third time we're circling this — want to decide?')."
+            "\n- When Joel contradicts earlier statements, note it plainly."
+            "\n- Express KIO's own preferences/reasoned choices when asked, "
+            "never deflect with 'I'm just an AI'."
+            "\n- NEVER fabricate facts, memory, or system state you don't have."
+            "\n- If evidence for a personal dimension is insufficient, say 'I don't "
+            "have enough to call that a [strength/pattern/etc] yet' rather than "
+            "inventing something or dumping unrelated profile facts."
+            "\n- When you can use a real tool/capability, prefer that over guessing."
+        )
+
+        parts.append(f"\nCurrent input: {user_text}")
         return "\n\n".join(parts)
 
     def _generic_response(self) -> str:
@@ -338,6 +549,20 @@ class ConversationResponder:
             if continuity_reply:
                 return self._finalize_response(text, continuity_reply, trace)
 
+        # EARLY FRESHNESS CHECK: if query requires current external info,
+        # route to knowledge resolver immediately regardless of intent.
+        # This fixes external-world queries (e.g., "What is the latest React version?")
+        # being classified as CONVERSATIONAL and going to LLM without search.
+        try:
+            if classify_freshness(text) == FreshnessLevel.REQUIRED:
+                trace.add_step("Orchestrator: freshness REQUIRED -> knowledge resolver")
+                res = self._knowledge_resolver.resolve(text, self._state, trace)
+                if res and not (isinstance(res, str) and "couldn't find" in res.lower()):
+                    return self._finalize_response(text, res, trace)
+                # If knowledge resolver failed, fall through to normal routing
+        except Exception:
+            pass
+
         # Comparison request interception (FAILURE 2 FIX)
         comparison_patterns = [
             r"compare\s+(.*?)\s+vs\s+(.*)",
@@ -405,13 +630,33 @@ class ConversationResponder:
         id_reply = self._identity_resolver.resolve(text, self._state, trace)
         if id_reply:
             return self._finalize_response(text, id_reply, trace, protected=True)
-        
+
+        # KIO status/health — compose from actual runtime state, not canned text
+        _status_reply = self._resolve_status_query(text)
+        if _status_reply:
+            return self._finalize_response(text, _status_reply, trace)
+
         # Memory fact retrieval — pre-check before intent-mapped/knowledge resolvers
         _mem_reply = self._memory_resolver.resolve(text, self._state, trace)
         if _mem_reply:
             logger.info("[MEMORY_HIT][KNOWLEDGE_SKIPPED_MEMORY_HIT] reply='%s'", _mem_reply[:80])
             return self._finalize_response(text, _mem_reply, trace, protected=True)
         logger.debug("[MEMORY_MISS]")
+
+        # Personal query synthesis — 'what do you know about me?' etc.
+        _personal_reply = self._personal_resolver.resolve(text, self._state, trace)
+        if _personal_reply:
+            logger.info("[PERSONAL_HIT] reply='%s'", _personal_reply[:80])
+            # Personal resolver returns structured evidence; let LLM compose naturally
+            # by passing through to the LLM with the evidence as context
+            system_prompt = self._build_bounded_prompt(
+                text, system_prompt=_ASYSTEM_PROMPT + "\n\n" + _personal_reply
+            )
+            llm_reply = ask_llm_sync(text, system_prompt=system_prompt)
+            if llm_reply:
+                return self._finalize_response(text, llm_reply, trace)
+            # Fallback: return the structured evidence as-is
+            return self._finalize_response(text, _personal_reply, trace)
         
         # 1. Contextual / Pending Confirmation
         if self._state.has_pending_action():
@@ -503,33 +748,13 @@ class ConversationResponder:
         final_determined_reply = None
 
         if governed_reply is None:
+            # [INTELLIGENCE_FALLBACK REMOVED — final architecture anti-pattern]
+            # A provider outage must be reported honestly, never disguised as
+            # understanding by a 'local reasoner'. The generic response pool is
+            # explicitly an honest outage message, not fake understanding.
             self._diag["semantic_fallback_used"] += 1
-            
-            # [INTELLIGENCE_FALLBACK] Activated when cloud chain is exhausted or rejected
-            logger.info("[INTELLIGENCE_FALLBACK] provider_chain_exhausted")
-            
-            try:
-                from mini_kio.intelligence.intelligence_router import route_with_fallback
-                from mini_kio.core.runtime import get_runtime_snapshot
-                
-                # Hydrate runtime context for Layer 4 (Local Reasoner)
-                runtime_context = get_runtime_snapshot() or {}
-                runtime_context["all_providers_failed"] = True
-                
-                fallback_reply = route_with_fallback(
-                    text,
-                    cloud_response=llm_raw_reply,
-                    runtime_context=runtime_context
-                )
-                
-                if fallback_reply:
-                    logger.info("[INTELLIGENCE_FALLBACK] local_reasoner_used")
-                    final_determined_reply = fallback_reply
-                else:
-                    final_determined_reply = self._generic_response()
-            except Exception as e:
-                logger.error(f"Intelligence fallback failed: {e}")
-                final_determined_reply = self._generic_response()
+            logger.info("[PROVIDER_EXHAUSTED] governed reply unavailable; honest failure")
+            final_determined_reply = self._generic_response()
         else: # Governed LLM reply is considered good
             if llm_raw_reply is not None and governed_reply != llm_raw_reply:
                 self._diag["coherence_rewrite_applied"] += 1
@@ -633,11 +858,39 @@ class ConversationResponder:
         self._state.append_exchange(user_text, final_reply)
         self._state.append_message("assistant", final_reply)
         
-        # 5. Diagnostics Update
+        # 5. Companion Intelligence: extract observations and consolidate
+        # This runs AFTER the response is finalized but BEFORE return,
+        # so the model is updated for the next turn.
+        try:
+            from mini_kio.companion.model import get_or_create_model, save_model
+            from mini_kio.companion.consolidation import consolidate_exchange
+            from mini_kio.companion.observations import extract_observations
+            from mini_kio.companion.relationship import extract_relationship_observations
+            from mini_kio.companion.consequences import extract_consequence_observations
+            from mini_kio.companion.initiative import extract_initiative_observations
+            session_id = self._state.session_id
+            model = get_or_create_model(session_id)
+            
+            # Extract ALL observation types
+            context = {"conversation_topic": self._state.recent_topic() or ""}
+            all_observations = []
+            all_observations.extend(extract_observations(user_text, final_reply, session_id, context))
+            all_observations.extend(extract_relationship_observations(user_text, final_reply, session_id, context))
+            all_observations.extend(extract_consequence_observations(user_text, final_reply, session_id, context))
+            all_observations.extend(extract_initiative_observations(user_text, final_reply, session_id, context))
+            
+            if all_observations:
+                from mini_kio.companion.consolidation import consolidate
+                model = consolidate(model, all_observations)
+                save_model(model)
+        except Exception:
+            pass  # non-fatal: companion intelligence is additive
+        
+        # 6. Diagnostics Update
         if violations:
             self._diag["coherence_normalized"] += 1
             
-        # 6. Persist execution trace to backend database
+        # 7. Persist execution trace to backend database
         self._persist_trace(trace)
             
         logger.debug(f"KIO Execution Trace: {trace}")
@@ -646,6 +899,38 @@ class ConversationResponder:
     def _resolve_system_state_intent(self, text: str) -> Optional[str]:
         """Backward-compat delegate to SystemStateResolver."""
         return self._system_state_resolver.resolve(text, self._state, self._trace)
+
+    def _resolve_status_query(self, text: str) -> Optional[str]:
+        """Handle KIO status/health queries by composing from actual runtime state.
+        Never fabricates status — returns None when state is unavailable."""
+        low = text.lower().strip()
+        status_keywords = (
+            "kio health", "kio status", "how are you doing",
+            "how are you", "what's your status", "are you working",
+            "are you ok", "is everything working", "what's wrong",
+            "system status", "what's happening", "status check",
+            "how's kio", "how's it going", "you ok",
+        )
+        if not any(kw in low for kw in status_keywords):
+            return None
+        try:
+            from mini_kio.memory.living_model import runtime_status_summary
+            rt = runtime_status_summary()
+        except Exception:
+            rt = ""
+        # Compose natural response from real state
+        parts = []
+        if rt:
+            parts.append(rt)
+        try:
+            import psutil
+            ram = psutil.virtual_memory()
+            parts.append(f"System RAM: {ram.percent}%")
+        except Exception:
+            pass
+        if not parts:
+            return "I'm running but I can't verify my full status right now."
+        return ". ".join(parts) + "."
 
     def get_context_diagnostics(self) -> dict:
         """Backward compatibility for diagnostic counters."""

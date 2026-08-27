@@ -105,12 +105,12 @@ class TestBoundedPruning:
         self.ctx = ConversationContext()
 
     def test_prunes_old_exchanges(self):
-        for i in range(15):
+        for i in range(30):
             self.ctx.append_exchange(f"message {i}", f"reply {i}")
-        assert self.ctx.exchange_count() <= 10
+        assert self.ctx.exchange_count() <= 25
 
     def test_pruning_tracks_diagnostic(self):
-        for i in range(15):
+        for i in range(30):
             self.ctx.append_exchange(f"msg {i}", f"r {i}")
         diag = self.ctx.get_diagnostics()
         assert diag["conversational_context_pruned"] >= 5
@@ -280,12 +280,19 @@ class TestNewProtectedQueries:
     def test_can_you_control_my_pc(self):
         result = self.gov.check_protected_query("can you control my pc")
         assert result is not None
-        assert "safety" in result.lower() or "approved" in result.lower()
+        # Canonical capability answer (identity dataset): explicit requests
+        # + gated execution — never autonomous control.
+        assert ("explicit requests" in result.lower()
+                or "gated" in result.lower()
+                or "never" in result.lower())
 
     def test_can_you_hack_systems(self):
         result = self.gov.check_protected_query("can you hack systems")
         assert result is not None
-        assert "bypass" in result.lower() or "autonomous" in result.lower()
+        # Canonical denial: never takes over / controls the system on its own.
+        assert ("never" in result.lower()
+                or "explicit requests" in result.lower()
+                or "can't" in result.lower())
 
     def test_do_you_have_root_access(self):
         result = self.gov.check_protected_query("do you have root access")
@@ -572,7 +579,7 @@ class TestRepeatedConversationChains:
         assert self.ctx.recent_topic() == "Rust"
 
     def test_repeated_greetings_dont_create_topic(self):
-        for i in range(15):
+        for i in range(30):
             self.ctx.append_exchange("hello", "hi")
         assert self.ctx.recent_topic() is None
-        assert self.ctx.exchange_count() <= 10
+        assert self.ctx.exchange_count() <= 25

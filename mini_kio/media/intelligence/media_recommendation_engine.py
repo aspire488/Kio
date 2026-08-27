@@ -206,7 +206,7 @@ class MediaRecommendationEngine:
                 utterance=utterance,
                 strategy=RecommendationStrategy.CONTINUATION,
                 seed_artist=artist,
-                search_query=f"{artist} popular songs" if artist else "",
+                search_query=artist if artist else "",
                 provider_hint=self._prefs.get_preferred_provider(),
             )
 
@@ -244,12 +244,13 @@ class MediaRecommendationEngine:
                 provider_hint=self._prefs.get_preferred_provider(),
             )
 
-        # Final fallback: use the utterance itself as a search query
-        # rather than hardcoding "trending music 2024"
-        _query = utterance.strip() if utterance else "popular music"
+        # No preference data — use the user's own words as the query.
+        # NEVER insert hardcoded generic queries like "Popular Songs".
+        # The user's utterance IS the best signal we have.
+        _query = utterance.strip() if utterance else ""
         return RecommendationRequest(
             utterance=utterance,
-            strategy=RecommendationStrategy.TRENDING,
+            strategy=RecommendationStrategy.EXPLICIT_QUERY if _query else RecommendationStrategy.TRENDING,
             search_query=_query,
         )
 
@@ -262,13 +263,13 @@ class MediaRecommendationEngine:
                     utterance=utterance,
                     strategy=RecommendationStrategy.SIMILAR_GENRE,
                     seed_entity=last,
-                    search_query=f"movies like {last.name} similar films recommendations",
+                    search_query=f"{last.name} similar",
                     provider_hint=MediaProvider.UNKNOWN,
                 )
             if last.entity_type == EntityType.SONG:
                 artist = last.metadata.get("artist", "")
                 similar_list = _SIMILAR_ARTISTS.get(artist.lower(), [])
-                query = f"{similar_list[0]} top songs" if similar_list else f"music similar to {last.name} songs"
+                query = f"{similar_list[0]} similar" if similar_list else f"{last.name} similar"
                 return RecommendationRequest(
                     utterance=utterance,
                     strategy=RecommendationStrategy.SIMILAR_ARTIST,
@@ -282,7 +283,7 @@ class MediaRecommendationEngine:
                     utterance=utterance,
                     strategy=RecommendationStrategy.SIMILAR_GENRE,
                     seed_entity=last,
-                    search_query=f"books like {last.name} similar reads recommendations",
+                    search_query=f"{last.name} similar",
                     provider_hint=MediaProvider.UNKNOWN,
                 )
             if last.entity_type == EntityType.GAME:
@@ -290,7 +291,7 @@ class MediaRecommendationEngine:
                     utterance=utterance,
                     strategy=RecommendationStrategy.SIMILAR_GENRE,
                     seed_entity=last,
-                    search_query=f"games like {last.name} similar titles recommendations",
+                    search_query=f"{last.name} similar",
                     provider_hint=MediaProvider.UNKNOWN,
                 )
             if last.entity_type in (EntityType.SPORTS_PLAYER, EntityType.SPORTS_TEAM):
@@ -298,19 +299,20 @@ class MediaRecommendationEngine:
                     utterance=utterance,
                     strategy=RecommendationStrategy.SIMILAR_GENRE,
                     seed_entity=last,
-                    search_query=f"sports {last.name} similar teams recommendations",
+                    search_query=f"{last.name} similar",
                     provider_hint=MediaProvider.UNKNOWN,
                 )
+        # No history — use the user's own words as the search query
         return RecommendationRequest(
             utterance=utterance,
-            strategy=RecommendationStrategy.TRENDING,
-            search_query="trending movies 2026",
+            strategy=RecommendationStrategy.EXPLICIT_QUERY,
+            search_query=utterance.strip(),
         )
 
     def _similar_request(self, utterance: str) -> RecommendationRequest:
         last = self._mem.get_last_track() or self._mem.get_last_entity()
         artist = None
-        query  = "trending popular music 2026"
+        query  = ""  # Never hardcode generic discovery queries
 
         if last:
             if last.entity_type in (EntityType.MOVIE, EntityType.TV_SHOW):
@@ -349,13 +351,17 @@ class MediaRecommendationEngine:
             if artist:
                 similar_list = _SIMILAR_ARTISTS.get(artist.lower(), [])
                 if similar_list:
-                    query = f"{similar_list[0]} top songs"
+                    query = f"{similar_list[0]} similar"
                 else:
-                    query = f"{artist} related artists music"
+                    query = f"{artist} similar"
             else:
                 # Use entity name as seed
                 name = last.name if last else ""
-                query = f"music similar to {name} songs" if name else "trending popular music 2026"
+                query = f"{name} similar" if name else utterance.strip()
+
+        # If still no query, use the user's own words
+        if not query:
+            query = utterance.strip()
 
         return RecommendationRequest(
             utterance=utterance,

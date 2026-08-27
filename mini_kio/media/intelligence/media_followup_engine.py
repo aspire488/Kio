@@ -271,10 +271,12 @@ class MediaFollowUpEngine:
         # 6. Continuation
         if _CONTINUATION_PATTERNS.search(text):
             artist = self._media_context.get_last_artist()
+            # Use artist name directly — never append "popular songs"
+            # which is a hardcoded generic fallback.
             return FollowUpResolution(
                 follow_up_type=FollowUpType.CONTINUATION,
                 is_follow_up=True,
-                query_override=f"{artist} popular songs" if artist else None,
+                query_override=artist if artist else None,
                 confidence=0.85 if artist else 0.40,
                 reason=f"continuation, artist={artist}",
             )

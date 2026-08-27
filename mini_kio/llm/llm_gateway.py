@@ -34,8 +34,8 @@ class LLMGateway:
         - All providers exhausted → deterministic degraded response
     """
 
-    PROVIDER_TIMEOUT_S = 8.0
-    TOTAL_CHAIN_TIMEOUT_S = 20.0  # ponytail: FAST 12s + BALANCED 20s, was 45s caused 53s RAM misroute via LLM
+    PROVIDER_TIMEOUT_S = 5.0  # per-provider attempt cap (was 8s — reduced to bound cascade)
+    TOTAL_CHAIN_TIMEOUT_S = 10.0  # total chain budget (was 20s — bounded to prevent 30s+ cascades)
     HARD_MAX_TOKENS = 4096
 
     _DETERMINISTIC_FALLBACK = (
@@ -56,8 +56,8 @@ class LLMGateway:
         # pass put into COOLDOWN are skipped by get_chain() on the retry.
 
     # Bounded transient-failure retry budget (see generate() below).
-    _TRANSIENT_RETRY_SLEEP_S = 1.0
-    _TRANSIENT_RETRY_MAX_S = 12.0
+    _TRANSIENT_RETRY_SLEEP_S = 0.5  # was 1.0
+    _TRANSIENT_RETRY_MAX_S = 4.0  # was 12.0 — don't waste chain budget on recovery wait
 
     async def _chain_with_recovery_wait(self, deadline: float) -> list:
         """Fetch the try-able chain; if empty, wait (bounded) for the soonest
@@ -71,7 +71,8 @@ class LLMGateway:
         soonest = self._registry.seconds_until_soonest_recovery()
         if soonest is None:
             return []
-        wait = min(soonest, self._TRANSIENT_RETRY_MAX_S, max(deadline - time.monotonic(), 0.0))
+        # Cap recovery wait to 2s (was 12s) — don't burn chain budget waiting
+        wait = min(soonest, 2.0, self._TRANSIENT_RETRY_MAX_S, max(deadline - time.monotonic(), 0.0))
         if wait > 0.5:
             logger.info(
                 "Gateway: chain empty — waiting %.1fs for provider recovery", wait,
@@ -87,10 +88,10 @@ class LLMGateway:
     async def generate(self, request: LLMRequest) -> LLMResponse:
         safe_max_tokens = min(request.max_tokens, self.HARD_MAX_TOKENS)
         provider_timeout = min(request.timeout_s, self.PROVIDER_TIMEOUT_S)
-        # FAST/BALANCED/DEEP: short follow-up uses 12s, normal 20s (was 45s), deterministic bypasses altogether
+        # FAST/BALANCED/DEEP: short follow-up uses 6s, normal 10s (was 20s), deterministic bypasses altogether
         task = getattr(request, 'task', '') or ''
         _fast = task in ('conversation', 'greeting', 'social') or getattr(request, 'max_tokens', 4096) <= 256
-        total_deadline = time.monotonic() + (12.0 if _fast else self.TOTAL_CHAIN_TIMEOUT_S)
+        total_deadline = time.monotonic() + (6.0 if _fast else self.TOTAL_CHAIN_TIMEOUT_S)
 
         chain = self._registry.get_chain()
         if not chain:
@@ -184,7 +185,7 @@ class LLMGateway:
         remaining_budget = total_deadline - time.monotonic()
         if (
             errs
-            and remaining_budget > self._TRANSIENT_RETRY_MAX_S + self._TRANSIENT_RETRY_SLEEP_S
+            and remaining_budget > 2.0  # at least 2s for a quick recovery retry
             and all(_is_transient_error(e) for e in errs)
         ):
             logger.info(

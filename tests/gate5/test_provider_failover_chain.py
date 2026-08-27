@@ -357,9 +357,13 @@ class TestMultiProviderFailoverChain(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(response.success)
         self.assertIn("unable to connect", response.content.lower())
-        self.assertEqual(p1.call_count, 1)
-        self.assertEqual(p2.call_count, 1)
-        self.assertEqual(p3.call_count, 1)
+        # All failures are TRANSIENT (timeout/rate-limit/5xx), so the gateway
+        # performs its single bounded chain retry (transient-storm recovery,
+        # live "I'm not sure how to handle that" bug fix): exactly TWO passes,
+        # each provider attempted once per pass, never more.
+        self.assertEqual(p1.call_count, 2)
+        self.assertEqual(p2.call_count, 2)
+        self.assertEqual(p3.call_count, 2)
 
     async def test_cooldown_provider_skipped(self):
         p = _FailMock("p", "MOCK_FAIL")
@@ -383,14 +387,17 @@ class TestMultiProviderFailoverChain(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(len(skip_events) >= 1)
 
     async def test_bounded_exactly_one_attempt_per_provider(self):
-        """No per-provider retries. Each provider tried exactly once."""
+        """No per-provider retries. Each provider tried once per pass; the
+        single bounded chain retry on transient-only failures adds at most ONE
+        extra pass (2 calls total), never an unbounded loop."""
         p = _FailMock("p", "TIMEOUT")
         self.gateway.register_provider(p, priority=0)
 
         request = LLMRequest(prompt="hello", timeout_s=1.0)
         await self.gateway.generate(request)
 
-        self.assertEqual(p.call_count, 1)
+        # First pass (1 call) + one bounded transient-retry pass (1 call).
+        self.assertEqual(p.call_count, 2)
 
     async def test_total_chain_timeout_bounded(self):
         """Chain does not hang — total timeout enforced."""

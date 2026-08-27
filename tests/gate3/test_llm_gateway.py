@@ -70,7 +70,10 @@ class TestLLMGateway(unittest.IsolatedAsyncioTestCase):
         response = await self.gateway.generate(request)
 
         self.assertFalse(response.success)
-        self.assertEqual(provider._generate_count, 1)
+        # Quota is a TRANSIENT error, so the bounded chain retry adds one
+        # extra pass (transient-storm recovery); still marks DEGRADED and
+        # never exceeds two passes.
+        self.assertEqual(provider._generate_count, 2)
 
     async def test_invalid_key_marks_provider_dead(self):
         provider = MockLLMProvider(mode="invalid_key")

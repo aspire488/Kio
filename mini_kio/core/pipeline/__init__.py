@@ -5,11 +5,60 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from typing import Any, Optional
 
 from mini_kio.core.pipeline.types import IntentType, RoutingDecision
 from mini_kio.core.context_manager import get_context_manager
+
+# ── Stale Work Tracker ─────────────────────────────────────────────
+# Tracks the latest request ID per session so superseded expensive work
+# (LLM calls, media searches, browser ops) can be abandoned early.
+# NEVER cancels active browser playback or breaks causal media-session ordering.
+import threading as _threading
+import uuid as _uuid
+
+class _StaleWorkTracker:
+    """Per-session request staleness tracking.
+    
+    Each request gets a unique ID. When a newer request arrives for the same
+    session, older requests are marked stale. Expensive operations check
+    is_stale() before proceeding.
+    """
+    def __init__(self):
+        self._lock = _threading.Lock()
+        self._latest: dict[str, str] = {}  # session_id -> latest request_id
+    
+    def new_request(self, session_id: str) -> str:
+        """Register a new request and return its ID."""
+        req_id = _uuid.uuid4().hex[:12]
+        with self._lock:
+            self._latest[session_id] = req_id
+        return req_id
+    
+    def is_stale(self, session_id: str, req_id: str) -> bool:
+        """Check if this request has been superseded by a newer one."""
+        with self._lock:
+            return self._latest.get(session_id) != req_id
+    
+    def get_latest(self, session_id: str) -> Optional[str]:
+        """Get the latest request ID for a session."""
+        with self._lock:
+            return self._latest.get(session_id)
+
+
+_stale_tracker = _StaleWorkTracker()
+
+
+def is_request_stale(session_id: str, req_id: str) -> bool:
+    """Module-level check for staleness."""
+    return _stale_tracker.is_stale(session_id, req_id)
+
+
+def new_session_request(session_id: str) -> str:
+    """Module-level new request registration."""
+    return _stale_tracker.new_request(session_id)
 from mini_kio.core.phrases import (
     GREETINGS as _PHRASE_GREETINGS,
     ACKNOWLEDGEMENTS as _PHRASE_ACKNOWLEDGEMENTS,
@@ -315,6 +364,9 @@ class Pipeline:
     ) -> dict[str, Any]:
         try:
             t0 = time.monotonic()
+            # Stale-work tracking: register this request so newer messages
+            # can abandon superseded expensive work.
+            _req_id = new_session_request(session_id)
             ctx = get_context_manager(session_id)
             raw = text.strip()
             if not raw:
@@ -1098,7 +1150,7 @@ class Pipeline:
                 "memory mechanisms.\n\nBRIEF:\n" + brief[:2400]
             )
             out = ask_llm_sync(question, system_prompt=sys_prompt,
-                               timeout=25.0, max_tokens=260, task="conversation")
+                               timeout=12.0, max_tokens=260, task="conversation")
             if out and out.strip():
                 cleaned = out.strip().strip('"').strip()
                 if 8 <= len(cleaned) <= 900 and "\n- " not in cleaned and ":\n" not in cleaned:
@@ -7219,6 +7271,13 @@ class _ExecutionCoordinator:
     def _exec_media(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.media.media_manager import MediaManager
 
+        # Staleness check: skip expensive media operations if superseded
+        _sid = decision.session_id
+        _latest_req = _stale_tracker.get_latest(_sid)
+        if _latest_req and is_request_stale(_sid, _latest_req):
+            logger.info("[STALE] Skipping media exec for stale request session=%s", _sid)
+            return {"success": True, "message": "Superseded by newer request."}
+
         mm = MediaManager.get_instance()
         action = params["action"]
 
@@ -8126,7 +8185,7 @@ class _ExecutionCoordinator:
         # but an empty reply can still occur on transient provider issues.
         for _attempt in range(2):
             try:
-                _timeout = 45.0 if _attempt == 0 else 60.0
+                _timeout = 15.0 if _attempt == 0 else 20.0  # bounded: gateway total chain = 10s, wrap overhead ~5s
                 _task = "content"
                 reply = ask_llm_sync(
                     prompt,
@@ -8168,7 +8227,7 @@ class _ExecutionCoordinator:
                             "NO words outside the table. "
                             "NO instructions. NO explanation."
                         ),
-                        timeout=30.0,
+                        timeout=12.0,
                         max_tokens=1200,
                         task="content",
                     )
@@ -8521,8 +8580,15 @@ class _ExecutionCoordinator:
                 "\nCOMPANION INTELLIGENCE -- evidence sections above contain longitudinal data about Joel. When the user asks about themselves, compose a natural answer from the evidence above. Do NOT say you lack information when evidence IS present. Synthesize naturally: reference patterns, give examples, note trends."
             )
         _t_converse = time.monotonic()
+        # Staleness check: if a newer request has arrived for this session,
+        # skip the expensive LLM call and return None (caller uses fallback).
+        _sid = decision.session_id
+        _latest_req = _stale_tracker.get_latest(_sid)
+        if _latest_req and is_request_stale(_sid, _latest_req):
+            logger.info("[STALE] Skipping LLM call for stale request session=%s", _sid)
+            return None
         try:
-            reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=800, task="conversation")
+            reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=10.0, max_tokens=800, task="conversation")
         except Exception:
             reply = None
         _dt_llm1 = (time.monotonic() - _t_converse) * 1000
@@ -8534,9 +8600,15 @@ class _ExecutionCoordinator:
         # Never loops — a genuinely dead chain stays dead after one retry.
         if not reply:
             try:
-                time.sleep(0.2)
-                _t_retry = time.monotonic()
-                reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=800, task="conversation")
+                # Staleness check before retry
+                _latest_req2 = _stale_tracker.get_latest(_sid)
+                if _latest_req2 and is_request_stale(_sid, _latest_req2):
+                    logger.info("[STALE] Skipping LLM retry for stale request session=%s", _sid)
+                    reply = None
+                else:
+                    time.sleep(0.2)
+                    _t_retry = time.monotonic()
+                    reply = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=10.0, max_tokens=800, task="conversation")
                 _dt_llm2 = (time.monotonic() - _t_retry) * 1000
             except Exception:
                 reply = None
@@ -8570,7 +8642,7 @@ class _ExecutionCoordinator:
             if (not cleaned.endswith((".", "!", "?"))
                     and (len(cleaned) >= 40 or _ends_mid_clause or _sentence_punct)):
                 try:
-                    retry = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=25.0, max_tokens=800, task="conversation")
+                    retry = ask_llm_sync(_user_msg, system_prompt="\n\n".join(parts), timeout=12.0, max_tokens=800, task="conversation")
                 except Exception:
                     retry = None
                 if retry:

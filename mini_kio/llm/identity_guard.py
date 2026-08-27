@@ -104,12 +104,14 @@ _REWRITE_RULES: list[tuple[re.Pattern, str]] = [
         re.IGNORECASE,
     ),
      "I cannot verify current events without searching. Would you like me to search?"),
-    # ── Anti-hallucination: "I remember" (false memory claims) ──
+    # ── Anti-hallucination: "I remember" (false/long-term memory claims) ──
+    # Truthful replacement: memory is bounded (recent in-session window +
+    # a local record), never permanent or infinite — canon MEM.001/MEM.002.
     (re.compile(
         r"\bI\s+remember\s+(you|your|our|from|that|when|the)\b",
         re.IGNORECASE,
     ),
-     "KIO has session-only memory. I do not retain information between sessions."),
+     "My memory is bounded — a recent in-session window plus a local record between restarts, never permanent or unlimited."),
     # ── Anti-hallucination: "I know your" / "I know what you" (user state claims) ──
     (re.compile(
         r"\bI\s+know\s+(your|what\s+you|how\s+you|where\s+you)\b",

@@ -1,0 +1,77 @@
+{
+  "metadata": {
+    "started_at": "2026-08-22T06:24:07.456319+00:00"
+  },
+  "turns": [
+    {
+      "id": "A1",
+      "category": "identity",
+      "message": "yo KIO, what do you actually know about me?",
+      "reply": "Right now you're: CGPA 8.13; engineering student.",
+      "latency_ms": 25293.8,
+      "status": "PASS"
+    },
+    {
+      "id": "B1",
+      "category": "comm_style",
+      "message": "How do I usually want you to communicate with me?",
+      "reply": "I don’t know your exact preference, but you can tell me the method (email, phone, text, video call, etc.) and how often you’d like updates, and I’ll follow that. Let me know what works best for you.",
+      "latency_ms": 6382.7,
+      "status": "PASS"
+    },
+    {
+      "id": "C1",
+      "category": "frustration",
+      "message": "What tends to piss me off when we're building KIO?",
+      "reply": "Right now you're: CGPA 8.13; engineering student.",
+      "latency_ms": 21562.9,
+      "status": "PASS"
+    },
+    {
+      "id": "D1",
+      "category": "corrections",
+      "message": "What have I repeatedly corrected you about?",
+      "reply": "You've repeatedly corrected me for using a generic “media failed” placeholder, mis‑labeling simple prompts as architecture queries, claiming I’ve fetched links or files I haven’t accessed, giving off‑hand Instagram‑ban advice, offering overly enthusiastic personal advice, and mishandling Python type concatenation and conversation‑summary requests.",
+      "latency_ms": 6378.5,
+      "status": "PASS"
+    },
+    {
+      "id": "E1",
+      "category": "reversal",
+      "message": "What have I changed my mind about over time?",
+      "reply": "You’ve gradually abandoned a few initiatives— the planner idea, the “Grandma’s Influence: Forever Grateful” project, the free IITJEE mentorship effort, and the BIOS‑update‑progress assistance work— and you’ve repeatedly pushed me away from using generic “media failed” placeholders, mis‑labeling simple prompts as architecture queries, pretending to retrieve links or files, offering off‑hand Instagram‑ban advice, giving overly enthusiastic personal advice, and mishandling Python type concatenation and conversation‑summary requests.",
+      "latency_ms": 4427.7,
+      "status": "PASS"
+    },
+    {
+      "id": "F1",
+      "category": "dropped",
+      "message": "What projects or ideas have I dropped, paused, or moved away from?",
+      "reply": "Right now you’re deep in your engineering coursework, keeping a solid 8.13 CGPA. I don’t have a record of any particular projects or ideas you’ve put on hold, so I’m not certain which ones you’ve stepped back from. If you tell me a bit about the things you’ve paused or left behind, I can help you sort through them and decide what to revisit.",
+      "latency_ms": 4279.3,
+      "status": "PASS"
+    },
+    {
+      "id": "G1",
+      "category": "kio_self",
+      "message": "What do you know about yourself and how you've evolved?",
+      "reply": "I’m a desktop companion that blends a language‑model core with deterministic , semantic memory, and tool integrations so I can launch apps, automate browsers and keep track of tasks. Your repeated corrections—dropping generic placeholders, stopping invented links, and cutting out over‑enthusiastic advice—have pushed me toward cleaner, more auditable, and strictly deterministic responses.",
+      "latency_ms": 6426.3,
+      "status": "PASS"
+    },
+    {
+      "id": "H1",
+      "category": "continuity",
+      "message": "What were we just talking about?",
+      "reply": "We were just reviewing what I know about you—your communication preferences, the corrections you’ve given me, the projects you’ve scrapped, and how I’ve evolved as a system.",
+      "latency_ms": 4392.9,
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "errors": 0
+  }
+}

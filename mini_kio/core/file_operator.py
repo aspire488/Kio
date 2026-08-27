@@ -114,7 +114,7 @@ def _open_path(path: str, label: str) -> dict:
             # On Windows, use explorer
             proc = subprocess.Popen(
                 ["explorer", path],
-                creationflags=0x00000008,  # DETACHED_PROCESS
+                creationflags=0x08000000,  # CREATE_NO_WINDOW (prevents visible console)
             )
             pid = proc.pid
             logger.info(f"[FILE] opened: {path} (pid: {pid})")

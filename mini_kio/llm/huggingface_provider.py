@@ -64,6 +64,25 @@ class HuggingFaceProvider(LLMProvider):
             
             if chat_completion and chat_completion.choices and chat_completion.choices[0].message.content:
                 content = chat_completion.choices[0].message.content
+                # A stream cut by max_tokens must NOT be returned as success:
+                # the provider would silently surface a half-sentence
+                # ("I'd highlight its engineering rigor, particularly") as a
+                # complete reply. finish_reason='length' means truncated —
+                # reject it so the gateway chain falls through to the next
+                # provider instead of serving a broken answer.
+                try:
+                    _finish = getattr(chat_completion.choices[0], "finish_reason", None)
+                except Exception:
+                    _finish = None
+                if _finish == "length":
+                    logger.warning("HuggingFace provider generate: truncated by max_tokens (finish_reason=length)")
+                    return LLMResponse(
+                        success=False,
+                        status=LLMStatus.MALFORMED,
+                        content="",
+                        error_code="HUGGINGFACE_TRUNCATED",
+                        provider=self.provider_name,
+                    )
                 logger.debug(f"HuggingFace provider generate: success, content_len={len(content)}")
                 return LLMResponse(
                     success=True,

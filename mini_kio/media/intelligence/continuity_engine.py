@@ -130,9 +130,16 @@ class ContinuityEngine:
             return True
         if _PRONOUN_IN_QUERY.search(q):
             return True
-        # bare artifact keyword with no new subject
+        # bare artifact keyword with no new subject — BUT only when the
+        # query does NOT carry its own explicit entity.  "the trailer" or
+        # "play the highlights" are bare artifacts that should followup.
+        # "a documentary about deep ocean exploration" carries its own
+        # entity ("deep ocean exploration") and must NOT become a followup
+        # of a previous entity ("Elon Musk interview" -> "documentary").
         artifact = parse_artifact_type(q)
         if artifact:
+            if self._has_different_entity(q):
+                return False  # new entity present — not a followup
             classification = classify_topic(q)
             if classification.confidence < 0.4:
                 return True

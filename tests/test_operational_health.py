@@ -134,6 +134,7 @@ def test_knowledge_and_state_queries_stay_put():
     assert _decision("what am i using").intent_type == IntentType.BROWSER_TABS
     # Media state unchanged.
     assert _decision("what's playing").intent_type == IntentType.MEDIA_TRANSPORT
+    assert _decision("What's playing right now?").intent_type == IntentType.MEDIA_TRANSPORT
     # Knowledge/conversation queries never hijacked by the operational family.
     for q in (
         "what is chatgpt",

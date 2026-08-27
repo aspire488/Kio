@@ -124,6 +124,9 @@ class TabRegistry:
     def resolve(self, target: str) -> Optional[OwnedTab]:
         """Flexible lookup: exact URL → domain → text match.
 
+        When multiple tabs match (same app opened several times), the MOST
+        RECENTLY created tab wins — "close it" after "open a new Telegram
+        tab" must close the newest Telegram tab, never an older one.
         Returns the best match or None.
         """
         # Exact URL match
@@ -131,22 +134,14 @@ class TabRegistry:
         if tab:
             return tab
 
-        # Try as domain
+        # Try as domain / text (multiple matches -> newest wins)
         domain_matches = self.find_by_domain(target)
-        if len(domain_matches) == 1:
-            return domain_matches[0]
-
-        # Text match
         text_matches = self.find_by_text(target)
-        if len(text_matches) == 1:
-            return text_matches[0]
-
-        # Multiple matches - return first
-        if domain_matches:
-            return domain_matches[0]
-        if text_matches:
-            return text_matches[0]
-
+        candidates = domain_matches or text_matches
+        if candidates:
+            if len(candidates) == 1:
+                return candidates[0]
+            return max(candidates, key=lambda t: t.created_at)
         return None
 
     def list_all(self) -> list[OwnedTab]:

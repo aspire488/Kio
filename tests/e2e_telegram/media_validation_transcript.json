@@ -1,0 +1,137 @@
+{
+  "metadata": {
+    "started_at": "2026-08-26T15:09:39.797459+00:00",
+    "bot_token_prefix": "89358723",
+    "validation_type": "live_media_discovery"
+  },
+  "turns": [
+    {
+      "test_id": "M1",
+      "category": "cold_start",
+      "user_message": "play something",
+      "bot_reply": "Found this: Play Something.",
+      "latency_ms": 41894.2,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:10:23.458075+00:00"
+    },
+    {
+      "test_id": "M2",
+      "category": "rejection_1",
+      "user_message": "nah",
+      "bot_reply": "How about this one: Brooks & Dunn - Play Something Country (Official Video).",
+      "latency_ms": 10631.7,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:10:36.101148+00:00"
+    },
+    {
+      "test_id": "M3",
+      "category": "rejection_2",
+      "user_message": "nah",
+      "bot_reply": "How about this one: Brooks & Dunn - Play Something Country (Live at Cain's Ballroom).",
+      "latency_ms": 10568.8,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:10:48.683551+00:00"
+    },
+    {
+      "test_id": "M4",
+      "category": "now_playing",
+      "user_message": "what is playing?",
+      "bot_reply": "Playing Brooks & Dunn - Play Something Country (Live at Cain's Ballroom).",
+      "latency_ms": 2229.3,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:10:52.924142+00:00"
+    },
+    {
+      "test_id": "M5",
+      "category": "transport_pause",
+      "user_message": "pause",
+      "bot_reply": "Paused.",
+      "latency_ms": 2203.3,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:10:57.140433+00:00"
+    },
+    {
+      "test_id": "M6",
+      "category": "transport_resume",
+      "user_message": "resume",
+      "bot_reply": "Resumed.",
+      "latency_ms": 2168.6,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:11:01.320698+00:00"
+    },
+    {
+      "test_id": "M7",
+      "category": "transport_stop",
+      "user_message": "stop",
+      "bot_reply": "Stopped.",
+      "latency_ms": 2233.1,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:11:05.567161+00:00"
+    },
+    {
+      "test_id": "M8",
+      "category": "contextual_discovery",
+      "user_message": "play something funny",
+      "bot_reply": "Found this: BEST FAILS OF THE WEEK 😂 TRY NOT TO LAUGH Funny Videos.",
+      "latency_ms": 48228.9,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:11:55.805576+00:00"
+    },
+    {
+      "test_id": "M9",
+      "category": "continuation",
+      "user_message": "another one",
+      "bot_reply": "Let's try TRY NOT TO LAUGH 🤣 Best Funny Videos Compilation 😂😁😆 Memes PART 13 instead.",
+      "latency_ms": 35633.7,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:12:33.454151+00:00"
+    },
+    {
+      "test_id": "M10",
+      "category": "regression_social",
+      "user_message": "Happy Onam",
+      "bot_reply": "Happy Onam to you as well—those intricate pookalam designs and the communal feast really capture the joy of harvest and togetherness.",
+      "latency_ms": 6481.7,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:12:41.943726+00:00"
+    },
+    {
+      "test_id": "M11",
+      "category": "regression_boredom",
+      "user_message": "I am bored",
+      "bot_reply": "I can spin up a quick coding puzzle or cue some background music—what sounds better?",
+      "latency_ms": 6443.4,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:12:50.394122+00:00"
+    },
+    {
+      "test_id": "M12",
+      "category": "regression_knowledge",
+      "user_message": "why is the sky blue?",
+      "bot_reply": "Sunlight hits air molecules, and they scatter shorter (blue) wavelengths more than longer ones, so the sky appears blue.",
+      "latency_ms": 4317.5,
+      "status": "PASS",
+      "forbidden_violations": [],
+      "sent_at": "2026-08-26T15:12:56.714800+00:00"
+    }
+  ],
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "failed": 0,
+    "forbidden_violations": 0,
+    "completed_at": "2026-08-26T15:12:58.748164+00:00"
+  },
+  "forbidden_violations": []
+}

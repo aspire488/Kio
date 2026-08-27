@@ -19,9 +19,15 @@ class TerminalMCPServer(BaseMCPServer):
         self.register_tool("run_piped", self._run_piped, {"commands": {"type": "array"}})
         self.register_tool("which", self._which, {"executable": {"type": "string"}})
 
+    # CREATE_NO_WINDOW prevents a visible console window on Windows.
+    _WIN_FLAGS = 0x08000000 if sys.platform == "win32" else 0
+
     def _run(self, command: str) -> dict:
         try:
-            result = sp.run(command, capture_output=True, text=True, shell=True, timeout=30)
+            _kw: dict = dict(capture_output=True, text=True, shell=True, timeout=30)
+            if self._WIN_FLAGS:
+                _kw["creationflags"] = self._WIN_FLAGS
+            result = sp.run(command, **_kw)
             return {"success": result.returncode == 0, "stdout": result.stdout, "stderr": result.stderr,
                     "exit_code": result.returncode, "command": command}
         except sp.TimeoutExpired:
@@ -37,7 +43,10 @@ class TerminalMCPServer(BaseMCPServer):
         try:
             for i, cmd in enumerate(cmds):
                 stdin = pipes[-1].stdout if pipes else None
-                p = sp.Popen(cmd, stdin=stdin, stdout=sp.PIPE, stderr=sp.PIPE, shell=True, text=True)
+                _popen_kw: dict = dict(stdin=stdin, stdout=sp.PIPE, stderr=sp.PIPE, shell=True, text=True)
+                if self._WIN_FLAGS:
+                    _popen_kw["creationflags"] = self._WIN_FLAGS
+                p = sp.Popen(cmd, **_popen_kw)
                 pipes.append(p)
                 if stdin:
                     stdin.close()

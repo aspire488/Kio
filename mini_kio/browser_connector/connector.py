@@ -297,18 +297,24 @@ class Connector:
 
     # ── Public Async API ─────────────────────────────────────────────
 
-    async def open_tab(self, url: str) -> TabResult:
+    async def open_tab(self, url: str, *, force_new: bool = False) -> TabResult:
         """Open a URL in a new tab. Returns owned tab info.
 
         Deduplication (P5):
         Before creating a new tab, check for an existing tab with the
         same domain.  If found, focus that tab instead of creating a
         duplicate.
+
+        force_new=True is the explicit additional-instance path
+        ("open a new X tab" / "open another X tab" / "open X in a new tab"):
+        a request for a NEW instance must ALWAYS create a genuinely new tab.
+        Deduplication is skipped — reusing/navigating an existing same-domain
+        tab would silently turn a "new tab" request into a refresh of the
+        existing tab (the Telegram/Gemini/ChatGPT new-tab bug).
         """
-        # P5: Check for existing tab by domain
         parsed = urlparse(url)
         domain = parsed.hostname
-        if domain:
+        if domain and not force_new:
             existing_matches = self._registry.find_by_domain(domain)
             if existing_matches:
                 existing = existing_matches[0]
@@ -325,7 +331,9 @@ class Connector:
                 return await self._dispatch(msg)
 
         # P5 fallback: check ALL Chrome tabs (not just owned) for domain match
-        if domain:
+        # (skipped for force_new — an explicit additional-instance request must
+        #  never adopt-and-reuse an existing tab).
+        if domain and not force_new:
             try:
                 all_tabs_res = await self.list_tabs()
                 if all_tabs_res.success and all_tabs_res.tabs:
@@ -384,15 +392,20 @@ class Connector:
         tab = self._tab_from_target(target)
         if tab:
             return tab
-        # Fallback: search ALL tabs (not just owned) via list_tabs
+        # Fallback: search ALL tabs (not just owned) via list_tabs. When several
+        # tabs match ("open a new Telegram tab" twice), the MOST RECENTLY
+        # created one wins so "close it" closes the exact newest instance.
         try:
             res = await self.list_tabs()
             if res.success and res.tabs:
                 target_norm = target.lower().replace(" ", "")
-                for t in res.tabs:
+                matches = [
+                    t for t in res.tabs
                     if t.url and (target_norm in t.url.lower().replace(" ", "") or
-                                  target_norm in t.title.lower().replace(" ", "")):
-                        return t
+                                  target_norm in t.title.lower().replace(" ", ""))
+                ]
+                if matches:
+                    return max(matches, key=lambda t: getattr(t, "created_at", 0) or 0)
         except Exception:
             pass
         return None

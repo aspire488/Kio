@@ -264,8 +264,11 @@ class SessionState:
         self.memory.append(role, content)
 
     def append_exchange(self, user_text: str, reply: str):
-        """Update conversational context window."""
+        """Update conversational context window and persist user message to DB."""
         self.context.append_exchange(user_text, reply)
+        # Persist user message so history survives restarts (assistant is
+        # persisted separately by conversation_responder / kio_orchestrator)
+        self.append_message("user", user_text)
 
     def get_history_window(self, n: int = 10) -> List[tuple[str, str]]:
         """Get the recent conversation window."""

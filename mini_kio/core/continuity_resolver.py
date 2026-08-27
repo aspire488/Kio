@@ -99,10 +99,28 @@ class ContinuityState:
 
 
 class ContinuityResolver:
-    _state: ContinuityState = ContinuityState()
+    _states: dict[str, ContinuityState] = {}  # per-session state (keyed by session_id)
+    _current_session_id: str = ""  # active session for resolve() calls
     _provider: ContinuityContextProvider = ContinuityContextProvider()
     _entity_memory: Optional["MediaEntityMemory"] = None
-    _session_state: Optional["SessionState"] = None
+    # Per-session SessionState isolation (thread-safe): each session stores
+    # its own SessionState keyed by session_id, preventing cross-session
+    # corruption when two Telegram sessions run concurrently.
+    _session_states: dict[str, "SessionState"] = {}
+
+    @classmethod
+    def _get_state(cls) -> ContinuityState:
+        """Get ContinuityState for the current session (per-session isolation)."""
+        sid = cls._current_session_id or "_default"
+        if sid not in cls._states:
+            cls._states[sid] = ContinuityState()
+        return cls._states[sid]
+
+    @classmethod
+    def _get_session_state(cls) -> Optional["SessionState"]:
+        """Get SessionState for the current session (per-session isolation)."""
+        sid = cls._current_session_id or "_default"
+        return cls._session_states.get(sid)
 
     @classmethod
     def set_entity_memory(cls, mem: "MediaEntityMemory") -> None:
@@ -111,18 +129,23 @@ class ContinuityResolver:
     @classmethod
     def set_session_state(cls, state: "SessionState") -> None:
         """Wire unified SessionState as authoritative source for entity/domain.
-        
+
         Once set, resolve() reads active_entity/active_domain from SessionState
         and update_state() writes back to it, keeping ContinuityState in sync.
+        Per-session isolation: each session stores its own SessionState.
         """
-        cls._session_state = state
-        # Bootstrap ContinuityState from session state (if any)
+        # Set per-session isolation
+        sid = getattr(state, 'session_id', None) or "_default"
+        cls._current_session_id = sid
+        cls._session_states[sid] = state
+        # Bootstrap per-session ContinuityState from session state (if any)
+        s = cls._get_state()
         if state.active_entity:
-            cls._state.active_subject = state.active_entity
-            cls._state.subjects["media"] = state.active_entity
+            s.active_subject = state.active_entity
+            s.subjects["media"] = state.active_entity
         if state.active_domain:
             try:
-                cls._state.active_domain = DomainContinuationType(state.active_domain.lower())
+                s.active_domain = DomainContinuationType(state.active_domain.lower())
             except (ValueError, TypeError):
                 pass
 
@@ -245,12 +268,12 @@ class ContinuityResolver:
             # _target_domain: keyword-detected domain takes priority over active state domain
             _target_domain = ctx.domain if ctx.reference_type == "explicit" else cls._get_best_domain()
             # _subject_domain: which domain's subject to use for pronoun resolution
-            _subject_domain = ctx.domain if ctx.reference_type == "explicit" else cls._state.active_domain
+            _subject_domain = ctx.domain if ctx.reference_type == "explicit" else cls._get_state().active_domain
             if _target_domain and _target_domain != DomainContinuationType.UNKNOWN:
                 # Original logic: try keyword domain's subject FIRST, then active state's subject
                 domain_subject = ""
                 if _subject_domain:
-                    domain_subject = cls._state.subjects.get(_subject_domain.value, "")
+                    domain_subject = cls._get_state().subjects.get(_subject_domain.value, "")
                 if not domain_subject:
                     domain_subject = cls._get_best_subject()
                 if domain_subject:
@@ -299,15 +322,17 @@ class ContinuityResolver:
     @classmethod
     def _session_state_subject(cls) -> str:
         """Get active entity from SessionState (unified state)."""
-        if cls._session_state and cls._session_state.active_entity:
-            return cls._session_state.active_entity
+        _ss = cls._get_session_state()
+        if _ss and _ss.active_entity:
+            return _ss.active_entity
         return ""
 
     @classmethod
     def _session_state_domain_val(cls) -> str:
         """Get active domain from SessionState (unified state)."""
-        if cls._session_state and cls._session_state.active_domain:
-            return cls._session_state.active_domain
+        _ss = cls._get_session_state()
+        if _ss and _ss.active_domain:
+            return _ss.active_domain
         return ""
 
     @classmethod
@@ -316,8 +341,8 @@ class ContinuityResolver:
         subj = cls._session_state_subject()
         if subj:
             return subj
-        if cls._state.active_subject:
-            return cls._state.active_subject
+        if cls._get_state().active_subject:
+            return cls._get_state().active_subject
         if cls._entity_memory:
             mem_entity = cls._entity_memory.get_last_entity()
             if mem_entity and mem_entity.name:
@@ -338,7 +363,7 @@ class ContinuityResolver:
                 return DomainContinuationType(dom_val.lower())
             except (ValueError, TypeError):
                 pass
-        return cls._state.active_domain
+        return cls._get_state().active_domain
 
     @classmethod
     def _resolve_runtime_reference(cls, lower: str, ctx: ContinuationContext) -> Optional[str]:
@@ -364,7 +389,7 @@ class ContinuityResolver:
         ctx.continuity_active = True
         ctx.reference_type = "runtime_ref"
         ctx.runtime_source = "runtime_context"
-        ctx.domain = cls._state.active_domain or DomainContinuationType.UNKNOWN
+        ctx.domain = cls._get_state().active_domain or DomainContinuationType.UNKNOWN
         ctx.active_subject = target
         logger.info("[CONTINUITY_RUNTIME] runtime_ref original=%r resolved=%r domain=%s",
                     lower, resolved, ctx.domain.value)
@@ -447,13 +472,13 @@ class ContinuityResolver:
         clean = lower.rstrip(".")
         for marker in cls._CONTINUATION_MARKERS:
             if clean == marker or clean.startswith(marker + " "):
-                if cls._state.active_domain:
-                    ctx.domain = cls._state.active_domain
+                if cls._get_state().active_domain:
+                    ctx.domain = cls._get_state().active_domain
                     ctx.continuity_active = True
                     ctx.reference_type = "continuation"
-                    ctx.active_subject = cls._state.subjects.get(cls._state.active_domain.value, "")
+                    ctx.active_subject = cls._get_state().subjects.get(cls._get_state().active_domain.value, "")
                     logger.info("[CONTINUITY_RESOLVE] continuation -> domain=%s",
-                                cls._state.active_domain.value)
+                                cls._get_state().active_domain.value)
                     return True
                 return False
         return False
@@ -462,12 +487,12 @@ class ContinuityResolver:
     def _resolve_affirmative_markers(cls, lower: str, ctx: ContinuationContext) -> bool:
         clean = lower.rstrip(".")
         if clean in cls._AFFIRMATIVE_MARKERS:
-            if cls._state.active_domain:
-                ctx.domain = cls._state.active_domain
+            if cls._get_state().active_domain:
+                ctx.domain = cls._get_state().active_domain
                 ctx.continuity_active = True
                 ctx.reference_type = "affirmative"
                 logger.info("[CONTINUITY_RESOLVE] affirmative -> domain=%s",
-                            cls._state.active_domain.value)
+                            cls._get_state().active_domain.value)
                 return True
             return False
         return False
@@ -512,7 +537,7 @@ class ContinuityResolver:
         if not ctx.continuity_active:
             return text
         result = text
-        subject = cls._state.subjects.get(cls._state.active_domain.value, "") if cls._state.active_domain else cls._state.active_subject
+        subject = cls._get_state().subjects.get(cls._get_state().active_domain.value, "") if cls._get_state().active_domain else cls._get_state().active_subject
         if subject:
             # Only replace impersonal pronouns (it/that/this) — personal pronouns
             # (him/he/she/they) are resolved by MediaIntelligenceAdapter which
@@ -542,10 +567,10 @@ class ContinuityResolver:
 
     @classmethod
     def update_state(cls, result: dict, command: str, domain: DomainContinuationType) -> None:
-        cls._state.active_domain = domain
-        cls._state.last_command = command
-        cls._state.last_success = result.get("success", False)
-        cls._state.timestamp = time.time()
+        cls._get_state().active_domain = domain
+        cls._get_state().last_command = command
+        cls._get_state().last_success = result.get("success", False)
+        cls._get_state().timestamp = time.time()
         subject = result.get("target") or result.get("subject") or ""
         if not subject and result.get("success"):
             lower = command.lower().strip()
@@ -559,52 +584,56 @@ class ContinuityResolver:
             clean = cls._clean_subject(subject)
             if clean:
                 subject = clean
-            cls._state.active_subject = subject
-            cls._state.subjects[domain.value] = subject
+            cls._get_state().active_subject = subject
+            cls._get_state().subjects[domain.value] = subject
         action = result.get("action") or ""
         if action:
-            cls._state.active_action = action
+            cls._get_state().active_action = action
         if result.get("success"):
-            cls._state.last_resolved = command
+            cls._get_state().last_resolved = command
         # Sync to SessionState (unified state) when available
-        if cls._session_state:
+        _ss = cls._get_session_state()
+        if _ss:
             if subject:
-                cls._session_state.set_entity_and_domain(subject, domain.value)
+                _ss.set_entity_and_domain(subject, domain.value)
             if action:
-                cls._session_state.last_action = action
-                cls._session_state.last_action_target = subject or command
+                _ss.last_action = action
+                _ss.last_action_target = subject or command
         logger.info("[CONTINUITY_CONTEXT] domain=%s command=%r subject=%r success=%s",
-                    domain.value, command, cls._state.active_subject,
+                    domain.value, command, cls._get_state().active_subject,
                     result.get("success", False))
 
     @classmethod
     def reset(cls) -> None:
-        cls._state = ContinuityState()
+        sid = cls._current_session_id or "_default"
+        cls._states.pop(sid, None)
         cls._provider = ContinuityContextProvider()
-        logger.info("[CONTINUITY_CONTEXT] reset")
+        logger.info("[CONTINUITY_CONTEXT] reset session=%s", sid)
 
     @classmethod
     def get_state(cls) -> ContinuityState:
-        return cls._state
+        return cls._get_state()
 
     @classmethod
     def set_state_subject(cls, subject: str, domain: Optional[DomainContinuationType] = None) -> None:
-        cls._state.active_subject = subject
+        cls._get_state().active_subject = subject
         if domain:
-            cls._state.subjects[domain.value] = subject
-        elif cls._state.active_domain:
-            cls._state.subjects[cls._state.active_domain.value] = subject
+            cls._get_state().subjects[domain.value] = subject
+        elif cls._get_state().active_domain:
+            cls._get_state().subjects[cls._get_state().active_domain.value] = subject
         # Sync to SessionState
-        if cls._session_state:
-            dom_val = domain.value if domain else (cls._state.active_domain.value if cls._state.active_domain else "")
+        _ss = cls._get_session_state()
+        if _ss:
+            dom_val = domain.value if domain else (cls._get_state().active_domain.value if cls._get_state().active_domain else "")
             if dom_val:
-                cls._session_state.set_entity_and_domain(subject, dom_val)
+                _ss.set_entity_and_domain(subject, dom_val)
             else:
-                cls._session_state.active_entity = subject
+                _ss.active_entity = subject
 
     @classmethod
     def set_state_domain(cls, domain: DomainContinuationType) -> None:
-        cls._state.active_domain = domain
+        cls._get_state().active_domain = domain
         # Sync to SessionState
-        if cls._session_state:
-            cls._session_state.active_domain = domain.value
+        _ss = cls._get_session_state()
+        if _ss:
+            _ss.active_domain = domain.value
