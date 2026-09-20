@@ -1,64 +1,122 @@
 id: artifacts.meeting_to_report
 name: Meeting Transcript → Polished Report
-description: >
-  Takes a meeting transcript or notes, extracts decisions, action items (owner +
-  due date) and open questions, and renders a polished DOCX + a short Markdown
-  summary suitable for chat. Verifies action items were captured.
+description: 'Takes a meeting transcript or notes, extracts decisions, action items (owner + due date) and open questions,
+  and renders a polished DOCX + a short Markdown summary suitable for chat. Verifies action items were captured.
+
+  '
 category: artifacts
 version: 1.0.0
-tags: [meeting, minutes, docx, action-items]
+tags:
+- meeting
+- minutes
+- docx
+- action-items
 trigger:
   type: natural_language
   nl_examples:
-    - "turn this transcript into a report"
-    - "write up the meeting notes"
+  - turn this transcript into a report
+  - write up the meeting notes
 inputs:
-  - { name: transcript, type: string, required: true, description: "Raw transcript or notes" }
-  - { name: meeting_title, type: string, required: false, default: "Meeting", description: "Title" }
+- name: transcript
+  type: string
+  required: true
+  description: Raw transcript or notes
+- name: meeting_title
+  type: string
+  required: false
+  default: Meeting
+  description: Title
 config:
-  - { name: output_dir, type: file_path, default: "~/KIO/meetings", required: false, description: "Save location" }
-capabilities_required: [ai_reasoning, artifact, filesystem]
-providers_required: [llm, python_docx]
+- name: output_dir
+  type: file_path
+  default: ~/KIO/meetings
+  required: false
+  description: Save location
+capabilities_required:
+- ai_reasoning
+- artifact
+- filesystem
+providers_required:
+- llm
+- python_docx
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Model for extraction + writing" }
+- name: llm_provider
+  type: llm
+  description: Model for extraction + writing
 steps:
-  - id: extract
-    capability: ai_reasoning
-    action: extract_meeting_structure
-    description: "Decisions, action_items[{task,owner,due}], open_questions, summary."
-    inputs: { transcript: "{{ inputs.transcript }}" }
-    outputs: [decisions, action_items, questions, summary]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: render_docx
-    capability: artifact
-    action: render_docx
-    description: "Structured minutes: summary, decisions, action-item table, open questions."
-    inputs: { title: "{{ inputs.meeting_title }}", decisions: "{{ steps.extract.decisions }}", actions: "{{ steps.extract.action_items }}", questions: "{{ steps.extract.questions }}", out_dir: "{{ config.output_dir }}" }
-    outputs: [file_path]
-    depends_on: [extract]
-  - id: verify
-    capability: artifact
-    action: verify_docx
-    inputs: { file_path: "{{ steps.render_docx.file_path }}", require: "action-item table non-empty" }
-    outputs: [verified]
-    depends_on: [render_docx]
+- id: extract
+  capability: ai_reasoning
+  action: extract_meeting_structure
+  description: Decisions, action_items[{task,owner,due}], open_questions, summary.
+  inputs:
+    transcript: '{{ inputs.transcript }}'
+  outputs:
+  - decisions
+  - action_items
+  - questions
+  - summary
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: render_docx
+  capability: artifact
+  action: generate_docx
+  description: 'Structured minutes: summary, decisions, action-item table, open questions.'
+  inputs:
+    title: '{{ inputs.meeting_title }}'
+    decisions: '{{ steps.extract.decisions }}'
+    actions: '{{ steps.extract.action_items }}'
+    questions: '{{ steps.extract.questions }}'
+    out_dir: '{{ config.output_dir }}'
+  outputs:
+  - file_path
+  depends_on:
+  - extract
+- id: verify
+  capability: artifact
+  action: verify_docx
+  inputs:
+    file_path: '{{ steps.render_docx.file_path }}'
+    require: action-item table non-empty
+  outputs:
+  - verified
+  depends_on:
+  - render_docx
 outputs:
-  - { name: minutes, from: "{{ steps.render_docx.file_path }}", description: "DOCX minutes" }
-  - { name: chat_summary, from: "{{ steps.extract.summary }}", description: "Short summary for chat" }
+- name: minutes
+  from: '{{ steps.render_docx.file_path }}'
+  description: DOCX minutes
+- name: chat_summary
+  from: '{{ steps.extract.summary }}'
+  description: Short summary for chat
 verification:
-  - type: artifact
-    check: docx_valid
-    asserts: ["action-item table present", "each action has owner or is flagged", "decisions section present"]
-    on_fail: flag
+- type: artifact
+  check: docx_valid
+  asserts:
+  - action-item table present
+  - each action has owner or is flagged
+  - decisions section present
+  on_fail: flag
 failure_recovery:
-  default_retry: { max: 1, backoff: fixed }
+  default_retry:
+    max: 1
+    backoff: fixed
   on_failure: notify_user
 security_classification: low
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 40, est_peak_ram_mb: 200, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 40
+  est_peak_ram_mb: 200
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Transcript to minutes"
+  pattern_family: Transcript to minutes
   derived_from:
-    - { source: "n8n meeting-notes / transcription templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n meeting-notes / transcription templates
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Adds structured action-item extraction with owner/due and verification that items were captured."
+  portability_notes: Adds structured action-item extraction with owner/due and verification that items were captured.

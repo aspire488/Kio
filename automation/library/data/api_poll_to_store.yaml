@@ -1,62 +1,123 @@
 id: data.api_poll_to_store
 name: Scheduled API Poll → Store
-description: >
-  On a schedule, calls a REST API (with pagination and auth), normalizes the
-  response, dedupes against previously-seen records, and appends new rows to a
-  store. Handles rate limits and partial failures.
+description: 'On a schedule, calls a REST API (with pagination and auth), normalizes the response, dedupes against previously-seen
+  records, and appends new rows to a store. Handles rate limits and partial failures.
+
+  '
 category: data
 version: 1.0.0
-tags: [api, polling, etl, schedule]
+tags:
+- api
+- polling
+- etl
+- schedule
 trigger:
   type: schedule
-  cron: "0 * * * *"
+  cron: 0 * * * *
 config:
-  - { name: endpoint, type: url, required: true, description: "API endpoint" }
-  - { name: store, type: enum, enum_values: [google_sheets, airtable, database], default: google_sheets, required: true, description: "Destination" }
-  - { name: page_param, type: string, default: "page", required: false, description: "Pagination query param" }
-capabilities_required: [http, memory, filesystem]
+- name: endpoint
+  type: url
+  required: true
+  description: API endpoint
+- name: store
+  type: enum
+  enum_values:
+  - google_sheets
+  - airtable
+  - database
+  default: google_sheets
+  required: true
+  description: Destination
+- name: page_param
+  type: string
+  default: page
+  required: false
+  description: Pagination query param
+capabilities_required:
+- filesystem
+- knowledge
+- memory
 providers_required: []
 credentials_required:
-  - { name: api_cred, type: api_key, description: "API auth" }
-  - { name: store_cred, type: oauth2, scopes: ["write"], description: "Store auth" }
+- name: api_cred
+  type: api_key
+  description: API auth
+- name: store_cred
+  type: oauth2
+  scopes:
+  - write
+  description: Store auth
 steps:
-  - id: fetch
-    capability: http
-    action: paginated_get
-    inputs: { url: "{{ config.endpoint }}", page_param: "{{ config.page_param }}", auth: "{{ credentials.api_cred }}" }
-    outputs: [items]
-    on_error: { retry: { max: 3, backoff: exponential }, timeout_seconds: 60, fallback: notify }
-  - id: dedupe
-    capability: memory
-    action: filter_new
-    inputs: { key: "{{ config.endpoint }}", items: "{{ steps.fetch.items }}" }
-    outputs: [new_items]
-    depends_on: [fetch]
-  - id: store
-    capability: filesystem
-    action: append_records
-    when: "{{ steps.dedupe.new_items }}"
-    inputs: { store: "{{ config.store }}", records: "{{ steps.dedupe.new_items }}" }
-    outputs: [written_count]
-    depends_on: [dedupe]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+- id: fetch
+  capability: knowledge
+  action: paginated_get
+  inputs:
+    url: '{{ config.endpoint }}'
+    page_param: '{{ config.page_param }}'
+    auth: '{{ credentials.api_cred }}'
+  outputs:
+  - items
+  on_error:
+    retry:
+      max: 3
+      backoff: exponential
+    timeout_seconds: 60
+    fallback: notify
+- id: dedupe
+  capability: memory
+  action: filter_new
+  inputs:
+    key: '{{ config.endpoint }}'
+    items: '{{ steps.fetch.items }}'
+  outputs:
+  - new_items
+  depends_on:
+  - fetch
+- id: store
+  capability: filesystem
+  action: append_records
+  when: '{{ steps.dedupe.new_items }}'
+  inputs:
+    store: '{{ config.store }}'
+    records: '{{ steps.dedupe.new_items }}'
+  outputs:
+  - written_count
+  depends_on:
+  - dedupe
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
 outputs:
-  - { name: written_count, from: "{{ steps.store.written_count }}" }
+- name: written_count
+  from: '{{ steps.store.written_count }}'
 verification:
-  - type: data_shape
-    check: records_appended
-    asserts: ["only new records written (dedupe cursor advanced)", "written_count matches new_items length"]
-    on_fail: notify
+- type: data_shape
+  check: records_appended
+  asserts:
+  - only new records written (dedupe cursor advanced)
+  - written_count matches new_items length
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 2, backoff: exponential }
+  default_retry:
+    max: 2
+    backoff: exponential
   on_failure: notify_user
-  idempotency_key: "poll-{{ config.endpoint }}-{{ trigger.run_id }}"
+  idempotency_key: poll-{{ config.endpoint }}-{{ trigger.run_id }}
 security_classification: low
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 40, est_peak_ram_mb: 150, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 40
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Scheduled API ingest -> store"
+  pattern_family: Scheduled API ingest -> store
   derived_from:
-    - { source: "Zie619/n8n-workflows: schedule|http + schedule|filesystem+http families (~120 workflows)", url: "https://github.com/Zie619/n8n-workflows", license: "MIT (aggregation)", reuse: pattern_only }
+  - source: 'Zie619/n8n-workflows: schedule|http + schedule|filesystem+http families (~120 workflows)'
+    url: https://github.com/Zie619/n8n-workflows
+    license: MIT (aggregation)
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Adds cursor-based dedupe and pagination; avoids re-writing the same rows every poll."
+  portability_notes: Adds cursor-based dedupe and pagination; avoids re-writing the same rows every poll.

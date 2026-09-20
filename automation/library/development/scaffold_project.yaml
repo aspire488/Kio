@@ -1,72 +1,140 @@
 id: development.scaffold_project
 name: Scaffold Code Project → Open in VS Code
-description: >
-  Creates a real project skeleton for a chosen language (src/, tests/, dependency
-  manifest, README, .gitignore, license), initializes git, and opens it in VS Code.
-  This is the PROJECT path — distinct from answering a code question in chat.
+description: 'Creates a real project skeleton for a chosen language (src/, tests/, dependency manifest, README, .gitignore,
+  license), initializes git, and opens it in VS Code. This is the PROJECT path — distinct from answering a code question in
+  chat.
+
+  '
 category: development
 version: 1.0.0
-tags: [vscode, scaffold, project, code_project]
+tags:
+- vscode
+- scaffold
+- project
+- code_project
 trigger:
   type: natural_language
   nl_examples:
-    - "create a python project for {purpose}"
-    - "scaffold a {language} project called {name}"
+  - create a python project for {purpose}
+  - scaffold a {language} project called {name}
 inputs:
-  - { name: name, type: string, required: true, description: "Project name" }
-  - { name: language, type: enum, enum_values: [python, node, rust, go, dotnet], required: true, description: "Language/stack" }
-  - { name: purpose, type: string, required: false, description: "What it's for (seeds README)" }
+- name: name
+  type: string
+  required: true
+  description: Project name
+- name: language
+  type: enum
+  enum_values:
+  - python
+  - node
+  - rust
+  - go
+  - dotnet
+  required: true
+  description: Language/stack
+- name: purpose
+  type: string
+  required: false
+  description: What it's for (seeds README)
 config:
-  - { name: base_dir, type: file_path, default: "~/Projects", required: false, description: "Where projects live" }
-  - { name: open_vscode, type: boolean, default: true, required: false, description: "Open in VS Code after" }
-capabilities_required: [code_project, filesystem]
-providers_required: [vscode_cli]
+- name: base_dir
+  type: file_path
+  default: ~/Projects
+  required: false
+  description: Where projects live
+- name: open_vscode
+  type: boolean
+  default: true
+  required: false
+  description: Open in VS Code after
+capabilities_required:
+- code_project
+- filesystem
+- terminal
+providers_required:
+- vscode_cli
 credentials_required:
-  - { name: none, type: none }
+- name: none
+  type: none
 steps:
-  - id: scaffold
-    capability: code_project
-    action: scaffold
-    description: "Use the language's native tool (cargo new / dotnet new / npm init / venv) via the LanguageSpec registry; never hand-fake structure."
-    inputs: { name: "{{ inputs.name }}", language: "{{ inputs.language }}", purpose: "{{ inputs.purpose }}", base_dir: "{{ config.base_dir }}" }
-    outputs: [project_path, files_created]
-    on_error: { retry: { max: 1 }, fallback: abort }
-  - id: git_init
-    capability: code_project
-    action: git_init
-    inputs: { project_path: "{{ steps.scaffold.project_path }}" }
-    outputs: [initialized]
-    depends_on: [scaffold]
-  - id: open
-    capability: code_project
-    action: open_vscode
-    when: "{{ config.open_vscode }} == true"
-    inputs: { project_path: "{{ steps.scaffold.project_path }}" }
-    outputs: [opened]
-    depends_on: [git_init]
-  - id: verify
-    capability: filesystem
-    action: verify_project
-    inputs: { project_path: "{{ steps.scaffold.project_path }}", language: "{{ inputs.language }}" }
-    outputs: [verified]
-    depends_on: [scaffold]
+- id: scaffold
+  capability: code_project
+  action: scaffold
+  description: Use the language's native tool (cargo new / dotnet new / npm init / venv) via the LanguageSpec registry; never
+    hand-fake structure.
+  inputs:
+    name: '{{ inputs.name }}'
+    language: '{{ inputs.language }}'
+    purpose: '{{ inputs.purpose }}'
+    base_dir: '{{ config.base_dir }}'
+  outputs:
+  - project_path
+  - files_created
+  on_error:
+    retry:
+      max: 1
+    fallback: abort
+- id: git_init
+  capability: terminal
+  action: git_init
+  inputs:
+    project_path: '{{ steps.scaffold.project_path }}'
+  outputs:
+  - initialized
+  depends_on:
+  - scaffold
+- id: open
+  capability: terminal
+  action: open_vscode
+  when: '{{ config.open_vscode }} == true'
+  inputs:
+    project_path: '{{ steps.scaffold.project_path }}'
+  outputs:
+  - opened
+  depends_on:
+  - git_init
+- id: verify
+  capability: filesystem
+  action: verify_project
+  inputs:
+    project_path: '{{ steps.scaffold.project_path }}'
+    language: '{{ inputs.language }}'
+  outputs:
+  - verified
+  depends_on:
+  - scaffold
 outputs:
-  - { name: project_path, from: "{{ steps.scaffold.project_path }}" }
+- name: project_path
+  from: '{{ steps.scaffold.project_path }}'
 verification:
-  - type: filesystem
-    check: project_scaffolded
-    asserts: ["src/ and tests/ exist", "dependency manifest present", "README + .gitignore present", "git repo initialized", "VS Code actually opened (not assumed)"]
-    on_fail: notify
+- type: filesystem
+  check: project_scaffolded
+  asserts:
+  - src/ and tests/ exist
+  - dependency manifest present
+  - README + .gitignore present
+  - git repo initialized
+  - VS Code actually opened (not assumed)
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: fixed }
+  default_retry:
+    max: 1
+    backoff: fixed
   on_failure: notify_user
-  idempotency_key: "scaffold-{{ inputs.name }}-{{ inputs.language }}"
+  idempotency_key: scaffold-{{ inputs.name }}-{{ inputs.language }}
 security_classification: consequential
 user_confirmation_required: true
-resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: true }
+resource_expectations:
+  est_runtime_seconds: 20
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: true
 provenance:
-  pattern_family: "Project scaffold + IDE open"
+  pattern_family: Project scaffold + IDE open
   derived_from:
-    - { source: "KIO coding-architecture design (this project) — code.file intent, LanguageSpec registry", license: "MIT", reuse: adapted }
+  - source: KIO coding-architecture design (this project) — code.file intent, LanguageSpec registry
+    license: MIT
+    reuse: adapted
   license: MIT
-  portability_notes: "KIO-native; implements the code.file path (project) vs code.answer (chat). Verifies VS Code actually opened."
+  portability_notes: KIO-native; implements the code.file path (project) vs code.answer (chat). Verifies VS Code actually
+    opened.

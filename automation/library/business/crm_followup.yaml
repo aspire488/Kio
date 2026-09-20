@@ -1,72 +1,140 @@
 id: business.crm_followup
 name: Stale Lead Follow-up
-description: >
-  On a schedule, finds CRM leads with no activity past a threshold, drafts a
-  personalized follow-up per lead, and queues them for approval/send. Records
-  follow-up state so the same lead isn't nagged repeatedly.
+description: 'On a schedule, finds CRM leads with no activity past a threshold, drafts a personalized follow-up per lead,
+  and queues them for approval/send. Records follow-up state so the same lead isn''t nagged repeatedly.
+
+  '
 category: business
 version: 1.0.0
-tags: [crm, sales, followup, schedule]
+tags:
+- crm
+- sales
+- followup
+- schedule
 trigger:
   type: schedule
-  cron: "0 9 * * 2"
+  cron: 0 9 * * 2
 config:
-  - { name: crm, type: enum, enum_values: [hubspot, salesforce, airtable], default: airtable, required: true, description: "CRM" }
-  - { name: stale_days, type: number, default: 14, required: false, description: "No-activity threshold" }
-  - { name: auto_send, type: boolean, default: false, required: false, description: "Send without approval (off by default)" }
-capabilities_required: [mcp_tool, ai_reasoning, email, memory]
-providers_required: [llm]
-mcp_servers_required: [airtable]
+- name: crm
+  type: enum
+  enum_values:
+  - hubspot
+  - salesforce
+  - airtable
+  default: airtable
+  required: true
+  description: CRM
+- name: stale_days
+  type: number
+  default: 14
+  required: false
+  description: No-activity threshold
+- name: auto_send
+  type: boolean
+  default: false
+  required: false
+  description: Send without approval (off by default)
+capabilities_required:
+- ai_reasoning
+- communication
+- email
+- mcp_tool
+- memory
+providers_required:
+- llm
+mcp_servers_required:
+- airtable
 credentials_required:
-  - { name: crm_cred, type: api_key, description: "CRM access" }
-  - { name: mail_cred, type: oauth2, scopes: ["mail.send"], description: "Send email" }
-  - { name: llm_provider, type: llm, description: "Draft model" }
+- name: crm_cred
+  type: api_key
+  description: CRM access
+- name: mail_cred
+  type: oauth2
+  scopes:
+  - mail.send
+  description: Send email
+- name: llm_provider
+  type: llm
+  description: Draft model
 steps:
-  - id: find
-    capability: mcp_tool
-    action: find_stale_leads
-    inputs: { crm: "{{ config.crm }}", stale_days: "{{ config.stale_days }}" }
-    outputs: [leads]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: dedupe
-    capability: memory
-    action: exclude_recently_contacted
-    inputs: { leads: "{{ steps.find.leads }}" }
-    outputs: [eligible]
-    depends_on: [find]
-  - id: draft
-    capability: ai_reasoning
-    action: draft_followups
-    when: "{{ steps.dedupe.eligible }}"
-    inputs: { leads: "{{ steps.dedupe.eligible }}" }
-    outputs: [drafts]
-    depends_on: [dedupe]
-  - id: send
-    capability: email
-    action: send_batch
-    when: "{{ config.auto_send }} == true"
-    inputs: { drafts: "{{ steps.draft.drafts }}" }
-    outputs: [sent_ids]
-    depends_on: [draft]
-    on_error: { retry: { max: 1 }, fallback: notify }
+- id: find
+  capability: mcp_tool
+  action: find_stale_leads
+  inputs:
+    crm: '{{ config.crm }}'
+    stale_days: '{{ config.stale_days }}'
+  outputs:
+  - leads
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: dedupe
+  capability: memory
+  action: exclude_recently_contacted
+  inputs:
+    leads: '{{ steps.find.leads }}'
+  outputs:
+  - eligible
+  depends_on:
+  - find
+- id: draft
+  capability: ai_reasoning
+  action: draft_followups
+  when: '{{ steps.dedupe.eligible }}'
+  inputs:
+    leads: '{{ steps.dedupe.eligible }}'
+  outputs:
+  - drafts
+  depends_on:
+  - dedupe
+- id: send
+  capability: communication
+  action: send_batch
+  when: '{{ config.auto_send }} == true'
+  inputs:
+    drafts: '{{ steps.draft.drafts }}'
+  outputs:
+  - sent_ids
+  depends_on:
+  - draft
+  on_error:
+    retry:
+      max: 1
+    fallback: notify
 outputs:
-  - { name: drafts, from: "{{ steps.draft.drafts }}" }
-  - { name: sent_ids, from: "{{ steps.send.sent_ids }}" }
+- name: drafts
+  from: '{{ steps.draft.drafts }}'
+- name: sent_ids
+  from: '{{ steps.send.sent_ids }}'
 verification:
-  - type: communication_delivery
-    check: followups_handled
-    asserts: ["recently-contacted leads excluded", "auto_send off => drafts queued for approval not sent", "follow-up state recorded"]
-    on_fail: notify
+- type: communication_delivery
+  check: followups_handled
+  asserts:
+  - recently-contacted leads excluded
+  - auto_send off => drafts queued for approval not sent
+  - follow-up state recorded
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
-  idempotency_key: "followup-{{ today }}"
+  idempotency_key: followup-{{ today }}
 security_classification: consequential
 user_confirmation_required: true
-resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 180, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 60
+  est_peak_ram_mb: 180
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Scheduled stale-lead follow-up"
+  pattern_family: Scheduled stale-lead follow-up
   derived_from:
-    - { source: "n8n sales follow-up / CRM cadence family", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n sales follow-up / CRM cadence family
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Defaults to approval-required; anti-nag memory prevents repeat contact."
+  portability_notes: Defaults to approval-required; anti-nag memory prevents repeat contact.

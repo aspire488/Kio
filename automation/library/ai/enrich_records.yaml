@@ -1,62 +1,125 @@
 id: ai.enrich_records
 name: Enrich Records with AI + Web
-description: >
-  For each record in a set, gathers external context (web/API lookup) and uses AI
-  to add derived fields (summary, category, sentiment, firmographics), writing the
-  enriched set back. Batches and rate-limits.
+description: 'For each record in a set, gathers external context (web/API lookup) and uses AI to add derived fields (summary,
+  category, sentiment, firmographics), writing the enriched set back. Batches and rate-limits.
+
+  '
 category: ai
 version: 1.0.0
-tags: [ai, enrichment, batch, crm]
+tags:
+- ai
+- enrichment
+- batch
+- crm
 trigger:
   type: manual
-  nl_examples: ["enrich these records", "add company info to this list"]
+  nl_examples:
+  - enrich these records
+  - add company info to this list
 inputs:
-  - { name: records, type: array, required: true, description: "Records to enrich" }
-  - { name: enrich_fields, type: array, required: true, description: "Fields to add" }
+- name: records
+  type: array
+  required: true
+  description: Records to enrich
+- name: enrich_fields
+  type: array
+  required: true
+  description: Fields to add
 config:
-  - { name: store, type: enum, enum_values: [google_sheets, airtable, return_only], default: return_only, required: false, description: "Where to write back" }
-  - { name: batch_size, type: number, default: 10, required: false, description: "Records per batch" }
-capabilities_required: [ai_reasoning, http, filesystem]
-providers_required: [llm]
+- name: store
+  type: enum
+  enum_values:
+  - google_sheets
+  - airtable
+  - return_only
+  default: return_only
+  required: false
+  description: Where to write back
+- name: batch_size
+  type: number
+  default: 10
+  required: false
+  description: Records per batch
+capabilities_required:
+- ai_reasoning
+- filesystem
+- knowledge
+providers_required:
+- llm
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Model" }
-  - { name: store_cred, type: oauth2, scopes: ["write"], description: "Optional store" }
+- name: llm_provider
+  type: llm
+  description: Model
+- name: store_cred
+  type: oauth2
+  scopes:
+  - write
+  description: Optional store
 steps:
-  - id: lookup
-    capability: http
-    action: batch_lookup
-    inputs: { records: "{{ inputs.records }}", batch_size: "{{ config.batch_size }}" }
-    outputs: [context]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: skip }
-  - id: enrich
-    capability: ai_reasoning
-    action: enrich
-    inputs: { records: "{{ inputs.records }}", context: "{{ steps.lookup.context }}", fields: "{{ inputs.enrich_fields }}" }
-    outputs: [enriched]
-    depends_on: [lookup]
-  - id: write
-    capability: filesystem
-    action: write_records
-    when: "{{ config.store }} != return_only"
-    inputs: { store: "{{ config.store }}", records: "{{ steps.enrich.enriched }}" }
-    outputs: [written_count]
-    depends_on: [enrich]
+- id: lookup
+  capability: knowledge
+  action: batch_lookup
+  inputs:
+    records: '{{ inputs.records }}'
+    batch_size: '{{ config.batch_size }}'
+  outputs:
+  - context
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: skip
+- id: enrich
+  capability: ai_reasoning
+  action: enrich
+  inputs:
+    records: '{{ inputs.records }}'
+    context: '{{ steps.lookup.context }}'
+    fields: '{{ inputs.enrich_fields }}'
+  outputs:
+  - enriched
+  depends_on:
+  - lookup
+- id: write
+  capability: filesystem
+  action: append_records
+  when: '{{ config.store }} != return_only'
+  inputs:
+    store: '{{ config.store }}'
+    records: '{{ steps.enrich.enriched }}'
+  outputs:
+  - written_count
+  depends_on:
+  - enrich
 outputs:
-  - { name: enriched, from: "{{ steps.enrich.enriched }}" }
+- name: enriched
+  from: '{{ steps.enrich.enriched }}'
 verification:
-  - type: data_shape
-    check: fields_added
-    asserts: ["every enrich_field present on each record", "records with no context marked, not hallucinated"]
-    on_fail: flag
+- type: data_shape
+  check: fields_added
+  asserts:
+  - every enrich_field present on each record
+  - records with no context marked, not hallucinated
+  on_fail: flag
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
 security_classification: low
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 200, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 60
+  est_peak_ram_mb: 200
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Record enrichment (web + AI)"
+  pattern_family: Record enrichment (web + AI)
   derived_from:
-    - { source: "awesome-n8n-templates: 'Enrich Property Inventory with Image Recognition', 'LinkedIn Profile Finder via Bright Data & GPT-4o-mini'", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  - source: 'awesome-n8n-templates: ''Enrich Property Inventory with Image Recognition'', ''LinkedIn Profile Finder via Bright
+      Data & GPT-4o-mini'''
+    url: https://github.com/enescingoz/awesome-n8n-templates
+    license: CC-BY-4.0 (Enes Cingoz)
+    reuse: adapted
   license: MIT
-  portability_notes: "Marks un-enrichable records instead of fabricating; batched + rate-limited."
+  portability_notes: Marks un-enrichable records instead of fabricating; batched + rate-limited.

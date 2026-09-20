@@ -1,62 +1,108 @@
 id: files.duplicate_detector
 name: Duplicate File Detector
-description: >
-  Scans a folder tree, hashes files, groups duplicates, and produces a report
-  (never deletes automatically). Optional interactive cleanup is gated behind
-  explicit confirmation.
+description: 'Scans a folder tree, hashes files, groups duplicates, and produces a report (never deletes automatically). Optional
+  interactive cleanup is gated behind explicit confirmation.
+
+  '
 category: files
 version: 1.0.0
-tags: [filesystem, dedupe, cleanup, report]
+tags:
+- filesystem
+- dedupe
+- cleanup
+- report
 trigger:
   type: natural_language
   nl_examples:
-    - "find duplicate files in {folder}"
-    - "check {folder} for duplicates"
+  - find duplicate files in {folder}
+  - check {folder} for duplicates
 inputs:
-  - { name: folder, type: file_path, required: true, description: "Folder to scan" }
+- name: folder
+  type: file_path
+  required: true
+  description: Folder to scan
 config:
-  - { name: min_size_kb, type: number, default: 10, required: false, description: "Ignore tiny files" }
-  - { name: report_path, type: file_path, default: "~/KIO/reports/duplicates.md", required: false, description: "Report output" }
-capabilities_required: [filesystem, artifact]
+- name: min_size_kb
+  type: number
+  default: 10
+  required: false
+  description: Ignore tiny files
+- name: report_path
+  type: file_path
+  default: ~/KIO/reports/duplicates.md
+  required: false
+  description: Report output
+capabilities_required:
+- artifact
+- filesystem
+- terminal
 providers_required: []
 credentials_required:
-  - { name: none, type: none }
+- name: none
+  type: none
 steps:
-  - id: scan
-    capability: filesystem
-    action: hash_tree
-    inputs: { folder: "{{ inputs.folder }}", min_size_kb: "{{ config.min_size_kb }}" }
-    outputs: [hash_index]
-    on_error: { retry: { max: 1 }, fallback: abort }
-  - id: group
-    capability: filesystem
-    action: group_duplicates
-    inputs: { hash_index: "{{ steps.scan.hash_index }}" }
-    outputs: [duplicate_groups, reclaimable_bytes]
-    depends_on: [scan]
-  - id: report
-    capability: artifact
-    action: render_markdown
-    inputs: { groups: "{{ steps.group.duplicate_groups }}", reclaimable: "{{ steps.group.reclaimable_bytes }}", out: "{{ config.report_path }}" }
-    outputs: [file_path]
-    depends_on: [group]
+- id: scan
+  capability: filesystem
+  action: hash_tree
+  inputs:
+    folder: '{{ inputs.folder }}'
+    min_size_kb: '{{ config.min_size_kb }}'
+  outputs:
+  - hash_index
+  on_error:
+    retry:
+      max: 1
+    fallback: abort
+- id: group
+  capability: filesystem
+  action: group_duplicates
+  inputs:
+    hash_index: '{{ steps.scan.hash_index }}'
+  outputs:
+  - duplicate_groups
+  - reclaimable_bytes
+  depends_on:
+  - scan
+- id: report
+  capability: terminal
+  action: render_markdown
+  inputs:
+    groups: '{{ steps.group.duplicate_groups }}'
+    reclaimable: '{{ steps.group.reclaimable_bytes }}'
+    out: '{{ config.report_path }}'
+  outputs:
+  - file_path
+  depends_on:
+  - group
 outputs:
-  - { name: report, from: "{{ steps.report.file_path }}" }
-  - { name: reclaimable_bytes, from: "{{ steps.group.reclaimable_bytes }}" }
+- name: report
+  from: '{{ steps.report.file_path }}'
+- name: reclaimable_bytes
+  from: '{{ steps.group.reclaimable_bytes }}'
 verification:
-  - type: filesystem
-    check: report_written
-    asserts: ["report file exists", "groups only contain confirmed identical hashes"]
-    on_fail: flag
+- type: filesystem
+  check: report_written
+  asserts:
+  - report file exists
+  - groups only contain confirmed identical hashes
+  on_fail: flag
 failure_recovery:
-  default_retry: { max: 1, backoff: fixed }
+  default_retry:
+    max: 1
+    backoff: fixed
   on_failure: notify_user
 security_classification: read_only
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 150, network: false, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 60
+  est_peak_ram_mb: 150
+  network: false
+  spawns_process: false
 provenance:
-  pattern_family: "Hash-based duplicate report"
+  pattern_family: Hash-based duplicate report
   derived_from:
-    - { source: "common filesystem-hygiene automation pattern", license: "n/a", reuse: reference }
+  - source: common filesystem-hygiene automation pattern
+    license: n/a
+    reuse: reference
   license: MIT
-  portability_notes: "Report-only by default; deletion is a separate confirmed action."
+  portability_notes: Report-only by default; deletion is a separate confirmed action.

@@ -1,76 +1,134 @@
 id: artifacts.data_to_xlsx
 name: Spec → Calculating Spreadsheet
-description: >
-  Turns a natural-language spreadsheet request into a general SpreadsheetSpec,
-  renders a real XLSX with inputs, formulas, dropdown validation, outputs and a
-  chart, recalculates it so values actually appear, then reopens to verify.
+description: 'Turns a natural-language spreadsheet request into a general SpreadsheetSpec, renders a real XLSX with inputs,
+  formulas, dropdown validation, outputs and a chart, recalculates it so values actually appear, then reopens to verify.
+
+  '
 category: artifacts
 version: 1.0.0
-tags: [xlsx, spreadsheet, calculator, formulas]
+tags:
+- xlsx
+- spreadsheet
+- calculator
+- formulas
 trigger:
   type: natural_language
   nl_examples:
-    - "create a spreadsheet to calculate {goal}"
-    - "build a calculator for {goal}"
+  - create a spreadsheet to calculate {goal}
+  - build a calculator for {goal}
 inputs:
-  - { name: goal, type: string, required: true, description: "What the sheet should compute" }
+- name: goal
+  type: string
+  required: true
+  description: What the sheet should compute
 config:
-  - { name: output_dir, type: file_path, default: "~/KIO/sheets", required: false, description: "Save location" }
-  - { name: include_chart, type: boolean, default: true, required: false, description: "Add a summary chart" }
-capabilities_required: [ai_reasoning, artifact, filesystem]
-providers_required: [llm, openpyxl, libreoffice]
+- name: output_dir
+  type: file_path
+  default: ~/KIO/sheets
+  required: false
+  description: Save location
+- name: include_chart
+  type: boolean
+  default: true
+  required: false
+  description: Add a summary chart
+capabilities_required:
+- ai_reasoning
+- artifact
+- filesystem
+providers_required:
+- llm
+- openpyxl
+- libreoffice
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Model for sheet design" }
+- name: llm_provider
+  type: llm
+  description: Model for sheet design
 steps:
-  - id: design
-    capability: ai_reasoning
-    action: design_spreadsheet
-    description: "Emit a generic SpreadsheetSpec {inputs, formulas, outputs, validations, chart}. General, not hardcoded per goal."
-    inputs: { goal: "{{ inputs.goal }}" }
-    outputs: [spec]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: render
-    capability: artifact
-    action: render_xlsx
-    description: "Write inputs, formulas, validation dropdowns, outputs, optional chart via openpyxl."
-    inputs: { spec: "{{ steps.design.spec }}", chart: "{{ config.include_chart }}", out_dir: "{{ config.output_dir }}" }
-    outputs: [file_path]
-    depends_on: [design]
-    on_error: { retry: { max: 1 }, fallback: abort }
-  - id: recalc
-    capability: artifact
-    action: recalc_xlsx
-    description: "Open with LibreOffice headless to recalc formula VALUES (openpyxl writes formula strings only) and save."
-    inputs: { file_path: "{{ steps.render.file_path }}" }
-    outputs: [file_path]
-    depends_on: [render]
-  - id: verify
-    capability: artifact
-    action: verify_xlsx
-    description: "Reopen and assert formulas exist and computed cells are non-empty."
-    inputs: { file_path: "{{ steps.recalc.file_path }}", spec: "{{ steps.design.spec }}" }
-    outputs: [verified, report]
-    depends_on: [recalc]
+- id: design
+  capability: ai_reasoning
+  action: design_spreadsheet
+  description: Emit a generic SpreadsheetSpec {inputs, formulas, outputs, validations, chart}. General, not hardcoded per
+    goal.
+  inputs:
+    goal: '{{ inputs.goal }}'
+  outputs:
+  - spec
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: render
+  capability: artifact
+  action: generate_xlsx
+  description: Write inputs, formulas, validation dropdowns, outputs, optional chart via openpyxl.
+  inputs:
+    spec: '{{ steps.design.spec }}'
+    chart: '{{ config.include_chart }}'
+    out_dir: '{{ config.output_dir }}'
+  outputs:
+  - file_path
+  depends_on:
+  - design
+  on_error:
+    retry:
+      max: 1
+    fallback: abort
+- id: recalc
+  capability: artifact
+  action: generate_xlsx
+  description: Open with LibreOffice headless to recalc formula VALUES (openpyxl writes formula strings only) and save.
+  inputs:
+    file_path: '{{ steps.render.file_path }}'
+  outputs:
+  - file_path
+  depends_on:
+  - render
+- id: verify
+  capability: filesystem
+  action: verify_sheet_row
+  description: Reopen and assert formulas exist and computed cells are non-empty.
+  inputs:
+    file_path: '{{ steps.recalc.file_path }}'
+    spec: '{{ steps.design.spec }}'
+  outputs:
+  - verified
+  - report
+  depends_on:
+  - recalc
 outputs:
-  - { name: workbook, from: "{{ steps.recalc.file_path }}", description: "Final calculating XLSX" }
+- name: workbook
+  from: '{{ steps.recalc.file_path }}'
+  description: Final calculating XLSX
 verification:
-  - type: artifact
-    check: xlsx_valid
-    asserts:
-      - "formula cells present in expected locations"
-      - "computed output cells non-empty after recalc"
-      - "validation dropdowns present where required"
-      - "sheet names match spec"
-    on_fail: repair
+- type: artifact
+  check: xlsx_valid
+  asserts:
+  - formula cells present in expected locations
+  - computed output cells non-empty after recalc
+  - validation dropdowns present where required
+  - sheet names match spec
+  on_fail: repair
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
 security_classification: low
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 45, est_peak_ram_mb: 220, network: true, spawns_process: true }
+resource_expectations:
+  est_runtime_seconds: 45
+  est_peak_ram_mb: 220
+  network: true
+  spawns_process: true
 provenance:
-  pattern_family: "NL request to parametric spreadsheet"
+  pattern_family: NL request to parametric spreadsheet
   derived_from:
-    - { source: "n8n community Google-Sheets automation patterns", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n community Google-Sheets automation patterns
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "n8n patterns append rows to a sheet; this GENERATES a calculating workbook and fixes the openpyxl no-value trap via LibreOffice recalc."
+  portability_notes: n8n patterns append rows to a sheet; this GENERATES a calculating workbook and fixes the openpyxl no-value
+    trap via LibreOffice recalc.

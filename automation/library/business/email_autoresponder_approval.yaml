@@ -1,63 +1,130 @@
 id: business.email_autoresponder_approval
 name: Email Auto-Responder with Human Approval
-description: >
-  Drafts an AI reply to an inbound email, sends the draft to the user for
-  approve/edit/reject, and only sends the approved version. Human-in-the-loop by
-  design — never auto-sends unreviewed mail.
+description: 'Drafts an AI reply to an inbound email, sends the draft to the user for approve/edit/reject, and only sends
+  the approved version. Human-in-the-loop by design — never auto-sends unreviewed mail.
+
+  '
 category: business
 version: 1.0.0
-tags: [email, autoresponder, human-in-loop, approval]
+tags:
+- email
+- autoresponder
+- human-in-loop
+- approval
 trigger:
   type: email_received
-  nl_examples: ["draft replies to my emails for approval"]
+  nl_examples:
+  - draft replies to my emails for approval
 config:
-  - { name: approval_channel, type: enum, enum_values: [telegram, slack], default: telegram, required: true, description: "Where approvals happen" }
-  - { name: tone, type: string, default: "professional", required: false, description: "Reply tone" }
-capabilities_required: [email, ai_reasoning, communication, workflow]
-providers_required: [llm]
+- name: approval_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  default: telegram
+  required: true
+  description: Where approvals happen
+- name: tone
+  type: string
+  default: professional
+  required: false
+  description: Reply tone
+capabilities_required:
+- ai_reasoning
+- communication
+- email
+- workflow
+providers_required:
+- llm
 credentials_required:
-  - { name: mail_cred, type: oauth2, scopes: ["mail.read", "mail.send"], description: "Mailbox" }
-  - { name: llm_provider, type: llm, description: "Draft model" }
-  - { name: approval_cred, type: bot_token, description: "Approval channel token" }
+- name: mail_cred
+  type: oauth2
+  scopes:
+  - mail.read
+  - mail.send
+  description: Mailbox
+- name: llm_provider
+  type: llm
+  description: Draft model
+- name: approval_cred
+  type: bot_token
+  description: Approval channel token
 steps:
-  - id: draft
-    capability: ai_reasoning
-    action: draft_reply
-    inputs: { subject: "{{ trigger.subject }}", body: "{{ trigger.body }}", tone: "{{ config.tone }}" }
-    outputs: [draft]
-    on_error: { retry: { max: 1 }, fallback: notify }
-  - id: approve
-    capability: workflow
-    action: request_approval
-    inputs: { channel: "{{ config.approval_channel }}", draft: "{{ steps.draft.draft }}" }
-    outputs: [decision, edited_draft]
-    depends_on: [draft]
-  - id: send
-    capability: email
-    action: send_reply
-    when: "{{ steps.approve.decision }} == approved"
-    inputs: { to: "{{ trigger.from }}", subject: "{{ trigger.subject }}", body: "{{ steps.approve.edited_draft }}", in_reply_to: "{{ trigger.message_id }}" }
-    outputs: [sent_id]
-    depends_on: [approve]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+- id: draft
+  capability: ai_reasoning
+  action: draft_reply
+  inputs:
+    subject: '{{ trigger.subject }}'
+    body: '{{ trigger.body }}'
+    tone: '{{ config.tone }}'
+  outputs:
+  - draft
+  on_error:
+    retry:
+      max: 1
+    fallback: notify
+- id: approve
+  capability: workflow
+  action: request_approval
+  inputs:
+    channel: '{{ config.approval_channel }}'
+    draft: '{{ steps.draft.draft }}'
+  outputs:
+  - decision
+  - edited_draft
+  depends_on:
+  - draft
+- id: send
+  capability: email
+  action: send_email
+  when: '{{ steps.approve.decision }} == approved'
+  inputs:
+    to: '{{ trigger.from }}'
+    subject: '{{ trigger.subject }}'
+    body: '{{ steps.approve.edited_draft }}'
+    in_reply_to: '{{ trigger.message_id }}'
+  outputs:
+  - sent_id
+  depends_on:
+  - approve
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
 outputs:
-  - { name: sent_id, from: "{{ steps.send.sent_id }}" }
-  - { name: decision, from: "{{ steps.approve.decision }}" }
+- name: sent_id
+  from: '{{ steps.send.sent_id }}'
+- name: decision
+  from: '{{ steps.approve.decision }}'
 verification:
-  - type: communication_delivery
-    check: reply_sent
-    asserts: ["email sent only after explicit approval", "sent message id captured", "rejected drafts never sent"]
-    on_fail: notify
+- type: communication_delivery
+  check: reply_sent
+  asserts:
+  - email sent only after explicit approval
+  - sent message id captured
+  - rejected drafts never sent
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
-  idempotency_key: "{{ trigger.message_id }}"
+  idempotency_key: '{{ trigger.message_id }}'
 security_classification: consequential
 user_confirmation_required: true
-resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 150, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 30
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "AI draft -> human approval -> send"
+  pattern_family: AI draft -> human approval -> send
   derived_from:
-    - { source: "awesome-n8n-templates: 'AI Email processing autoresponder with approval (Yes/No)', 'Automate Your RFP Process with OpenAI Assistants'", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  - source: 'awesome-n8n-templates: ''AI Email processing autoresponder with approval (Yes/No)'', ''Automate Your RFP Process
+      with OpenAI Assistants'''
+    url: https://github.com/enescingoz/awesome-n8n-templates
+    license: CC-BY-4.0 (Enes Cingoz)
+    reuse: adapted
   license: MIT
-  portability_notes: "Approval gate is structural; sending is consequential and confirmed."
+  portability_notes: Approval gate is structural; sending is consequential and confirmed.

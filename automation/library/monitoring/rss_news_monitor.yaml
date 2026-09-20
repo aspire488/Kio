@@ -1,67 +1,123 @@
 id: monitoring.rss_news_monitor
 name: RSS / News Monitor & Digest
-description: >
-  Pulls configured RSS feeds on a schedule, filters new items by keywords/topics,
-  dedupes against history, summarizes, and delivers a batched digest instead of
-  spamming per-article.
+description: 'Pulls configured RSS feeds on a schedule, filters new items by keywords/topics, dedupes against history, summarizes,
+  and delivers a batched digest instead of spamming per-article.
+
+  '
 category: monitoring
 version: 1.0.0
-tags: [monitoring, rss, news, digest]
+tags:
+- monitoring
+- rss
+- news
+- digest
 trigger:
   type: schedule
-  cron: "0 8,18 * * *"
+  cron: 0 8,18 * * *
 config:
-  - { name: feeds, type: array, required: true, description: "RSS feed URLs" }
-  - { name: topics, type: array, default: [], required: false, description: "Keyword/topic filter" }
-  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Digest channel" }
-capabilities_required: [http, ai_reasoning, communication, memory]
-providers_required: [llm]
+- name: feeds
+  type: array
+  required: true
+  description: RSS feed URLs
+- name: topics
+  type: array
+  default: []
+  required: false
+  description: Keyword/topic filter
+- name: notify_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  - email
+  default: telegram
+  required: false
+  description: Digest channel
+capabilities_required:
+- ai_reasoning
+- communication
+- knowledge
+- memory
+providers_required:
+- llm
 credentials_required:
-  - { name: notify_cred, type: bot_token, description: "Digest token" }
+- name: notify_cred
+  type: bot_token
+  description: Digest token
 steps:
-  - id: pull
-    capability: http
-    action: read_feeds
-    inputs: { feeds: "{{ config.feeds }}" }
-    outputs: [items]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: skip }
-  - id: dedupe
-    capability: memory
-    action: filter_new
-    inputs: { key: "rss-seen", items: "{{ steps.pull.items }}", topics: "{{ config.topics }}" }
-    outputs: [new_items]
-    depends_on: [pull]
-  - id: digest
-    capability: ai_reasoning
-    action: summarize_digest
-    when: "{{ steps.dedupe.new_items }}"
-    inputs: { items: "{{ steps.dedupe.new_items }}" }
-    outputs: [digest]
-    depends_on: [dedupe]
-  - id: deliver
-    capability: communication
-    action: send_message
-    when: "{{ steps.dedupe.new_items }}"
-    inputs: { channel: "{{ config.notify_channel }}", digest: "{{ steps.digest.digest }}" }
-    outputs: [delivery_id]
-    depends_on: [digest]
+- id: pull
+  capability: knowledge
+  action: read_feeds
+  inputs:
+    feeds: '{{ config.feeds }}'
+  outputs:
+  - items
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: skip
+- id: dedupe
+  capability: memory
+  action: filter_new
+  inputs:
+    key: rss-seen
+    items: '{{ steps.pull.items }}'
+    topics: '{{ config.topics }}'
+  outputs:
+  - new_items
+  depends_on:
+  - pull
+- id: digest
+  capability: ai_reasoning
+  action: summarize_digest
+  when: '{{ steps.dedupe.new_items }}'
+  inputs:
+    items: '{{ steps.dedupe.new_items }}'
+  outputs:
+  - digest
+  depends_on:
+  - dedupe
+- id: deliver
+  capability: communication
+  action: send_message
+  when: '{{ steps.dedupe.new_items }}'
+  inputs:
+    channel: '{{ config.notify_channel }}'
+    digest: '{{ steps.digest.digest }}'
+  outputs:
+  - delivery_id
+  depends_on:
+  - digest
 outputs:
-  - { name: digest, from: "{{ steps.digest.digest }}" }
+- name: digest
+  from: '{{ steps.digest.digest }}'
 verification:
-  - type: communication_delivery
-    check: message_delivered
-    asserts: ["digest delivered when new items exist", "previously-seen items excluded"]
-    on_fail: notify
+- type: communication_delivery
+  check: message_delivered
+  asserts:
+  - digest delivered when new items exist
+  - previously-seen items excluded
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: silent_log
-  idempotency_key: "rss-{{ today }}"
+  idempotency_key: rss-{{ today }}
 security_classification: read_only
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 150, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 30
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "RSS filter + batched digest"
+  pattern_family: RSS filter + batched digest
   derived_from:
-    - { source: "n8n RSS-feed templates (very common family)", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n RSS-feed templates (very common family)
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Batches into a digest and dedupes; avoids per-item spam."
+  portability_notes: Batches into a digest and dedupes; avoids per-item spam.

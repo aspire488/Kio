@@ -1,78 +1,154 @@
 id: business.lead_intake_crm
 name: Lead Intake → CRM → Notify
-description: >
-  Captures a lead from a form/webhook, validates and de-dupes against the CRM,
-  scores it, creates/updates the CRM record, and notifies the owner. Verifies the
-  record exists before claiming success.
+description: 'Captures a lead from a form/webhook, validates and de-dupes against the CRM, scores it, creates/updates the
+  CRM record, and notifies the owner. Verifies the record exists before claiming success.
+
+  '
 category: business
 version: 1.0.0
-tags: [crm, leads, intake, sales]
+tags:
+- crm
+- leads
+- intake
+- sales
 trigger:
   type: webhook
   webhook_auth: hmac
 inputs:
-  - { name: lead, type: object, required: true, description: "Incoming lead payload" }
+- name: lead
+  type: object
+  required: true
+  description: Incoming lead payload
 config:
-  - { name: crm, type: enum, enum_values: [hubspot, salesforce, airtable, notion], default: airtable, required: true, description: "CRM system" }
-  - { name: owner_channel, type: enum, enum_values: [telegram, slack, email], default: slack, required: false, description: "Notify owner" }
-capabilities_required: [http, ai_reasoning, mcp_tool, communication]
-providers_required: [llm]
-mcp_servers_required: [airtable]
+- name: crm
+  type: enum
+  enum_values:
+  - hubspot
+  - salesforce
+  - airtable
+  - notion
+  default: airtable
+  required: true
+  description: CRM system
+- name: owner_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  - email
+  default: slack
+  required: false
+  description: Notify owner
+capabilities_required:
+- ai_reasoning
+- communication
+- knowledge
+- mcp_tool
+providers_required:
+- llm
+mcp_servers_required:
+- airtable
 credentials_required:
-  - { name: crm_cred, type: api_key, description: "CRM access" }
-  - { name: owner_cred, type: bot_token, description: "Notify token" }
+- name: crm_cred
+  type: api_key
+  description: CRM access
+- name: owner_cred
+  type: bot_token
+  description: Notify token
 steps:
-  - id: validate
-    capability: http
-    action: validate_lead
-    inputs: { lead: "{{ inputs.lead }}" }
-    outputs: [clean_lead, valid]
-    on_error: { fallback: abort }
-  - id: dedupe_score
-    capability: ai_reasoning
-    action: dedupe_and_score
-    when: "{{ steps.validate.valid }} == true"
-    inputs: { lead: "{{ steps.validate.clean_lead }}", crm: "{{ config.crm }}" }
-    outputs: [is_duplicate, score]
-    depends_on: [validate]
-  - id: upsert
-    capability: mcp_tool
-    action: crm_upsert
-    when: "{{ steps.validate.valid }} == true"
-    inputs: { crm: "{{ config.crm }}", lead: "{{ steps.validate.clean_lead }}", score: "{{ steps.dedupe_score.score }}" }
-    outputs: [record_id]
-    depends_on: [dedupe_score]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: verify
-    capability: mcp_tool
-    action: crm_get
-    inputs: { crm: "{{ config.crm }}", record_id: "{{ steps.upsert.record_id }}" }
-    outputs: [verified]
-    depends_on: [upsert]
-  - id: notify
-    capability: communication
-    action: send_message
-    inputs: { channel: "{{ config.owner_channel }}", lead: "{{ steps.validate.clean_lead }}", score: "{{ steps.dedupe_score.score }}" }
-    outputs: [delivery_id]
-    depends_on: [verify]
+- id: validate
+  capability: knowledge
+  action: validate_lead
+  inputs:
+    lead: '{{ inputs.lead }}'
+  outputs:
+  - clean_lead
+  - valid
+  on_error:
+    fallback: abort
+- id: dedupe_score
+  capability: ai_reasoning
+  action: dedupe_and_score
+  when: '{{ steps.validate.valid }} == true'
+  inputs:
+    lead: '{{ steps.validate.clean_lead }}'
+    crm: '{{ config.crm }}'
+  outputs:
+  - is_duplicate
+  - score
+  depends_on:
+  - validate
+- id: upsert
+  capability: mcp_tool
+  action: crm_upsert
+  when: '{{ steps.validate.valid }} == true'
+  inputs:
+    crm: '{{ config.crm }}'
+    lead: '{{ steps.validate.clean_lead }}'
+    score: '{{ steps.dedupe_score.score }}'
+  outputs:
+  - record_id
+  depends_on:
+  - dedupe_score
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: verify
+  capability: mcp_tool
+  action: crm_get
+  inputs:
+    crm: '{{ config.crm }}'
+    record_id: '{{ steps.upsert.record_id }}'
+  outputs:
+  - verified
+  depends_on:
+  - upsert
+- id: notify
+  capability: communication
+  action: send_message
+  inputs:
+    channel: '{{ config.owner_channel }}'
+    lead: '{{ steps.validate.clean_lead }}'
+    score: '{{ steps.dedupe_score.score }}'
+  outputs:
+  - delivery_id
+  depends_on:
+  - verify
 outputs:
-  - { name: record_id, from: "{{ steps.upsert.record_id }}" }
-  - { name: score, from: "{{ steps.dedupe_score.score }}" }
+- name: record_id
+  from: '{{ steps.upsert.record_id }}'
+- name: score
+  from: '{{ steps.dedupe_score.score }}'
 verification:
-  - type: data_shape
-    check: lead_in_crm
-    asserts: ["signature verified", "record re-fetched by id", "duplicates merged not double-created", "owner notified"]
-    on_fail: notify
+- type: data_shape
+  check: lead_in_crm
+  asserts:
+  - signature verified
+  - record re-fetched by id
+  - duplicates merged not double-created
+  - owner notified
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 2, backoff: exponential }
+  default_retry:
+    max: 2
+    backoff: exponential
   on_failure: notify_user
-  idempotency_key: "{{ inputs.lead }}"
+  idempotency_key: '{{ inputs.lead }}'
 security_classification: consequential
 user_confirmation_required: true
-resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 20
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Lead capture -> CRM -> notify"
+  pattern_family: Lead capture -> CRM -> notify
   derived_from:
-    - { source: "awesome-n8n-templates: 'Simple Lead Tracker Automation' (event|communication+email); n8n CRM intake family", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  - source: 'awesome-n8n-templates: ''Simple Lead Tracker Automation'' (event|communication+email); n8n CRM intake family'
+    url: https://github.com/enescingoz/awesome-n8n-templates
+    license: CC-BY-4.0 (Enes Cingoz)
+    reuse: adapted
   license: MIT
-  portability_notes: "Adds dedupe + read-back verification; CRM write is consequential."
+  portability_notes: Adds dedupe + read-back verification; CRM write is consequential.

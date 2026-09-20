@@ -1,62 +1,127 @@
 id: monitoring.website_uptime
 name: Website Uptime Monitor
-description: >
-  Polls a URL on a schedule, checks status code, response time and an optional
-  content marker, records history, and alerts on transition to down/slow (not on
-  every failed poll) with recovery notifications.
+description: 'Polls a URL on a schedule, checks status code, response time and an optional content marker, records history,
+  and alerts on transition to down/slow (not on every failed poll) with recovery notifications.
+
+  '
 category: monitoring
 version: 1.0.0
-tags: [monitoring, uptime, http, alert]
+tags:
+- monitoring
+- uptime
+- http
+- alert
 trigger:
   type: schedule
-  cron: "*/5 * * * *"
+  cron: '*/5 * * * *'
 config:
-  - { name: url, type: url, required: true, description: "Endpoint to check" }
-  - { name: expect_marker, type: string, required: false, description: "Substring expected in the body" }
-  - { name: slow_ms, type: number, default: 3000, required: false, description: "Threshold for slow" }
-  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Alert channel" }
-capabilities_required: [http, memory, communication]
+- name: url
+  type: url
+  required: true
+  description: Endpoint to check
+- name: expect_marker
+  type: string
+  required: false
+  description: Substring expected in the body
+- name: slow_ms
+  type: number
+  default: 3000
+  required: false
+  description: Threshold for slow
+- name: notify_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  - email
+  default: telegram
+  required: false
+  description: Alert channel
+capabilities_required:
+- communication
+- knowledge
+- memory
 providers_required: []
 credentials_required:
-  - { name: notify_cred, type: bot_token, description: "Channel token" }
+- name: notify_cred
+  type: bot_token
+  description: Channel token
 steps:
-  - id: probe
-    capability: http
-    action: healthcheck
-    inputs: { url: "{{ config.url }}", marker: "{{ config.expect_marker }}", slow_ms: "{{ config.slow_ms }}" }
-    outputs: [status_code, response_ms, marker_ok]
-    on_error: { retry: { max: 1 }, fallback: skip }
-  - id: track
-    capability: memory
-    action: state_transition
-    description: "Compare to last known state; emit only on up->down / down->up / ->slow."
-    inputs: { key: "{{ config.url }}", status: "{{ steps.probe.status_code }}", ms: "{{ steps.probe.response_ms }}", marker_ok: "{{ steps.probe.marker_ok }}", slow_ms: "{{ config.slow_ms }}" }
-    outputs: [changed, new_state]
-    depends_on: [probe]
-  - id: alert
-    capability: communication
-    action: send_message
-    when: "{{ steps.track.changed }} == true"
-    inputs: { channel: "{{ config.notify_channel }}", state: "{{ steps.track.new_state }}", url: "{{ config.url }}" }
-    outputs: [delivery_id]
-    depends_on: [track]
+- id: probe
+  capability: knowledge
+  action: healthcheck
+  inputs:
+    url: '{{ config.url }}'
+    marker: '{{ config.expect_marker }}'
+    slow_ms: '{{ config.slow_ms }}'
+  outputs:
+  - status_code
+  - response_ms
+  - marker_ok
+  on_error:
+    retry:
+      max: 1
+    fallback: skip
+- id: track
+  capability: memory
+  action: state_transition
+  description: Compare to last known state; emit only on up->down / down->up / ->slow.
+  inputs:
+    key: '{{ config.url }}'
+    status: '{{ steps.probe.status_code }}'
+    ms: '{{ steps.probe.response_ms }}'
+    marker_ok: '{{ steps.probe.marker_ok }}'
+    slow_ms: '{{ config.slow_ms }}'
+  outputs:
+  - changed
+  - new_state
+  depends_on:
+  - probe
+- id: alert
+  capability: communication
+  action: send_message
+  when: '{{ steps.track.changed }} == true'
+  inputs:
+    channel: '{{ config.notify_channel }}'
+    state: '{{ steps.track.new_state }}'
+    url: '{{ config.url }}'
+  outputs:
+  - delivery_id
+  depends_on:
+  - track
 outputs:
-  - { name: state, from: "{{ steps.track.new_state }}" }
+- name: state
+  from: '{{ steps.track.new_state }}'
 verification:
-  - type: http_response
-    check: probe_ran
-    asserts: ["status code captured", "alert only on state transition", "recovery alert sent on return to up"]
-    on_fail: notify
+- type: http_response
+  check: probe_ran
+  asserts:
+  - status code captured
+  - alert only on state transition
+  - recovery alert sent on return to up
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: fixed }
+  default_retry:
+    max: 1
+    backoff: fixed
   on_failure: silent_log
 security_classification: read_only
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 10, est_peak_ram_mb: 60, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 10
+  est_peak_ram_mb: 60
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Scheduled healthcheck + state-transition alert"
+  pattern_family: Scheduled healthcheck + state-transition alert
   derived_from:
-    - { source: "n8n uptime/HTTP-monitor templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
-    - { source: "Uptime-Kuma pattern", url: "https://github.com/louislam/uptime-kuma", license: "MIT", reuse: reference }
+  - source: n8n uptime/HTTP-monitor templates
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
+  - source: Uptime-Kuma pattern
+    url: https://github.com/louislam/uptime-kuma
+    license: MIT
+    reuse: reference
   license: MIT
-  portability_notes: "Alerts on transitions, not every poll; sends recovery notices."
+  portability_notes: Alerts on transitions, not every poll; sends recovery notices.

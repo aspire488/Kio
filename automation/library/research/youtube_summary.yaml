@@ -1,67 +1,120 @@
 id: research.youtube_summary
 name: YouTube/Video → AI Summary → Post
-description: >
-  On new videos from configured channels/feeds, fetches the transcript, produces a
-  concise AI summary with key points/timestamps, and posts it to a channel. Dedupes
-  already-summarized videos.
+description: 'On new videos from configured channels/feeds, fetches the transcript, produces a concise AI summary with key
+  points/timestamps, and posts it to a channel. Dedupes already-summarized videos.
+
+  '
 category: research
 version: 1.0.0
-tags: [research, youtube, summary, digest]
+tags:
+- research
+- youtube
+- summary
+- digest
 trigger:
   type: schedule
-  cron: "0 20 * * *"
+  cron: 0 20 * * *
 config:
-  - { name: sources, type: array, required: true, description: "Channel/playlist/feed ids" }
-  - { name: notify_channel, type: enum, enum_values: [telegram, slack, discord], default: discord, required: false, description: "Where to post" }
-capabilities_required: [http, ai_reasoning, communication, memory]
-providers_required: [llm]
+- name: sources
+  type: array
+  required: true
+  description: Channel/playlist/feed ids
+- name: notify_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  - discord
+  default: discord
+  required: false
+  description: Where to post
+capabilities_required:
+- ai_reasoning
+- communication
+- knowledge
+- memory
+providers_required:
+- llm
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Summary model" }
-  - { name: notify_cred, type: bot_token, description: "Post token" }
+- name: llm_provider
+  type: llm
+  description: Summary model
+- name: notify_cred
+  type: bot_token
+  description: Post token
 steps:
-  - id: fetch
-    capability: http
-    action: list_new_videos
-    inputs: { sources: "{{ config.sources }}" }
-    outputs: [videos]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: skip }
-  - id: dedupe
-    capability: memory
-    action: filter_new
-    inputs: { key: "yt-seen", items: "{{ steps.fetch.videos }}" }
-    outputs: [new_videos]
-    depends_on: [fetch]
-  - id: summarize
-    capability: ai_reasoning
-    action: summarize_videos
-    when: "{{ steps.dedupe.new_videos }}"
-    inputs: { videos: "{{ steps.dedupe.new_videos }}" }
-    outputs: [summaries]
-    depends_on: [dedupe]
-  - id: post
-    capability: communication
-    action: send_message
-    when: "{{ steps.dedupe.new_videos }}"
-    inputs: { channel: "{{ config.notify_channel }}", summaries: "{{ steps.summarize.summaries }}" }
-    outputs: [delivery_id]
-    depends_on: [summarize]
+- id: fetch
+  capability: knowledge
+  action: list_new_videos
+  inputs:
+    sources: '{{ config.sources }}'
+  outputs:
+  - videos
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: skip
+- id: dedupe
+  capability: memory
+  action: filter_new
+  inputs:
+    key: yt-seen
+    items: '{{ steps.fetch.videos }}'
+  outputs:
+  - new_videos
+  depends_on:
+  - fetch
+- id: summarize
+  capability: ai_reasoning
+  action: summarize_videos
+  when: '{{ steps.dedupe.new_videos }}'
+  inputs:
+    videos: '{{ steps.dedupe.new_videos }}'
+  outputs:
+  - summaries
+  depends_on:
+  - dedupe
+- id: post
+  capability: communication
+  action: send_message
+  when: '{{ steps.dedupe.new_videos }}'
+  inputs:
+    channel: '{{ config.notify_channel }}'
+    summaries: '{{ steps.summarize.summaries }}'
+  outputs:
+  - delivery_id
+  depends_on:
+  - summarize
 outputs:
-  - { name: summaries, from: "{{ steps.summarize.summaries }}" }
+- name: summaries
+  from: '{{ steps.summarize.summaries }}'
 verification:
-  - type: communication_delivery
-    check: message_delivered
-    asserts: ["summary posted with message id", "already-seen videos skipped"]
-    on_fail: notify
+- type: communication_delivery
+  check: message_delivered
+  asserts:
+  - summary posted with message id
+  - already-seen videos skipped
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: silent_log
-  idempotency_key: "yt-{{ today }}"
+  idempotency_key: yt-{{ today }}
 security_classification: read_only
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 200, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 60
+  est_peak_ram_mb: 200
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Video -> transcript -> summary -> post"
+  pattern_family: Video -> transcript -> summary -> post
   derived_from:
-    - { source: "Zie619/n8n-workflows + awesome: 'YouTube Videos with AI Summaries on Discord' (poll|ai_reasoning+communication+http)", url: "https://github.com/Zie619/n8n-workflows", license: "MIT (aggregation)", reuse: pattern_only }
+  - source: 'Zie619/n8n-workflows + awesome: ''YouTube Videos with AI Summaries on Discord'' (poll|ai_reasoning+communication+http)'
+    url: https://github.com/Zie619/n8n-workflows
+    license: MIT (aggregation)
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Cross-run dedupe; batched post."
+  portability_notes: Cross-run dedupe; batched post.

@@ -1,71 +1,130 @@
 id: artifacts.research_to_pdf
 name: Research → PDF Report (HTML/CSS engine)
-description: >
-  Authors a report as themed HTML/CSS and renders to PDF via WeasyPrint for real
-  typography, page numbers and headers, then verifies the PDF parses and has
-  extractable text (guards against a DOCX masquerading as PDF).
+description: 'Authors a report as themed HTML/CSS and renders to PDF via WeasyPrint for real typography, page numbers and
+  headers, then verifies the PDF parses and has extractable text (guards against a DOCX masquerading as PDF).
+
+  '
 category: artifacts
 version: 1.0.0
-tags: [pdf, report, weasyprint, research]
+tags:
+- pdf
+- report
+- weasyprint
+- research
 trigger:
   type: natural_language
   nl_examples:
-    - "make a PDF report on {topic}"
-    - "export a PDF about {topic}"
+  - make a PDF report on {topic}
+  - export a PDF about {topic}
 inputs:
-  - { name: topic, type: string, required: true, description: "Report subject" }
+- name: topic
+  type: string
+  required: true
+  description: Report subject
 config:
-  - { name: output_dir, type: file_path, default: "~/KIO/reports", required: false, description: "Save location" }
-  - { name: css_theme, type: string, default: "kio_print", required: false, description: "Print stylesheet" }
-capabilities_required: [ai_reasoning, artifact, filesystem]
-providers_required: [llm, weasyprint, pypdf]
+- name: output_dir
+  type: file_path
+  default: ~/KIO/reports
+  required: false
+  description: Save location
+- name: css_theme
+  type: string
+  default: kio_print
+  required: false
+  description: Print stylesheet
+capabilities_required:
+- ai_reasoning
+- artifact
+- filesystem
+providers_required:
+- llm
+- weasyprint
+- pypdf
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Model for writing" }
+- name: llm_provider
+  type: llm
+  description: Model for writing
 steps:
-  - id: research
-    capability: ai_reasoning
-    action: research
-    inputs: { query: "{{ inputs.topic }}" }
-    outputs: [findings]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: compose
-    capability: ai_reasoning
-    action: compose_html
-    description: "Write semantic HTML report body bound to the print CSS theme."
-    inputs: { findings: "{{ steps.research.findings }}", theme: "{{ config.css_theme }}" }
-    outputs: [html]
-    depends_on: [research]
-  - id: render
-    capability: artifact
-    action: render_pdf_from_html
-    description: "WeasyPrint HTML+CSS -> PDF with @page numbering/headers."
-    inputs: { html: "{{ steps.compose.html }}", out_dir: "{{ config.output_dir }}" }
-    outputs: [file_path]
-    depends_on: [compose]
-    on_error: { retry: { max: 1 }, fallback: abort }
-  - id: verify
-    capability: artifact
-    action: verify_pdf
-    description: "pypdf: parses as PDF, page_count>=1, text extractable."
-    inputs: { file_path: "{{ steps.render.file_path }}" }
-    outputs: [verified, report]
-    depends_on: [render]
+- id: research
+  capability: ai_reasoning
+  action: research
+  inputs:
+    query: '{{ inputs.topic }}'
+  outputs:
+  - findings
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: compose
+  capability: ai_reasoning
+  action: compose_html
+  description: Write semantic HTML report body bound to the print CSS theme.
+  inputs:
+    findings: '{{ steps.research.findings }}'
+    theme: '{{ config.css_theme }}'
+  outputs:
+  - html
+  depends_on:
+  - research
+- id: render
+  capability: artifact
+  action: generate_pdf
+  description: WeasyPrint HTML+CSS -> PDF with @page numbering/headers.
+  inputs:
+    html: '{{ steps.compose.html }}'
+    out_dir: '{{ config.output_dir }}'
+  outputs:
+  - file_path
+  depends_on:
+  - compose
+  on_error:
+    retry:
+      max: 1
+    fallback: abort
+- id: verify
+  capability: artifact
+  action: verify_pdf
+  description: 'pypdf: parses as PDF, page_count>=1, text extractable.'
+  inputs:
+    file_path: '{{ steps.render.file_path }}'
+  outputs:
+  - verified
+  - report
+  depends_on:
+  - render
 outputs:
-  - { name: pdf, from: "{{ steps.render.file_path }}", description: "Final PDF" }
+- name: pdf
+  from: '{{ steps.render.file_path }}'
+  description: Final PDF
 verification:
-  - type: artifact
-    check: pdf_valid
-    asserts: ["parses as PDF", "page_count >= 1", "text extractable", "not a mislabeled office file"]
-    on_fail: repair
+- type: artifact
+  check: pdf_valid
+  asserts:
+  - parses as PDF
+  - page_count >= 1
+  - text extractable
+  - not a mislabeled office file
+  on_fail: repair
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
 security_classification: low
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 250, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 60
+  est_peak_ram_mb: 250
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "AI research to PDF"
+  pattern_family: AI research to PDF
   derived_from:
-    - { source: "n8n HTML-to-PDF / report templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n HTML-to-PDF / report templates
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Uses WeasyPrint for typography and adds PDF-integrity verification."
+  portability_notes: Uses WeasyPrint for typography and adds PDF-integrity verification.

@@ -1,68 +1,122 @@
 id: files.invoice_extract_to_sheet
 name: Invoice PDF → Structured Row in Workbook
-description: >
-  Extracts vendor, date, line items, tax and total from an invoice PDF into a
-  typed record, appends it to a tracking XLSX, and verifies the row landed with a
-  numeric total. Flags low-confidence extractions for review instead of guessing.
+description: 'Extracts vendor, date, line items, tax and total from an invoice PDF into a typed record, appends it to a tracking
+  XLSX, and verifies the row landed with a numeric total. Flags low-confidence extractions for review instead of guessing.
+
+  '
 category: files
 version: 1.0.0
-tags: [invoice, extraction, xlsx, finance]
+tags:
+- invoice
+- extraction
+- xlsx
+- finance
 trigger:
   type: file_watch
-  watch_path: "~/Documents/Invoices"
+  watch_path: ~/Documents/Invoices
 config:
-  - { name: workbook_path, type: file_path, default: "~/KIO/finance/invoices.xlsx", required: false, description: "Tracking workbook" }
-  - { name: confidence_threshold, type: number, default: 0.8, required: false, description: "Below this -> flag for review" }
-capabilities_required: [filesystem, ai_reasoning, artifact]
-providers_required: [llm, pdf_reader, openpyxl]
+- name: workbook_path
+  type: file_path
+  default: ~/KIO/finance/invoices.xlsx
+  required: false
+  description: Tracking workbook
+- name: confidence_threshold
+  type: number
+  default: 0.8
+  required: false
+  description: Below this -> flag for review
+capabilities_required:
+- ai_reasoning
+- artifact
+- filesystem
+- workflow
+providers_required:
+- llm
+- pdf_reader
+- openpyxl
 credentials_required:
-  - { name: llm_provider, type: llm, description: "Model for structured extraction" }
+- name: llm_provider
+  type: llm
+  description: Model for structured extraction
 steps:
-  - id: extract
-    capability: ai_reasoning
-    action: extract_structured
-    description: "Return typed invoice record + per-field confidence."
-    inputs: { file_path: "{{ trigger.file_path }}", schema: "invoice" }
-    outputs: [record, confidence]
-    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
-  - id: gate
-    capability: workflow
-    action: branch
-    description: "If confidence < threshold, flag for human review."
-    inputs: { confidence: "{{ steps.extract.confidence }}", threshold: "{{ config.confidence_threshold }}" }
-    outputs: [ok]
-    depends_on: [extract]
-  - id: append
-    capability: artifact
-    action: append_xlsx_row
-    when: "{{ steps.gate.ok }} == true"
-    inputs: { workbook: "{{ config.workbook_path }}", record: "{{ steps.extract.record }}" }
-    outputs: [row_index]
-    depends_on: [gate]
-  - id: verify
-    capability: artifact
-    action: verify_xlsx
-    when: "{{ steps.gate.ok }} == true"
-    inputs: { file_path: "{{ config.workbook_path }}", require: "last row total is numeric" }
-    outputs: [verified]
-    depends_on: [append]
+- id: extract
+  capability: ai_reasoning
+  action: extract_structured
+  description: Return typed invoice record + per-field confidence.
+  inputs:
+    file_path: '{{ trigger.file_path }}'
+    schema: invoice
+  outputs:
+  - record
+  - confidence
+  on_error:
+    retry:
+      max: 2
+      backoff: exponential
+    fallback: notify
+- id: gate
+  capability: workflow
+  action: branch
+  description: If confidence < threshold, flag for human review.
+  inputs:
+    confidence: '{{ steps.extract.confidence }}'
+    threshold: '{{ config.confidence_threshold }}'
+  outputs:
+  - ok
+  depends_on:
+  - extract
+- id: append
+  capability: artifact
+  action: append_xlsx_row
+  when: '{{ steps.gate.ok }} == true'
+  inputs:
+    workbook: '{{ config.workbook_path }}'
+    record: '{{ steps.extract.record }}'
+  outputs:
+  - row_index
+  depends_on:
+  - gate
+- id: verify
+  capability: filesystem
+  action: verify_sheet_row
+  when: '{{ steps.gate.ok }} == true'
+  inputs:
+    file_path: '{{ config.workbook_path }}'
+    require: last row total is numeric
+  outputs:
+  - verified
+  depends_on:
+  - append
 outputs:
-  - { name: row_index, from: "{{ steps.append.row_index }}" }
+- name: row_index
+  from: '{{ steps.append.row_index }}'
 verification:
-  - type: filesystem
-    check: xlsx_row_present
-    asserts: ["new row appended", "total cell numeric", "low-confidence rows flagged not silently written"]
-    on_fail: notify
+- type: filesystem
+  check: xlsx_row_present
+  asserts:
+  - new row appended
+  - total cell numeric
+  - low-confidence rows flagged not silently written
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: exponential }
+  default_retry:
+    max: 1
+    backoff: exponential
   on_failure: notify_user
-  idempotency_key: "{{ trigger.file_path }}"
+  idempotency_key: '{{ trigger.file_path }}'
 security_classification: consequential
 user_confirmation_required: true
-resource_expectations: { est_runtime_seconds: 25, est_peak_ram_mb: 200, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 25
+  est_peak_ram_mb: 200
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Invoice OCR/extract to ledger"
+  pattern_family: Invoice OCR/extract to ledger
   derived_from:
-    - { source: "n8n invoice-processing templates (very common family)", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n invoice-processing templates (very common family)
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Adds confidence gating + numeric verification; refuses to silently write guessed totals."
+  portability_notes: Adds confidence gating + numeric verification; refuses to silently write guessed totals.

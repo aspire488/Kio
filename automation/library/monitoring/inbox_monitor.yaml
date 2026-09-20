@@ -1,62 +1,130 @@
 id: monitoring.inbox_monitor
 name: Priority Inbox Monitor
-description: >
-  Polls the inbox for messages matching priority rules (VIP sender, keyword, or
-  AI-judged urgency) and pushes an immediate alert, so important mail is not missed.
+description: 'Polls the inbox for messages matching priority rules (VIP sender, keyword, or AI-judged urgency) and pushes
+  an immediate alert, so important mail is not missed.
+
+  '
 category: monitoring
 version: 1.0.0
-tags: [monitoring, email, inbox, alert]
+tags:
+- monitoring
+- email
+- inbox
+- alert
 trigger:
   type: poll
   poll_interval_seconds: 300
 config:
-  - { name: vip_senders, type: array, default: [], required: false, description: "Always alert on these" }
-  - { name: keywords, type: array, default: [urgent, invoice, contract], required: false, description: "Alert on these terms" }
-  - { name: ai_urgency, type: boolean, default: true, required: false, description: "Let AI judge urgency" }
-  - { name: notify_channel, type: enum, enum_values: [telegram, slack], default: telegram, required: false, description: "Alert channel" }
-capabilities_required: [email, ai_reasoning, communication, memory]
-providers_required: [imap, llm]
+- name: vip_senders
+  type: array
+  default: []
+  required: false
+  description: Always alert on these
+- name: keywords
+  type: array
+  default:
+  - urgent
+  - invoice
+  - contract
+  required: false
+  description: Alert on these terms
+- name: ai_urgency
+  type: boolean
+  default: true
+  required: false
+  description: Let AI judge urgency
+- name: notify_channel
+  type: enum
+  enum_values:
+  - telegram
+  - slack
+  default: telegram
+  required: false
+  description: Alert channel
+capabilities_required:
+- ai_reasoning
+- communication
+- email
+- memory
+providers_required:
+- imap
+- llm
 credentials_required:
-  - { name: mail_cred, type: oauth2, scopes: ["mail.read"], description: "Mailbox access" }
-  - { name: llm_provider, type: llm, description: "Model for urgency" }
-  - { name: notify_cred, type: bot_token, description: "Alert token" }
+- name: mail_cred
+  type: oauth2
+  scopes:
+  - mail.read
+  description: Mailbox access
+- name: llm_provider
+  type: llm
+  description: Model for urgency
+- name: notify_cred
+  type: bot_token
+  description: Alert token
 steps:
-  - id: fetch
-    capability: email
-    action: fetch_new
-    inputs: { since_key: "{{ config.notify_channel }}" }
-    outputs: [messages]
-    on_error: { retry: { max: 1 }, fallback: skip }
-  - id: score
-    capability: ai_reasoning
-    action: score_priority
-    inputs: { messages: "{{ steps.fetch.messages }}", vips: "{{ config.vip_senders }}", keywords: "{{ config.keywords }}", use_ai: "{{ config.ai_urgency }}" }
-    outputs: [priority_messages]
-    depends_on: [fetch]
-  - id: alert
-    capability: communication
-    action: send_message
-    when: "{{ steps.score.priority_messages }}"
-    inputs: { channel: "{{ config.notify_channel }}", messages: "{{ steps.score.priority_messages }}" }
-    outputs: [delivery_id]
-    depends_on: [score]
+- id: fetch
+  capability: email
+  action: read_inbox
+  inputs:
+    since_key: '{{ config.notify_channel }}'
+  outputs:
+  - messages
+  on_error:
+    retry:
+      max: 1
+    fallback: skip
+- id: score
+  capability: ai_reasoning
+  action: score_priority
+  inputs:
+    messages: '{{ steps.fetch.messages }}'
+    vips: '{{ config.vip_senders }}'
+    keywords: '{{ config.keywords }}'
+    use_ai: '{{ config.ai_urgency }}'
+  outputs:
+  - priority_messages
+  depends_on:
+  - fetch
+- id: alert
+  capability: communication
+  action: send_message
+  when: '{{ steps.score.priority_messages }}'
+  inputs:
+    channel: '{{ config.notify_channel }}'
+    messages: '{{ steps.score.priority_messages }}'
+  outputs:
+  - delivery_id
+  depends_on:
+  - score
 outputs:
-  - { name: priority_messages, from: "{{ steps.score.priority_messages }}" }
+- name: priority_messages
+  from: '{{ steps.score.priority_messages }}'
 verification:
-  - type: communication_delivery
-    check: message_delivered
-    asserts: ["alert delivered when priority mail found", "already-seen messages not re-alerted"]
-    on_fail: notify
+- type: communication_delivery
+  check: message_delivered
+  asserts:
+  - alert delivered when priority mail found
+  - already-seen messages not re-alerted
+  on_fail: notify
 failure_recovery:
-  default_retry: { max: 1, backoff: fixed }
+  default_retry:
+    max: 1
+    backoff: fixed
   on_failure: silent_log
-  idempotency_key: "seen-messages-cursor"
+  idempotency_key: seen-messages-cursor
 security_classification: read_only
 user_confirmation_required: false
-resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: false }
+resource_expectations:
+  est_runtime_seconds: 20
+  est_peak_ram_mb: 150
+  network: true
+  spawns_process: false
 provenance:
-  pattern_family: "Inbox poll + priority alert"
+  pattern_family: Inbox poll + priority alert
   derived_from:
-    - { source: "n8n email-trigger / IMAP templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  - source: n8n email-trigger / IMAP templates
+    url: https://n8n.io/workflows
+    license: SUL
+    reuse: pattern_only
   license: MIT
-  portability_notes: "Cursor-based dedupe so mail is alerted once."
+  portability_notes: Cursor-based dedupe so mail is alerted once.
