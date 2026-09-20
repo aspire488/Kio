@@ -1,0 +1,1490 @@
+{
+  "total": 63,
+  "counts": {
+    "BLOCKED_MISSING_CAPABILITY": 54,
+    "BLOCKED_MISSING_CREDENTIAL": 6,
+    "PREFLIGHT_PASS": 3
+  },
+  "workflows": [
+    {
+      "wf": "ai.classify_and_route",
+      "cat": "ai",
+      "steps": 2,
+      "caps": [
+        "ai_reasoning",
+        "workflow"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "ai.enrich_records",
+      "cat": "ai",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "filesystem",
+        "knowledge"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider",
+        "store_cred"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "store_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "ai.extract_to_structured",
+      "cat": "ai",
+      "steps": 2,
+      "caps": [
+        "ai_reasoning"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "ai.image_generate",
+      "cat": "ai",
+      "steps": 2,
+      "caps": [
+        "media",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "media"
+      ],
+      "creds": [
+        "image_provider"
+      ],
+      "fail_creds": [
+        "image_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: media"
+    },
+    {
+      "wf": "ai.rag_answer",
+      "cat": "ai",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "knowledge",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider",
+        "vectorstore_cred"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "vectorstore_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "ai.transcribe_summarize",
+      "cat": "ai",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "filesystem",
+        "communication"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.data_to_xlsx",
+      "cat": "artifacts",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.meeting_to_report",
+      "cat": "artifacts",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.multiformat_report",
+      "cat": "artifacts",
+      "steps": 6,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem",
+        "terminal"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.research_to_docx",
+      "cat": "artifacts",
+      "steps": 6,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.research_to_pdf",
+      "cat": "artifacts",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "artifacts.research_to_pptx",
+      "cat": "artifacts",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "browser.page_change_monitor",
+      "cat": "browser",
+      "steps": 4,
+      "caps": [
+        "browser",
+        "ai_reasoning",
+        "communication",
+        "memory"
+      ],
+      "missing_caps": [
+        "browser",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: browser, ai_reasoning"
+    },
+    {
+      "wf": "browser.price_monitor",
+      "cat": "browser",
+      "steps": 3,
+      "caps": [
+        "browser",
+        "memory",
+        "communication"
+      ],
+      "missing_caps": [
+        "browser"
+      ],
+      "creds": [
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: browser"
+    },
+    {
+      "wf": "browser.structured_extract",
+      "cat": "browser",
+      "steps": 3,
+      "caps": [
+        "browser",
+        "ai_reasoning",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "browser",
+        "ai_reasoning"
+      ],
+      "creds": [],
+      "fail_creds": [],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: browser, ai_reasoning"
+    },
+    {
+      "wf": "business.crm_followup",
+      "cat": "business",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "email",
+        "mcp_tool",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "email",
+        "mcp_tool"
+      ],
+      "creds": [
+        "crm_cred",
+        "mail_cred",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "crm_cred",
+        "mail_cred",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, email, mcp_tool"
+    },
+    {
+      "wf": "business.email_autoresponder_approval",
+      "cat": "business",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "email",
+        "workflow"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "email"
+      ],
+      "creds": [
+        "mail_cred",
+        "llm_provider",
+        "approval_cred"
+      ],
+      "fail_creds": [
+        "mail_cred",
+        "llm_provider",
+        "approval_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, email"
+    },
+    {
+      "wf": "business.lead_intake_crm",
+      "cat": "business",
+      "steps": 5,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "knowledge",
+        "mcp_tool"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "creds": [
+        "crm_cred",
+        "owner_cred"
+      ],
+      "fail_creds": [
+        "crm_cred",
+        "owner_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, mcp_tool"
+    },
+    {
+      "wf": "business.support_ticket_triage",
+      "cat": "business",
+      "steps": 3,
+      "caps": [
+        "email",
+        "ai_reasoning",
+        "mcp_tool",
+        "communication"
+      ],
+      "missing_caps": [
+        "email",
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "creds": [
+        "mail_cred",
+        "tracker_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "mail_cred",
+        "tracker_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: email, ai_reasoning, mcp_tool"
+    },
+    {
+      "wf": "communication.chat_assistant",
+      "cat": "communication",
+      "steps": 5,
+      "caps": [
+        "communication",
+        "ai_reasoning",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "channel_cred",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "channel_cred",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "communication.escalation_alert",
+      "cat": "communication",
+      "steps": 3,
+      "caps": [
+        "communication",
+        "memory",
+        "workflow"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "tier_credentials"
+      ],
+      "fail_creds": [
+        "tier_credentials"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: tier_credentials"
+    },
+    {
+      "wf": "communication.notify",
+      "cat": "communication",
+      "steps": 2,
+      "caps": [
+        "communication"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "channel_credential"
+      ],
+      "fail_creds": [
+        "channel_credential"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: channel_credential"
+    },
+    {
+      "wf": "communication.voice_assistant",
+      "cat": "communication",
+      "steps": 4,
+      "caps": [
+        "communication",
+        "ai_reasoning",
+        "memory",
+        "media"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "media"
+      ],
+      "creds": [
+        "channel_cred",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "channel_cred",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, media"
+    },
+    {
+      "wf": "communication.workflow_failure_alert",
+      "cat": "communication",
+      "steps": 2,
+      "caps": [
+        "communication"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "channel_credential"
+      ],
+      "fail_creds": [
+        "channel_credential"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: channel_credential"
+    },
+    {
+      "wf": "data.api_poll_to_store",
+      "cat": "data",
+      "steps": 3,
+      "caps": [
+        "filesystem",
+        "knowledge",
+        "memory"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "api_cred",
+        "store_cred"
+      ],
+      "fail_creds": [
+        "api_cred",
+        "store_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: api_cred, store_cred"
+    },
+    {
+      "wf": "data.csv_pii_scrub",
+      "cat": "data",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "data.file_extract_to_csv",
+      "cat": "data",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "data.form_intake",
+      "cat": "data",
+      "steps": 4,
+      "caps": [
+        "filesystem",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "google_oauth",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "google_oauth",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "data.json_transform",
+      "cat": "data",
+      "steps": 2,
+      "caps": [
+        "workflow"
+      ],
+      "missing_caps": [],
+      "creds": [],
+      "fail_creds": [],
+      "step_issues": [],
+      "status": "PREFLIGHT_PASS",
+      "reason": "All resolved"
+    },
+    {
+      "wf": "data.knowledge_base_sync",
+      "cat": "data",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "creds": [
+        "kb_cred",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "kb_cred",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, mcp_tool"
+    },
+    {
+      "wf": "data.record_sync",
+      "cat": "data",
+      "steps": 3,
+      "caps": [
+        "mcp_tool",
+        "memory"
+      ],
+      "missing_caps": [
+        "mcp_tool"
+      ],
+      "creds": [
+        "system_a_cred",
+        "system_b_cred"
+      ],
+      "fail_creds": [
+        "system_a_cred",
+        "system_b_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: mcp_tool"
+    },
+    {
+      "wf": "data.webhook_to_store",
+      "cat": "data",
+      "steps": 4,
+      "caps": [
+        "filesystem",
+        "knowledge",
+        "workflow"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "store_cred",
+        "webhook_secret"
+      ],
+      "fail_creds": [
+        "store_cred",
+        "webhook_secret"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: store_cred, webhook_secret"
+    },
+    {
+      "wf": "development.ci_failure_alert",
+      "cat": "development",
+      "steps": 3,
+      "caps": [
+        "github",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider",
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider",
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github, ai_reasoning"
+    },
+    {
+      "wf": "development.dependency_monitor",
+      "cat": "development",
+      "steps": 4,
+      "caps": [
+        "github",
+        "http",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github, ai_reasoning"
+    },
+    {
+      "wf": "development.github_issue_triage",
+      "cat": "development",
+      "steps": 4,
+      "caps": [
+        "github",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github, ai_reasoning"
+    },
+    {
+      "wf": "development.issue_to_implementation",
+      "cat": "development",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "github",
+        "terminal"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "github"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, github"
+    },
+    {
+      "wf": "development.pr_review_prep",
+      "cat": "development",
+      "steps": 3,
+      "caps": [
+        "github",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github, ai_reasoning"
+    },
+    {
+      "wf": "development.release_changelog",
+      "cat": "development",
+      "steps": 3,
+      "caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "missing_caps": [
+        "github",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github, ai_reasoning"
+    },
+    {
+      "wf": "development.repo_backup",
+      "cat": "development",
+      "steps": 4,
+      "caps": [
+        "github",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "github"
+      ],
+      "creds": [
+        "source_cred",
+        "dest_cred"
+      ],
+      "fail_creds": [
+        "source_cred",
+        "dest_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: github"
+    },
+    {
+      "wf": "development.repo_health_report",
+      "cat": "development",
+      "steps": 5,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "communication",
+        "github"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "github"
+      ],
+      "creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "github_token",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, github"
+    },
+    {
+      "wf": "development.scaffold_project",
+      "cat": "development",
+      "steps": 4,
+      "caps": [
+        "code_project",
+        "filesystem",
+        "terminal"
+      ],
+      "missing_caps": [],
+      "creds": [],
+      "fail_creds": [],
+      "step_issues": [],
+      "status": "PREFLIGHT_PASS",
+      "reason": "All resolved"
+    },
+    {
+      "wf": "files.document_summarize",
+      "cat": "files",
+      "steps": 3,
+      "caps": [
+        "filesystem",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider",
+        "notify_channel_cred"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "notify_channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "files.download_folder_organizer",
+      "cat": "files",
+      "steps": 3,
+      "caps": [
+        "filesystem",
+        "ai_reasoning"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [],
+      "fail_creds": [],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "files.drive_to_social",
+      "cat": "files",
+      "steps": 4,
+      "caps": [
+        "filesystem",
+        "media"
+      ],
+      "missing_caps": [
+        "media"
+      ],
+      "creds": [
+        "drive_cred"
+      ],
+      "fail_creds": [
+        "drive_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: media"
+    },
+    {
+      "wf": "files.duplicate_detector",
+      "cat": "files",
+      "steps": 3,
+      "caps": [
+        "artifact",
+        "filesystem",
+        "terminal"
+      ],
+      "missing_caps": [],
+      "creds": [],
+      "fail_creds": [],
+      "step_issues": [],
+      "status": "PREFLIGHT_PASS",
+      "reason": "All resolved"
+    },
+    {
+      "wf": "files.invoice_extract_to_sheet",
+      "cat": "files",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "filesystem",
+        "workflow"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "media.content_repurpose",
+      "cat": "media",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "media",
+        "communication",
+        "workflow"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "media"
+      ],
+      "creds": [
+        "llm_provider",
+        "platform_creds"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "platform_creds"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, media"
+    },
+    {
+      "wf": "monitoring.inbox_monitor",
+      "cat": "monitoring",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "email",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "email"
+      ],
+      "creds": [
+        "mail_cred",
+        "llm_provider",
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "mail_cred",
+        "llm_provider",
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, email"
+    },
+    {
+      "wf": "monitoring.rss_news_monitor",
+      "cat": "monitoring",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "knowledge",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "monitoring.security_scan_alert",
+      "cat": "monitoring",
+      "steps": 3,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "knowledge"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "scanner_creds",
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "scanner_creds",
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "monitoring.website_uptime",
+      "cat": "monitoring",
+      "steps": 3,
+      "caps": [
+        "communication",
+        "knowledge",
+        "memory"
+      ],
+      "missing_caps": [],
+      "creds": [
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CREDENTIAL",
+      "reason": "Missing creds: notify_cred"
+    },
+    {
+      "wf": "productivity.calendar_to_status",
+      "cat": "productivity",
+      "steps": 2,
+      "caps": [
+        "calendar",
+        "communication"
+      ],
+      "missing_caps": [
+        "calendar"
+      ],
+      "creds": [
+        "calendar_cred",
+        "status_cred"
+      ],
+      "fail_creds": [
+        "calendar_cred",
+        "status_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: calendar"
+    },
+    {
+      "wf": "productivity.ecosystem_briefing",
+      "cat": "productivity",
+      "steps": 5,
+      "caps": [
+        "ai_reasoning",
+        "calendar",
+        "communication",
+        "email",
+        "filesystem"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "calendar",
+        "email"
+      ],
+      "creds": [
+        "google_oauth",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "google_oauth",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, calendar, email"
+    },
+    {
+      "wf": "productivity.email_label_ai",
+      "cat": "productivity",
+      "steps": 2,
+      "caps": [
+        "email",
+        "ai_reasoning",
+        "memory"
+      ],
+      "missing_caps": [
+        "email",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "mail_cred",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "mail_cred",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: email, ai_reasoning"
+    },
+    {
+      "wf": "productivity.email_to_calendar",
+      "cat": "productivity",
+      "steps": 3,
+      "caps": [
+        "email",
+        "ai_reasoning",
+        "calendar"
+      ],
+      "missing_caps": [
+        "email",
+        "ai_reasoning",
+        "calendar"
+      ],
+      "creds": [
+        "google_oauth",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "google_oauth",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: email, ai_reasoning, calendar"
+    },
+    {
+      "wf": "productivity.email_to_task",
+      "cat": "productivity",
+      "steps": 2,
+      "caps": [
+        "email",
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "missing_caps": [
+        "email",
+        "ai_reasoning",
+        "mcp_tool"
+      ],
+      "creds": [
+        "google_oauth",
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "google_oauth",
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: email, ai_reasoning, mcp_tool"
+    },
+    {
+      "wf": "productivity.meeting_prep",
+      "cat": "productivity",
+      "steps": 4,
+      "caps": [
+        "calendar",
+        "email",
+        "memory",
+        "ai_reasoning",
+        "communication"
+      ],
+      "missing_caps": [
+        "calendar",
+        "email",
+        "ai_reasoning"
+      ],
+      "creds": [
+        "google_oauth",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "google_oauth",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: calendar, email, ai_reasoning"
+    },
+    {
+      "wf": "productivity.morning_briefing",
+      "cat": "productivity",
+      "steps": 5,
+      "caps": [
+        "ai_reasoning",
+        "calendar",
+        "communication",
+        "knowledge",
+        "mcp_tool"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "calendar",
+        "mcp_tool"
+      ],
+      "creds": [
+        "calendar_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "calendar_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, calendar, mcp_tool"
+    },
+    {
+      "wf": "productivity.weekly_review",
+      "cat": "productivity",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "calendar",
+        "communication",
+        "mcp_tool",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "calendar",
+        "mcp_tool"
+      ],
+      "creds": [
+        "calendar_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "fail_creds": [
+        "calendar_cred",
+        "llm_provider",
+        "channel_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, calendar, mcp_tool"
+    },
+    {
+      "wf": "research.competitor_monitor",
+      "cat": "research",
+      "steps": 5,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "browser",
+        "communication",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "browser"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, browser"
+    },
+    {
+      "wf": "research.daily_brief",
+      "cat": "research",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "http",
+        "communication",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider",
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    },
+    {
+      "wf": "research.web_scrape_to_report",
+      "cat": "research",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "artifact",
+        "browser"
+      ],
+      "missing_caps": [
+        "ai_reasoning",
+        "browser"
+      ],
+      "creds": [
+        "llm_provider"
+      ],
+      "fail_creds": [
+        "llm_provider"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning, browser"
+    },
+    {
+      "wf": "research.youtube_summary",
+      "cat": "research",
+      "steps": 4,
+      "caps": [
+        "ai_reasoning",
+        "communication",
+        "knowledge",
+        "memory"
+      ],
+      "missing_caps": [
+        "ai_reasoning"
+      ],
+      "creds": [
+        "llm_provider",
+        "notify_cred"
+      ],
+      "fail_creds": [
+        "llm_provider",
+        "notify_cred"
+      ],
+      "step_issues": [],
+      "status": "BLOCKED_MISSING_CAPABILITY",
+      "reason": "Missing: ai_reasoning"
+    }
+  ]
+}
