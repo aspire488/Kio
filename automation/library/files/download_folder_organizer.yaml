@@ -1,0 +1,62 @@
+id: files.download_folder_organizer
+name: Downloads Folder Organizer
+description: >
+  Watches the downloads folder, classifies each new file by type/content, renames
+  it to a consistent scheme, and moves it into the right subfolder. Moves are
+  verified (file exists at destination) and reversible via a move log.
+category: files
+version: 1.0.0
+tags: [filesystem, organize, watcher]
+trigger:
+  type: file_watch
+  watch_path: "~/Downloads"
+config:
+  - { name: dest_root, type: file_path, default: "~/Documents/Sorted", required: false, description: "Root of sorted folders" }
+  - { name: rules, type: object, default: {images: [png, jpg, jpeg], docs: [pdf, docx], sheets: [xlsx, csv]}, required: false, description: "ext -> folder map" }
+  - { name: use_ai_classify, type: boolean, default: false, required: false, description: "Use AI for ambiguous files" }
+capabilities_required: [filesystem, ai_reasoning]
+providers_required: []
+credentials_required:
+  - { name: none, type: none }
+steps:
+  - id: classify
+    capability: filesystem
+    action: classify_file
+    description: "Determine target folder by extension rules, optionally AI for unknowns."
+    inputs: { file_path: "{{ trigger.file_path }}", rules: "{{ config.rules }}", ai: "{{ config.use_ai_classify }}" }
+    outputs: [category, new_name]
+  - id: move
+    capability: filesystem
+    action: move_file
+    description: "Move+rename into dest_root/category. Records to move log for undo."
+    inputs: { src: "{{ trigger.file_path }}", dest: "{{ config.dest_root }}", name: "{{ steps.classify.new_name }}", folder: "{{ steps.classify.category }}" }
+    outputs: [dest_path]
+    depends_on: [classify]
+    on_error: { retry: { max: 2, backoff: fixed }, fallback: notify }
+  - id: verify
+    capability: filesystem
+    action: verify_path
+    inputs: { path: "{{ steps.move.dest_path }}" }
+    outputs: [verified]
+    depends_on: [move]
+outputs:
+  - { name: sorted_path, from: "{{ steps.move.dest_path }}", description: "Where the file landed" }
+verification:
+  - type: filesystem
+    check: file_exists_at_destination
+    asserts: ["destination file exists", "source no longer present", "size unchanged"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.file_path }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 5, est_peak_ram_mb: 60, network: false, spawns_process: false }
+provenance:
+  pattern_family: "Watch folder, classify, move"
+  derived_from:
+    - { source: "n8n local-file / Google-Drive organizer templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+    - { source: "Huginn file-watch agents", url: "https://github.com/huginn/huginn", license: "MIT", reuse: reference }
+  license: MIT
+  portability_notes: "Adds a reversible move log + destination verification; file moves are gated as consequential."

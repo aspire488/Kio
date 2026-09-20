@@ -1,0 +1,56 @@
+id: data.json_transform
+name: JSON Transform / Reshape
+description: >
+  Takes an input JSON array, applies a declarative transform (map/filter/aggregate/
+  split/join) and emits reshaped output. The workhorse behind many pipelines that in
+  n8n are a tangle of Set/Function/SplitOut/Aggregate nodes.
+category: data
+version: 1.0.0
+tags: [json, transform, etl, reshape]
+trigger:
+  type: manual
+  nl_examples:
+    - "transform this json: {spec}"
+    - "reshape this data"
+inputs:
+  - { name: data, type: array, required: true, description: "Input records" }
+  - { name: transform, type: object, required: true, description: "Declarative transform spec" }
+config:
+  - { name: output_format, type: enum, enum_values: [json, csv], default: json, required: false, description: "Emit as" }
+capabilities_required: [workflow]
+providers_required: []
+credentials_required:
+  - { name: none, type: none }
+steps:
+  - id: apply
+    capability: workflow
+    action: transform_records
+    inputs: { data: "{{ inputs.data }}", transform: "{{ inputs.transform }}" }
+    outputs: [result, row_count]
+    on_error: { fallback: abort }
+  - id: verify
+    capability: workflow
+    action: verify_shape
+    inputs: { result: "{{ steps.apply.result }}", transform: "{{ inputs.transform }}" }
+    outputs: [verified]
+    depends_on: [apply]
+outputs:
+  - { name: result, from: "{{ steps.apply.result }}" }
+  - { name: row_count, from: "{{ steps.apply.row_count }}" }
+verification:
+  - type: data_shape
+    check: transform_valid
+    asserts: ["output conforms to transform's declared output schema", "no records silently dropped unless filter intended"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 0, backoff: none }
+  on_failure: notify_user
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 5, est_peak_ram_mb: 120, network: false, spawns_process: false }
+provenance:
+  pattern_family: "Declarative data reshape"
+  derived_from:
+    - { source: "Zie619/n8n-workflows: pervasive SplitOut/Aggregate/Set/Function glue (splitout 355, aggregate 209)", url: "https://github.com/Zie619/n8n-workflows", license: "MIT (aggregation)", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Collapses n8n's node-tangle transform idiom into one declarative KIO step."

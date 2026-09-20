@@ -1,0 +1,65 @@
+id: research.daily_brief
+name: Configurable Daily Research Brief
+description: >
+  For a set of topics, runs web research on a schedule, ranks and dedupes findings,
+  summarizes with sources, and delivers a brief at a configured time/channel.
+category: research
+version: 1.0.0
+tags: [research, brief, scheduled, digest]
+trigger:
+  type: schedule
+  cron: "0 7 * * *"
+config:
+  - { name: topics, type: array, required: true, description: "Topics to research" }
+  - { name: depth, type: enum, enum_values: [headlines, standard, deep], default: standard, required: false, description: "How deep" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Delivery channel" }
+capabilities_required: [ai_reasoning, http, communication, memory]
+providers_required: [llm]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: notify_cred, type: bot_token, description: "Delivery token" }
+steps:
+  - id: research
+    capability: ai_reasoning
+    action: research_topics
+    inputs: { topics: "{{ config.topics }}", depth: "{{ config.depth }}" }
+    outputs: [findings, sources]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: dedupe
+    capability: memory
+    action: filter_new
+    inputs: { key: "research-brief", items: "{{ steps.research.findings }}" }
+    outputs: [fresh]
+    depends_on: [research]
+  - id: compose
+    capability: ai_reasoning
+    action: compose_brief
+    inputs: { findings: "{{ steps.dedupe.fresh }}", sources: "{{ steps.research.sources }}" }
+    outputs: [brief]
+    depends_on: [dedupe]
+  - id: deliver
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.notify_channel }}", brief: "{{ steps.compose.brief }}" }
+    outputs: [delivery_id]
+    depends_on: [compose]
+outputs:
+  - { name: brief, from: "{{ steps.compose.brief }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["brief delivered with message id", "sources included", "repeat items across days suppressed"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "brief-{{ today }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 90, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Scheduled topic research -> brief"
+  derived_from:
+    - { source: "n8n research/news-digest templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Cross-day dedupe so the brief stays fresh; always cites sources."

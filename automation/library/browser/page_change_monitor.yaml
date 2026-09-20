@@ -1,0 +1,71 @@
+id: browser.page_change_monitor
+name: Web Page Change Monitor
+description: >
+  On a schedule, loads a URL in a real browser, extracts a target region (CSS
+  selector or full text), diffs it against the last snapshot, and alerts only on
+  meaningful change. Browser state is observable and the diff is stored.
+category: browser
+version: 1.0.0
+tags: [browser, monitor, diff, playwright]
+trigger:
+  type: schedule
+  cron: "0 */6 * * *"
+config:
+  - { name: url, type: url, required: true, description: "Page to watch" }
+  - { name: selector, type: string, default: "body", required: false, description: "CSS selector of region to track" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Alert channel" }
+  - { name: min_change_pct, type: number, default: 2, required: false, description: "Ignore changes smaller than this %" }
+capabilities_required: [browser, ai_reasoning, communication, memory]
+providers_required: [playwright, llm]
+credentials_required:
+  - { name: notify_cred, type: bot_token, description: "Channel token" }
+steps:
+  - id: load
+    capability: browser
+    action: fetch_region
+    description: "Open URL, wait for load, extract selector text/html. Observable tab."
+    inputs: { url: "{{ config.url }}", selector: "{{ config.selector }}" }
+    outputs: [snapshot]
+    on_error: { retry: { max: 2, backoff: exponential }, timeout_seconds: 60, fallback: notify }
+  - id: diff
+    capability: memory
+    action: diff_against_last
+    inputs: { key: "{{ config.url }}", snapshot: "{{ steps.load.snapshot }}", min_pct: "{{ config.min_change_pct }}" }
+    outputs: [changed, change_pct, diff_text]
+    depends_on: [load]
+  - id: summarize
+    capability: ai_reasoning
+    action: summarize_change
+    when: "{{ steps.diff.changed }} == true"
+    inputs: { diff: "{{ steps.diff.diff_text }}" }
+    outputs: [summary]
+    depends_on: [diff]
+  - id: alert
+    capability: communication
+    action: send_message
+    when: "{{ steps.diff.changed }} == true"
+    inputs: { channel: "{{ config.notify_channel }}", summary: "{{ steps.summarize.summary }}", url: "{{ config.url }}" }
+    outputs: [delivery_id]
+    depends_on: [summarize]
+outputs:
+  - { name: changed, from: "{{ steps.diff.changed }}" }
+  - { name: summary, from: "{{ steps.summarize.summary }}" }
+verification:
+  - type: browser_state
+    check: page_loaded
+    asserts: ["page reached loaded state", "selector matched at least once", "snapshot non-empty"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ config.url }}-{{ today }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 400, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Scheduled page diff + alert"
+  derived_from:
+    - { source: "n8n website-change / HTTP-diff templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+    - { source: "changedetection.io pattern", url: "https://github.com/dgtlmoon/changedetection.io", license: "Apache-2.0", reuse: reference }
+  license: MIT
+  portability_notes: "Uses a real browser (JS-rendered pages) and verifies load state, not just HTTP 200."

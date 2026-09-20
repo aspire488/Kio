@@ -1,0 +1,69 @@
+id: media.content_repurpose
+name: Content Repurpose & Multi-Platform Publish
+description: >
+  Takes one source (blog post, video, doc) and generates platform-tailored variants
+  (LinkedIn, X, Instagram caption, newsletter blurb), then queues them for approval
+  and publishes to the selected platforms.
+category: media
+version: 1.0.0
+tags: [media, social, content, repurpose, publishing]
+trigger:
+  type: natural_language
+  nl_examples: ["repurpose this post for social", "turn {source} into platform content"]
+inputs:
+  - { name: source, type: string, required: true, description: "Source content or URL" }
+config:
+  - { name: platforms, type: array, default: [linkedin, x, instagram], required: true, description: "Targets" }
+  - { name: auto_publish, type: boolean, default: false, required: false, description: "Publish without approval (off by default)" }
+capabilities_required: [ai_reasoning, media, communication, workflow]
+providers_required: [llm]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: platform_creds, type: oauth2, scopes: ["publish"], description: "Per-platform publishing auth" }
+steps:
+  - id: adapt
+    capability: ai_reasoning
+    action: adapt_per_platform
+    inputs: { source: "{{ inputs.source }}", platforms: "{{ config.platforms }}" }
+    outputs: [variants]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: approve
+    capability: workflow
+    action: request_approval
+    when: "{{ config.auto_publish }} == false"
+    inputs: { variants: "{{ steps.adapt.variants }}" }
+    outputs: [approved_variants]
+    depends_on: [adapt]
+  - id: publish
+    capability: media
+    action: publish
+    inputs: { variants: "{{ steps.approve.approved_variants }}", platforms: "{{ config.platforms }}" }
+    outputs: [post_urls]
+    depends_on: [approve]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: media
+    action: verify_posts
+    inputs: { post_urls: "{{ steps.publish.post_urls }}" }
+    outputs: [verified]
+    depends_on: [publish]
+outputs:
+  - { name: post_urls, from: "{{ steps.publish.post_urls }}" }
+verification:
+  - type: http_response
+    check: posts_live
+    asserts: ["each post URL resolves/live", "nothing published without approval when auto_publish off"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ inputs.source }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "One source -> per-platform variants -> publish"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Automated Social Media Content Publishing Factory', 'Automate LinkedIn Posts with AI', 'google drive to instagram/tiktok/youtube'", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Publishing is consequential + approval-gated by default; verifies posts are live."

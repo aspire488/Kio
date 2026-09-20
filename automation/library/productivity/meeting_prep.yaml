@@ -1,0 +1,68 @@
+id: productivity.meeting_prep
+name: Meeting Prep Pack
+description: >
+  Before an upcoming meeting, gathers context (attendee history, related emails,
+  linked docs, last meeting's action items) and produces a one-page prep brief.
+category: productivity
+version: 1.0.0
+tags: [productivity, meeting, prep, context]
+trigger:
+  type: schedule
+  cron: "*/15 * * * *"
+config:
+  - { name: lead_minutes, type: number, default: 60, required: false, description: "How far ahead to prep" }
+  - { name: delivery_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Where to send prep" }
+capabilities_required: [calendar, email, memory, ai_reasoning, communication]
+providers_required: [google_calendar, gmail, llm]
+credentials_required:
+  - { name: google_oauth, type: oauth2, scopes: ["calendar.readonly", "gmail.readonly"], description: "Google account" }
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: channel_cred, type: bot_token, description: "Delivery token" }
+steps:
+  - id: upcoming
+    capability: calendar
+    action: upcoming_within
+    inputs: { minutes: "{{ config.lead_minutes }}" }
+    outputs: [meeting]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: context
+    capability: memory
+    action: gather_context
+    when: "{{ steps.upcoming.meeting }}"
+    inputs: { attendees: "{{ steps.upcoming.meeting }}" }
+    outputs: [history, related_mail, last_actions]
+    depends_on: [upcoming]
+  - id: brief
+    capability: ai_reasoning
+    action: compose_prep
+    when: "{{ steps.upcoming.meeting }}"
+    inputs: { meeting: "{{ steps.upcoming.meeting }}", history: "{{ steps.context.history }}", mail: "{{ steps.context.related_mail }}", actions: "{{ steps.context.last_actions }}" }
+    outputs: [prep]
+    depends_on: [context]
+  - id: deliver
+    capability: communication
+    action: send_message
+    when: "{{ steps.upcoming.meeting }}"
+    inputs: { channel: "{{ config.delivery_channel }}", prep: "{{ steps.brief.prep }}" }
+    outputs: [delivery_id]
+    depends_on: [brief]
+outputs:
+  - { name: prep, from: "{{ steps.brief.prep }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["prep delivered before the meeting", "not sent twice for the same meeting"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "prep-{{ steps.upcoming.meeting }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 180, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Pre-meeting context assembly"
+  derived_from:
+    - { source: "n8n calendar-trigger + context templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Leverages KIO memory for attendee/thread history; idempotent per meeting."

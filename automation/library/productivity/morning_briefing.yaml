@@ -1,0 +1,73 @@
+id: productivity.morning_briefing
+name: Morning Briefing (calendar + tasks + weather + news)
+description: >
+  A configurable personal morning brief that merges calendar, open tasks, weather
+  and a short news digest into one message, delivered at a set time.
+category: productivity
+version: 1.0.0
+tags: [productivity, briefing, morning, personal]
+trigger:
+  type: schedule
+  cron: "0 7 * * *"
+config:
+  - { name: location, type: string, required: false, description: "For weather" }
+  - { name: news_topics, type: array, default: [], required: false, description: "Optional headlines" }
+  - { name: delivery_channel, type: enum, enum_values: [telegram, slack], default: telegram, required: false, description: "Delivery channel" }
+capabilities_required: [calendar, mcp_tool, http, ai_reasoning, communication]
+providers_required: [llm]
+credentials_required:
+  - { name: calendar_cred, type: oauth2, scopes: ["calendar.readonly"], description: "Calendar access" }
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: channel_cred, type: bot_token, description: "Delivery token" }
+steps:
+  - id: cal
+    capability: calendar
+    action: today_events
+    inputs: { window: "today" }
+    outputs: [events]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: tasks
+    capability: mcp_tool
+    action: due_tasks
+    inputs: { window: "today" }
+    outputs: [tasks]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: weather
+    capability: http
+    action: get_weather
+    when: "{{ config.location }}"
+    inputs: { location: "{{ config.location }}" }
+    outputs: [forecast]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: compose
+    capability: ai_reasoning
+    action: compose_briefing
+    inputs: { events: "{{ steps.cal.events }}", tasks: "{{ steps.tasks.tasks }}", weather: "{{ steps.weather.forecast }}", topics: "{{ config.news_topics }}" }
+    outputs: [briefing]
+    depends_on: [cal, tasks, weather]
+  - id: deliver
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.delivery_channel }}", text: "{{ steps.compose.briefing }}" }
+    outputs: [delivery_id]
+    depends_on: [compose]
+outputs:
+  - { name: briefing, from: "{{ steps.compose.briefing }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["briefing delivered with message id", "non-empty even if a source failed"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "morning-{{ today }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Personal morning briefing"
+  derived_from:
+    - { source: "n8n personal-assistant / daily-digest templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Source-tolerant; ties into KIO memory for personalization."

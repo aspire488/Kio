@@ -1,0 +1,61 @@
+id: communication.escalation_alert
+name: Tiered Escalation Alert
+description: >
+  Sends an alert to tier 1; if not acknowledged within a timeout, escalates to
+  tier 2, then tier 3. Tracks acknowledgement state so it stops on ack.
+category: communication
+version: 1.0.0
+tags: [alert, escalation, on-call]
+trigger:
+  type: event
+  nl_examples: ["escalate if {incident} is not acknowledged"]
+inputs:
+  - { name: incident, type: string, required: true, description: "What happened" }
+config:
+  - { name: tiers, type: array, default: [telegram, slack, email], required: true, description: "Ordered escalation channels/targets" }
+  - { name: ack_timeout_seconds, type: number, default: 600, required: false, description: "Wait before escalating" }
+capabilities_required: [communication, memory, workflow]
+providers_required: []
+credentials_required:
+  - { name: tier_credentials, type: bot_token, description: "Tokens for each tier target" }
+steps:
+  - id: notify_tier
+    capability: communication
+    action: send_with_ack
+    description: "Send to current tier; returns an ack handle."
+    inputs: { tier: "{{ loop.index }}", tiers: "{{ config.tiers }}", incident: "{{ inputs.incident }}" }
+    outputs: [delivery_id, ack_handle]
+    on_error: { retry: { max: 2, backoff: fixed }, fallback: skip }
+  - id: wait_ack
+    capability: workflow
+    action: wait_for_ack
+    inputs: { handle: "{{ steps.notify_tier.ack_handle }}", timeout: "{{ config.ack_timeout_seconds }}" }
+    outputs: [acknowledged]
+    depends_on: [notify_tier]
+  - id: escalate
+    capability: workflow
+    action: advance_tier_or_stop
+    description: "If acknowledged -> stop. Else loop to next tier until tiers exhausted."
+    inputs: { acknowledged: "{{ steps.wait_ack.acknowledged }}", tiers: "{{ config.tiers }}" }
+    outputs: [done, next_tier]
+    depends_on: [wait_ack]
+outputs:
+  - { name: acknowledged, from: "{{ steps.wait_ack.acknowledged }}" }
+verification:
+  - type: communication_delivery
+    check: at_least_one_tier_delivered
+    asserts: ["first tier delivered", "escalation stops on ack", "no infinite loop past last tier"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: fixed }
+  on_failure: notify_admin
+  idempotency_key: "{{ inputs.incident }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 80, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Tiered escalation with ack timeout"
+  derived_from:
+    - { source: "PagerDuty-style escalation pattern; n8n wait/webhook templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Adds explicit ack tracking and a hard stop after the last tier."

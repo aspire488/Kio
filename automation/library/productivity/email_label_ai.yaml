@@ -1,0 +1,55 @@
+id: productivity.email_label_ai
+name: AI Inbox Auto-Labelling
+description: >
+  Classifies incoming email into your label taxonomy (newsletters, receipts,
+  clients, action-needed) and applies the label, learning from corrections over
+  time. Read-mostly: it labels, it does not delete or reply.
+category: productivity
+version: 1.0.0
+tags: [email, labels, inbox, ai, organization]
+trigger:
+  type: email_received
+  nl_examples: ["auto-label my inbox", "organize incoming email with AI"]
+config:
+  - { name: labels, type: array, required: true, description: "Your label taxonomy" }
+  - { name: provider, type: enum, enum_values: [gmail, outlook], default: gmail, required: false, description: "Mail provider" }
+capabilities_required: [email, ai_reasoning, memory]
+providers_required: [llm]
+credentials_required:
+  - { name: mail_cred, type: oauth2, scopes: ["mail.modify"], description: "Label write access" }
+  - { name: llm_provider, type: llm, description: "Classifier" }
+steps:
+  - id: classify
+    capability: ai_reasoning
+    action: classify
+    inputs: { subject: "{{ trigger.subject }}", body: "{{ trigger.body }}", from: "{{ trigger.from }}", labels: "{{ config.labels }}", corrections: "{{ memory.label_corrections }}" }
+    outputs: [label, confidence]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: apply
+    capability: email
+    action: apply_label
+    when: "{{ steps.classify.confidence }} >= 0.6"
+    inputs: { provider: "{{ config.provider }}", message_id: "{{ trigger.message_id }}", label: "{{ steps.classify.label }}" }
+    outputs: [applied]
+    depends_on: [classify]
+    on_error: { retry: { max: 2, backoff: fixed }, fallback: notify }
+outputs:
+  - { name: label, from: "{{ steps.classify.label }}" }
+verification:
+  - type: data_shape
+    check: label_applied
+    asserts: ["message re-fetched shows the label", "low-confidence left unlabelled for review", "no destructive action taken"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: silent_log
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 8, est_peak_ram_mb: 120, network: true, spawns_process: false }
+provenance:
+  pattern_family: "AI email labelling"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Basic Automatic Gmail Email Labelling with OpenAI', 'Auto Categorise Outlook Emails with AI' (email|ai_reasoning)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Learns from user label corrections via memory; strictly non-destructive."

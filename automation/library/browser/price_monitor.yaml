@@ -1,0 +1,61 @@
+id: browser.price_monitor
+name: Product Price Monitor
+description: >
+  Tracks a product price on a schedule, parses the price from the page, records
+  history, and alerts when it crosses a target threshold or drops by a percentage.
+category: browser
+version: 1.0.0
+tags: [browser, price, monitor, alert]
+trigger:
+  type: schedule
+  cron: "0 */4 * * *"
+config:
+  - { name: url, type: url, required: true, description: "Product page" }
+  - { name: price_selector, type: string, required: false, description: "CSS selector for the price (auto-detect if empty)" }
+  - { name: target_price, type: number, required: false, description: "Alert at or below this" }
+  - { name: drop_pct, type: number, default: 10, required: false, description: "Alert on this % drop" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Alert channel" }
+capabilities_required: [browser, memory, communication]
+providers_required: [playwright]
+credentials_required:
+  - { name: notify_cred, type: bot_token, description: "Channel token" }
+steps:
+  - id: read
+    capability: browser
+    action: extract_price
+    inputs: { url: "{{ config.url }}", selector: "{{ config.price_selector }}" }
+    outputs: [price, currency]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: track
+    capability: memory
+    action: record_and_compare
+    inputs: { key: "{{ config.url }}", value: "{{ steps.read.price }}", target: "{{ config.target_price }}", drop_pct: "{{ config.drop_pct }}" }
+    outputs: [triggered, previous, history]
+    depends_on: [read]
+  - id: alert
+    capability: communication
+    action: send_message
+    when: "{{ steps.track.triggered }} == true"
+    inputs: { channel: "{{ config.notify_channel }}", price: "{{ steps.read.price }}", was: "{{ steps.track.previous }}", url: "{{ config.url }}" }
+    outputs: [delivery_id]
+    depends_on: [track]
+outputs:
+  - { name: price, from: "{{ steps.read.price }}" }
+  - { name: triggered, from: "{{ steps.track.triggered }}" }
+verification:
+  - type: browser_state
+    check: price_parsed
+    asserts: ["a numeric price was extracted", "currency detected", "history updated"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_user
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 25, est_peak_ram_mb: 400, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Scheduled price scrape + threshold alert"
+  derived_from:
+    - { source: "n8n price-tracking templates (very common)", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Keeps price history and verifies a numeric parse; won't alert on a failed scrape."

@@ -1,0 +1,62 @@
+id: ai.rag_answer
+name: RAG Answer over Knowledge Base
+description: >
+  Answers a question by retrieving relevant chunks from a vector store, grounding
+  the LLM on them, and returning an answer with citations. Refuses/deflects when
+  retrieval confidence is low instead of hallucinating.
+category: ai
+version: 1.0.0
+tags: [ai, rag, retrieval, qa, vectorstore]
+trigger:
+  type: natural_language
+  nl_examples: ["ask my docs: {question}", "what do my notes say about {topic}"]
+inputs:
+  - { name: question, type: string, required: true, description: "User question" }
+config:
+  - { name: vector_store, type: string, required: true, description: "Vector store id (e.g. qdrant collection)" }
+  - { name: top_k, type: number, default: 6, required: false, description: "Chunks to retrieve" }
+  - { name: min_score, type: number, default: 0.3, required: false, description: "Retrieval floor before answering" }
+capabilities_required: [ai_reasoning, http, memory]
+providers_required: [llm, vectorstore]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Answer + embedding model" }
+  - { name: vectorstore_cred, type: api_key, description: "Vector store access" }
+steps:
+  - id: embed
+    capability: ai_reasoning
+    action: embed
+    inputs: { text: "{{ inputs.question }}" }
+    outputs: [vector]
+    on_error: { retry: { max: 1 }, fallback: abort }
+  - id: retrieve
+    capability: http
+    action: vector_search
+    inputs: { store: "{{ config.vector_store }}", vector: "{{ steps.embed.vector }}", top_k: "{{ config.top_k }}" }
+    outputs: [chunks, top_score]
+    depends_on: [embed]
+  - id: answer
+    capability: ai_reasoning
+    action: grounded_answer
+    inputs: { question: "{{ inputs.question }}", chunks: "{{ steps.retrieve.chunks }}", top_score: "{{ steps.retrieve.top_score }}", min_score: "{{ config.min_score }}" }
+    outputs: [answer, citations, grounded]
+    depends_on: [retrieve]
+outputs:
+  - { name: answer, from: "{{ steps.answer.answer }}" }
+  - { name: citations, from: "{{ steps.answer.citations }}" }
+verification:
+  - type: data_shape
+    check: grounded_answer
+    asserts: ["answer cites retrieved chunks", "low-retrieval-score questions get a deflection not a hallucination"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 12, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Retrieval-augmented QA"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Tax Code Assistant with Qdrant/Mistral', 'RAG Chatbot with Qdrant' (ai_reasoning+http families)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Adds a retrieval-confidence floor so it deflects rather than fabricates."

@@ -1,0 +1,65 @@
+id: business.support_ticket_triage
+name: Support Ticket Triage & Route
+description: >
+  Classifies inbound support messages by topic/urgency/sentiment, drafts a
+  suggested reply, creates/updates a ticket in the tracker, and routes urgent ones
+  to the on-call channel.
+category: business
+version: 1.0.0
+tags: [support, triage, ticketing, ai]
+trigger:
+  type: email_received
+  nl_examples: ["triage support emails", "route incoming support requests"]
+config:
+  - { name: tracker, type: enum, enum_values: [linear, jira, notion, airtable], default: linear, required: true, description: "Ticket tracker" }
+  - { name: urgent_channel, type: enum, enum_values: [telegram, slack], default: slack, required: false, description: "Escalation channel" }
+capabilities_required: [email, ai_reasoning, mcp_tool, communication]
+providers_required: [llm]
+mcp_servers_required: [linear]
+credentials_required:
+  - { name: mail_cred, type: oauth2, scopes: ["mail.read"], description: "Inbox access" }
+  - { name: tracker_cred, type: api_key, description: "Tracker access" }
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: channel_cred, type: bot_token, description: "Escalation token" }
+steps:
+  - id: classify
+    capability: ai_reasoning
+    action: triage_ticket
+    inputs: { subject: "{{ trigger.subject }}", body: "{{ trigger.body }}", from: "{{ trigger.from }}" }
+    outputs: [topic, urgency, sentiment, suggested_reply]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: ticket
+    capability: mcp_tool
+    action: upsert_ticket
+    inputs: { tracker: "{{ config.tracker }}", topic: "{{ steps.classify.topic }}", urgency: "{{ steps.classify.urgency }}", body: "{{ trigger.body }}" }
+    outputs: [ticket_id]
+    depends_on: [classify]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: escalate
+    capability: communication
+    action: send_message
+    when: "{{ steps.classify.urgency }} == high"
+    inputs: { channel: "{{ config.urgent_channel }}", ticket: "{{ steps.ticket.ticket_id }}", topic: "{{ steps.classify.topic }}" }
+    outputs: [delivery_id]
+    depends_on: [ticket]
+outputs:
+  - { name: ticket_id, from: "{{ steps.ticket.ticket_id }}" }
+  - { name: suggested_reply, from: "{{ steps.classify.suggested_reply }}" }
+verification:
+  - type: data_shape
+    check: ticket_created
+    asserts: ["ticket re-fetched by id", "urgent tickets escalated", "reply is a DRAFT, not auto-sent"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Support intake -> classify -> ticket -> route"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Customer Support Channel and Ticketing System with Slack and Linear' (schedule|ai_reasoning+communication)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Reply stays a draft for human send; ticket creation verified + consequential."

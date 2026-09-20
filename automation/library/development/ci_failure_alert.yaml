@@ -1,0 +1,60 @@
+id: development.ci_failure_alert
+name: CI Failure Triage & Alert
+description: >
+  When a CI run fails, pulls the failing job logs, extracts the root error, groups
+  it against recent failures, and sends a concise actionable alert (not the raw log).
+category: development
+version: 1.0.0
+tags: [ci, github-actions, alert]
+trigger:
+  type: event
+  nl_examples: ["alert me when CI fails on {repo}"]
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Alert channel" }
+capabilities_required: [github, ai_reasoning, communication]
+providers_required: [llm]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo, actions], description: "Read CI logs" }
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: notify_cred, type: bot_token, description: "Channel token" }
+steps:
+  - id: logs
+    capability: github
+    action: get_run_logs
+    inputs: { repo: "{{ config.repo }}", run_id: "{{ trigger.run_id }}" }
+    outputs: [logs, failed_job]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: diagnose
+    capability: ai_reasoning
+    action: extract_error
+    inputs: { logs: "{{ steps.logs.logs }}" }
+    outputs: [root_error, likely_cause, suggested_fix]
+    depends_on: [logs]
+  - id: alert
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.notify_channel }}", error: "{{ steps.diagnose.root_error }}", fix: "{{ steps.diagnose.suggested_fix }}", job: "{{ steps.logs.failed_job }}" }
+    outputs: [delivery_id]
+    depends_on: [diagnose]
+outputs:
+  - { name: root_error, from: "{{ steps.diagnose.root_error }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["alert delivered with message id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "{{ config.repo }}-{{ trigger.run_id }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 25, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "CI failure -> diagnose -> alert"
+  derived_from:
+    - { source: "n8n CI/webhook alert templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Sends a diagnosed cause + fix, not a raw log dump."

@@ -1,0 +1,72 @@
+id: research.competitor_monitor
+name: Competitor Monitor (weekly)
+description: >
+  Weekly, tracks a list of competitors across their blog/changelog/pricing/social,
+  detects meaningful changes, and produces a comparative report with what changed
+  and likely implications.
+category: research
+version: 1.0.0
+tags: [research, competitor, monitor, report]
+trigger:
+  type: schedule
+  cron: "0 9 * * 1"
+config:
+  - { name: competitors, type: array, required: true, description: "List of {name, urls[]}" }
+  - { name: output_dir, type: file_path, default: "~/KIO/reports", required: false, description: "Save location" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email, none], default: slack, required: false, description: "Where to send it" }
+capabilities_required: [browser, ai_reasoning, memory, artifact, communication]
+providers_required: [playwright, llm, python_docx]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: crawl
+    capability: browser
+    action: snapshot_sources
+    inputs: { competitors: "{{ config.competitors }}" }
+    outputs: [snapshots]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: diff
+    capability: memory
+    action: diff_snapshots
+    inputs: { key: "competitors", snapshots: "{{ steps.crawl.snapshots }}" }
+    outputs: [changes]
+    depends_on: [crawl]
+  - id: analyze
+    capability: ai_reasoning
+    action: analyze_competitive_changes
+    inputs: { changes: "{{ steps.diff.changes }}" }
+    outputs: [narrative]
+    depends_on: [diff]
+  - id: report
+    capability: artifact
+    action: render_docx
+    inputs: { title: "Competitor Watch", narrative: "{{ steps.analyze.narrative }}", changes: "{{ steps.diff.changes }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_path]
+    depends_on: [analyze]
+  - id: notify
+    capability: communication
+    action: send_file
+    when: "{{ config.notify_channel }} != none"
+    inputs: { channel: "{{ config.notify_channel }}", file: "{{ steps.report.file_path }}" }
+    outputs: [delivery_id]
+    depends_on: [report]
+outputs:
+  - { name: report, from: "{{ steps.report.file_path }}" }
+verification:
+  - type: artifact
+    check: docx_valid
+    asserts: ["report lists changes per competitor", "no-change competitors marked explicitly"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "competitors-{{ today }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 180, est_peak_ram_mb: 450, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Multi-source competitor diff -> report"
+  derived_from:
+    - { source: "n8n web-monitor + report templates (combined)", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Combines change-detection with an analyzed, verified report deliverable."

@@ -1,0 +1,72 @@
+id: development.repo_health_report
+name: Weekly Repository Health Report
+description: >
+  Weekly, aggregates stale issues/PRs, open-vs-closed velocity, CI pass rate,
+  dependency alerts and contributor activity into a single DOCX/Markdown report.
+category: development
+version: 1.0.0
+tags: [github, metrics, report, weekly]
+trigger:
+  type: schedule
+  cron: "0 9 * * 1"
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: output_dir, type: file_path, default: "~/KIO/reports", required: false, description: "Save location" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email, none], default: slack, required: false, description: "Where to send it" }
+capabilities_required: [github, ai_reasoning, artifact, communication]
+providers_required: [llm, python_docx]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "Repo access" }
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: gather
+    capability: github
+    action: repo_metrics
+    inputs: { repo: "{{ config.repo }}", window_days: 7 }
+    outputs: [metrics, stale_items, dep_alerts]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: abort }
+  - id: analyze
+    capability: ai_reasoning
+    action: summarize_health
+    inputs: { metrics: "{{ steps.gather.metrics }}", stale: "{{ steps.gather.stale_items }}", deps: "{{ steps.gather.dep_alerts }}" }
+    outputs: [narrative, recommendations]
+    depends_on: [gather]
+  - id: render
+    capability: artifact
+    action: render_docx
+    inputs: { title: "Repo Health", metrics: "{{ steps.gather.metrics }}", narrative: "{{ steps.analyze.narrative }}", recs: "{{ steps.analyze.recommendations }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_path]
+    depends_on: [analyze]
+  - id: verify
+    capability: artifact
+    action: verify_docx
+    inputs: { file_path: "{{ steps.render.file_path }}" }
+    outputs: [verified]
+    depends_on: [render]
+  - id: notify
+    capability: communication
+    action: send_file
+    inputs: { channel: "{{ config.notify_channel }}", file: "{{ steps.render.file_path }}" }
+    outputs: [delivery_id]
+    depends_on: [verify]
+    when: "{{ config.notify_channel }} != none"
+outputs:
+  - { name: report, from: "{{ steps.render.file_path }}" }
+verification:
+  - type: artifact
+    check: docx_valid
+    asserts: ["metrics table present", "recommendations section present"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_admin
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 250, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Scheduled metrics -> report -> deliver"
+  derived_from:
+    - { source: "n8n scheduled-report templates + GitHub metrics patterns", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Produces a verified DOCX deliverable, not just a chat message."

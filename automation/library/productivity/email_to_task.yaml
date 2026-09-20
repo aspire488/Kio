@@ -1,0 +1,54 @@
+id: productivity.email_to_task
+name: Actionable Email → Task
+description: >
+  Classifies whether an email requires action, extracts a task (title, due, priority)
+  and adds it to the configured task store, avoiding duplicates via idempotency.
+category: productivity
+version: 1.0.0
+tags: [gmail, tasks, triage, google]
+trigger:
+  type: email_received
+  nl_examples: ["make tasks from action emails"]
+config:
+  - { name: task_store, type: enum, enum_values: [google_tasks, todoist, notion, memory], default: google_tasks, required: false, description: "Where tasks go" }
+  - { name: label_filter, type: string, default: "INBOX", required: false, description: "Label to watch" }
+capabilities_required: [email, ai_reasoning, mcp_tool]
+providers_required: [gmail, llm]
+credentials_required:
+  - { name: google_oauth, type: oauth2, scopes: ["gmail.readonly", "tasks"], description: "Google account" }
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: classify
+    capability: ai_reasoning
+    action: classify_actionable
+    inputs: { subject: "{{ trigger.subject }}", body: "{{ trigger.body }}", sender: "{{ trigger.from }}" }
+    outputs: [is_actionable, task_title, due, priority]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: add
+    capability: mcp_tool
+    action: create_task
+    when: "{{ steps.classify.is_actionable }} == true"
+    inputs: { store: "{{ config.task_store }}", title: "{{ steps.classify.task_title }}", due: "{{ steps.classify.due }}", priority: "{{ steps.classify.priority }}" }
+    outputs: [task_id]
+    depends_on: [classify]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+outputs:
+  - { name: task_id, from: "{{ steps.add.task_id }}" }
+verification:
+  - type: data_shape
+    check: task_created
+    asserts: ["task store returned a task id", "duplicate emails do not create duplicate tasks"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 15, est_peak_ram_mb: 120, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Email -> task"
+  derived_from:
+    - { source: "n8n Gmail-to-task / Todoist templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Idempotent on message id to prevent duplicate tasks."

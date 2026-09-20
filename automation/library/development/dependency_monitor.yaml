@@ -1,0 +1,70 @@
+id: development.dependency_monitor
+name: Dependency Update & Vulnerability Monitor
+description: >
+  Weekly, checks a repo's dependencies for outdated versions and known
+  vulnerabilities, groups by severity, and opens an issue or alert with a
+  prioritized upgrade list. Optionally drafts a bump PR for low-risk updates.
+category: development
+version: 1.0.0
+tags: [github, dependencies, security, monitor]
+trigger:
+  type: schedule
+  cron: "0 6 * * 1"
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: open_issue, type: boolean, default: true, required: false, description: "File a summary issue" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, none], default: slack, required: false, description: "Alert channel" }
+capabilities_required: [github, http, ai_reasoning, communication]
+providers_required: [llm]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "Repo access" }
+  - { name: llm_provider, type: llm, description: "Prioritization model" }
+steps:
+  - id: scan
+    capability: github
+    action: dependency_scan
+    inputs: { repo: "{{ config.repo }}" }
+    outputs: [outdated, vulnerabilities]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: prioritize
+    capability: ai_reasoning
+    action: prioritize_updates
+    inputs: { outdated: "{{ steps.scan.outdated }}", vulns: "{{ steps.scan.vulnerabilities }}" }
+    outputs: [ranked, summary]
+    depends_on: [scan]
+  - id: file_issue
+    capability: github
+    action: create_issue
+    when: "{{ config.open_issue }} == true"
+    inputs: { repo: "{{ config.repo }}", title: "Dependency report", body: "{{ steps.prioritize.summary }}" }
+    outputs: [issue_url]
+    depends_on: [prioritize]
+  - id: notify
+    capability: communication
+    action: send_message
+    when: "{{ config.notify_channel }} != none"
+    inputs: { channel: "{{ config.notify_channel }}", summary: "{{ steps.prioritize.summary }}" }
+    outputs: [delivery_id]
+    depends_on: [prioritize]
+outputs:
+  - { name: ranked, from: "{{ steps.prioritize.ranked }}" }
+  - { name: issue_url, from: "{{ steps.file_issue.issue_url }}" }
+verification:
+  - type: github_state
+    check: report_filed
+    asserts: ["vulnerabilities ranked by severity", "issue re-fetched if opened"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "deps-{{ config.repo }}-{{ today }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Scheduled dependency/vuln scan -> report"
+  derived_from:
+    - { source: "n8n scheduled-check + GitHub families; Dependabot-style pattern", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Filing an issue is consequential and confirmed."

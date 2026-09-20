@@ -1,0 +1,70 @@
+id: development.github_issue_triage
+name: GitHub Issue Triage
+description: >
+  On a new issue, classifies it (bug/feature/question/spam), suggests labels and
+  priority, drafts a clarifying comment when info is missing, and posts labels +
+  comment only after confirmation for consequential repos.
+category: development
+version: 1.0.0
+tags: [github, issues, triage]
+trigger:
+  type: event
+  nl_examples: ["triage new github issues on {repo}"]
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: auto_label, type: boolean, default: false, required: false, description: "Apply labels without asking" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, none], default: telegram, required: false, description: "Where to summarize" }
+capabilities_required: [github, ai_reasoning, communication]
+providers_required: [llm]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "GitHub PAT / app token" }
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: fetch
+    capability: github
+    action: get_issue
+    inputs: { repo: "{{ config.repo }}", issue: "{{ trigger.issue_number }}" }
+    outputs: [issue]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: abort }
+  - id: classify
+    capability: ai_reasoning
+    action: classify_issue
+    inputs: { issue: "{{ steps.fetch.issue }}" }
+    outputs: [type, labels, priority, missing_info]
+    depends_on: [fetch]
+  - id: apply
+    capability: github
+    action: apply_labels
+    when: "{{ config.auto_label }} == true"
+    inputs: { repo: "{{ config.repo }}", issue: "{{ trigger.issue_number }}", labels: "{{ steps.classify.labels }}" }
+    outputs: [applied]
+    depends_on: [classify]
+  - id: notify
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.notify_channel }}", text: "{{ steps.classify.type }} / {{ steps.classify.priority }}" }
+    outputs: [delivery_id]
+    depends_on: [classify]
+    when: "{{ config.notify_channel }} != none"
+outputs:
+  - { name: classification, from: "{{ steps.classify.type }}" }
+  - { name: labels, from: "{{ steps.classify.labels }}" }
+verification:
+  - type: github_state
+    check: labels_applied
+    asserts: ["if auto_label, issue actually shows the labels via re-fetch", "not just API 200"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "{{ config.repo }}#{{ trigger.issue_number }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 120, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Issue classify + label + notify"
+  derived_from:
+    - { source: "n8n GitHub-issue automation templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Re-fetches to confirm labels actually applied; gated as consequential."

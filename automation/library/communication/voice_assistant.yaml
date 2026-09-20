@@ -1,0 +1,68 @@
+id: communication.voice_assistant
+name: Voice Message Assistant
+description: >
+  Handles a voice message on a chat channel: transcribes it, reasons over the text,
+  and replies in text and/or synthesized voice. Extends the chat assistant to audio.
+category: communication
+version: 1.0.0
+tags: [voice, chatbot, transcription, tts]
+trigger:
+  type: message_received
+  nl_examples: ["let me send voice notes to my assistant"]
+inputs:
+  - { name: audio_ref, type: string, required: true, description: "Voice message file reference" }
+config:
+  - { name: channel, type: enum, enum_values: [telegram, whatsapp], default: telegram, required: true, description: "Channel" }
+  - { name: reply_voice, type: boolean, default: false, required: false, description: "Also reply with synthesized voice" }
+capabilities_required: [communication, ai_reasoning, memory, media]
+providers_required: [llm, whisper]
+credentials_required:
+  - { name: channel_cred, type: bot_token, description: "Channel token" }
+  - { name: llm_provider, type: llm, description: "Transcribe + reason model" }
+steps:
+  - id: transcribe
+    capability: ai_reasoning
+    action: transcribe
+    inputs: { audio: "{{ inputs.audio_ref }}" }
+    outputs: [text]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: reason
+    capability: ai_reasoning
+    action: chat
+    inputs: { message: "{{ steps.transcribe.text }}", user: "{{ trigger.user }}" }
+    outputs: [reply]
+    depends_on: [transcribe]
+  - id: voice
+    capability: media
+    action: text_to_speech
+    when: "{{ config.reply_voice }} == true"
+    inputs: { text: "{{ steps.reason.reply }}" }
+    outputs: [audio_path]
+    depends_on: [reason]
+  - id: send
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.channel }}", to: "{{ trigger.user }}", text: "{{ steps.reason.reply }}", audio: "{{ steps.voice.audio_path }}" }
+    outputs: [delivery_id]
+    depends_on: [reason]
+outputs:
+  - { name: transcript, from: "{{ steps.transcribe.text }}" }
+  - { name: reply, from: "{{ steps.reason.reply }}" }
+verification:
+  - type: communication_delivery
+    check: reply_delivered
+    asserts: ["transcript non-empty", "reply delivered with message id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 25, est_peak_ram_mb: 300, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Voice message -> transcribe -> reason -> reply"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Angie, Personal AI Assistant with Telegram Voice and Text' (message|ai_reasoning+communication)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Audio in/out extension of chat_assistant."

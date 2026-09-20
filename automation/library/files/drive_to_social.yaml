@@ -1,0 +1,65 @@
+id: files.drive_to_social
+name: Drive Asset → Processed → Publish Queue
+description: >
+  Watches a cloud folder for new media assets, normalizes them (resize/format per
+  target), writes derivatives back, and queues them for the publishing pipeline.
+  Keeps originals untouched.
+category: files
+version: 1.0.0
+tags: [drive, media, processing, pipeline]
+trigger:
+  type: file_watch
+  watch_path: "gdrive:/ToPublish"
+config:
+  - { name: targets, type: array, default: [instagram, youtube_short], required: true, description: "Output formats" }
+  - { name: output_folder, type: string, default: "gdrive:/Processed", required: false, description: "Derivative location" }
+capabilities_required: [filesystem, media]
+providers_required: [google_drive]
+credentials_required:
+  - { name: drive_cred, type: oauth2, scopes: ["drive"], description: "Drive access" }
+steps:
+  - id: fetch
+    capability: filesystem
+    action: get_new_asset
+    inputs: { path: "{{ trigger.file_path }}" }
+    outputs: [asset]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: process
+    capability: media
+    action: transcode_variants
+    inputs: { asset: "{{ steps.fetch.asset }}", targets: "{{ config.targets }}" }
+    outputs: [variants]
+    depends_on: [fetch]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: store
+    capability: filesystem
+    action: write_derivatives
+    inputs: { variants: "{{ steps.process.variants }}", folder: "{{ config.output_folder }}" }
+    outputs: [written_paths]
+    depends_on: [process]
+  - id: verify
+    capability: filesystem
+    action: verify_paths
+    inputs: { paths: "{{ steps.store.written_paths }}" }
+    outputs: [verified]
+    depends_on: [store]
+outputs:
+  - { name: variants, from: "{{ steps.store.written_paths }}" }
+verification:
+  - type: filesystem
+    check: derivatives_written
+    asserts: ["one derivative per target format", "originals unchanged", "files exist at written paths"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.file_path }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 60, est_peak_ram_mb: 400, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Media asset -> transcode -> publish queue"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'google drive to instagram, tiktok and youtube' (event|communication+filesystem+http)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Feeds media.content_repurpose; originals preserved."

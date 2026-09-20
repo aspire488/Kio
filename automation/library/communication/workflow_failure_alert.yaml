@@ -1,0 +1,55 @@
+id: communication.workflow_failure_alert
+name: Workflow Failure Alert (meta)
+description: >
+  A meta-template KIO attaches to other templates: when any workflow's failure_recovery
+  fires, this formats a standardized failure report (template id, step, error, retry
+  count) and delivers it, so failures are never silent.
+category: communication
+version: 1.0.0
+tags: [meta, failure, observability, alert]
+trigger:
+  type: event
+  nl_examples: ["tell me when an automation fails"]
+inputs:
+  - { name: failed_template, type: string, required: true, description: "id of the template that failed" }
+  - { name: failed_step, type: string, required: true, description: "step id" }
+  - { name: error, type: string, required: true, description: "error message" }
+  - { name: retry_count, type: number, required: false, default: 0, description: "attempts made" }
+config:
+  - { name: channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Where failures go" }
+capabilities_required: [communication]
+providers_required: []
+credentials_required:
+  - { name: channel_credential, type: bot_token, description: "Channel token" }
+steps:
+  - id: format
+    capability: communication
+    action: format_failure
+    inputs: { template: "{{ inputs.failed_template }}", step: "{{ inputs.failed_step }}", error: "{{ inputs.error }}", retries: "{{ inputs.retry_count }}" }
+    outputs: [payload]
+  - id: send
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.channel }}", payload: "{{ steps.format.payload }}" }
+    outputs: [delivery_id]
+    depends_on: [format]
+    on_error: { retry: { max: 3, backoff: exponential }, fallback: skip }
+outputs:
+  - { name: delivery_id, from: "{{ steps.send.delivery_id }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["failure report delivered with a message id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 3, backoff: exponential }
+  on_failure: silent_log
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 5, est_peak_ram_mb: 60, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Standardized failure notification"
+  derived_from:
+    - { source: "n8n Error Trigger workflow pattern", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "KIO-native: binds to the failure_recovery block of any template."

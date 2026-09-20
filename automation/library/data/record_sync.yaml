@@ -1,0 +1,64 @@
+id: data.record_sync
+name: Two-System Record Sync
+description: >
+  Keeps records in sync between two systems (e.g. Notion↔Todoist, Airtable↔Sheets)
+  on a schedule, using a mapping and last-sync state to propagate only changes,
+  with conflict handling.
+category: data
+version: 1.0.0
+tags: [sync, mcp, notion, airtable, etl]
+trigger:
+  type: schedule
+  cron: "*/30 * * * *"
+config:
+  - { name: system_a, type: string, required: true, description: "Source system id (e.g. notion)" }
+  - { name: system_b, type: string, required: true, description: "Target system id (e.g. todoist)" }
+  - { name: field_map, type: object, required: true, description: "A→B field mapping" }
+  - { name: direction, type: enum, enum_values: [a_to_b, two_way], default: a_to_b, required: false, description: "Sync direction" }
+capabilities_required: [mcp_tool, memory]
+providers_required: []
+mcp_servers_required: [notion, airtable]
+credentials_required:
+  - { name: system_a_cred, type: api_key, description: "System A auth" }
+  - { name: system_b_cred, type: api_key, description: "System B auth" }
+steps:
+  - id: read_a
+    capability: mcp_tool
+    action: list_changed
+    inputs: { system: "{{ config.system_a }}", since: "{{ memory.last_sync }}" }
+    outputs: [changes]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: map
+    capability: memory
+    action: apply_field_map
+    inputs: { changes: "{{ steps.read_a.changes }}", field_map: "{{ config.field_map }}" }
+    outputs: [mapped, conflicts]
+    depends_on: [read_a]
+  - id: write_b
+    capability: mcp_tool
+    action: upsert
+    inputs: { system: "{{ config.system_b }}", records: "{{ steps.map.mapped }}" }
+    outputs: [upserted]
+    depends_on: [map]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+outputs:
+  - { name: upserted, from: "{{ steps.write_b.upserted }}" }
+  - { name: conflicts, from: "{{ steps.map.conflicts }}" }
+verification:
+  - type: data_shape
+    check: sync_applied
+    asserts: ["only changed records propagated", "conflicts surfaced not silently overwritten", "last_sync advanced"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "sync-{{ config.system_a }}-{{ config.system_b }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Cross-system record sync"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Notion Todoist 2-way Sync', 'Notion to Clockify Sync' (schedule|http+mcp_tool ~15)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Change-only propagation with conflict surfacing; routes external systems through KIO's single MCP gateway."

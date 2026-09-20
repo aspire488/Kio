@@ -1,0 +1,71 @@
+id: development.issue_to_implementation
+name: Issue → Delegated Implementation → PR
+description: >
+  For a labeled issue, gathers repo context, delegates the implementation to a
+  coding-agent PROVIDER (isolated worker), runs tests, and opens a draft PR for
+  human review. KIO orchestrates; the agent is a dependency, not KIO's brain.
+category: development
+version: 1.0.0
+tags: [github, coding-agent, pr, automation]
+trigger:
+  type: event
+  nl_examples: ["implement issues labeled 'kio-auto' on {repo}"]
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: trigger_label, type: string, default: "kio-auto", required: false, description: "Label that opts an issue in" }
+  - { name: agent_provider, type: enum, enum_values: [aider, openhands, claude_code], default: aider, required: false, description: "Coding agent backend (isolated worker)" }
+capabilities_required: [github, code_project, ai_reasoning]
+providers_required: [coding_agent]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "Repo write for PR" }
+  - { name: llm_provider, type: llm, description: "Agent model" }
+steps:
+  - id: context
+    capability: github
+    action: gather_issue_context
+    inputs: { repo: "{{ config.repo }}", issue: "{{ trigger.issue_number }}", label: "{{ config.trigger_label }}" }
+    outputs: [issue, repo_snapshot]
+    on_error: { retry: { max: 1 }, fallback: abort }
+  - id: implement
+    capability: code_project
+    action: delegate_to_agent
+    description: "Run the coding agent in an isolated sandbox worker against a branch. No agent framework enters KIO's core."
+    inputs: { provider: "{{ config.agent_provider }}", issue: "{{ steps.context.issue }}", repo: "{{ steps.context.repo_snapshot }}" }
+    outputs: [branch, diff, test_results]
+    depends_on: [context]
+    on_error: { retry: { max: 1 }, timeout_seconds: 900, fallback: notify }
+  - id: gate
+    capability: ai_reasoning
+    action: review_diff
+    inputs: { diff: "{{ steps.implement.diff }}", tests: "{{ steps.implement.test_results }}" }
+    outputs: [safe_to_pr, concerns]
+    depends_on: [implement]
+  - id: open_pr
+    capability: github
+    action: create_draft_pr
+    when: "{{ steps.gate.safe_to_pr }} == true"
+    inputs: { repo: "{{ config.repo }}", branch: "{{ steps.implement.branch }}", issue: "{{ trigger.issue_number }}" }
+    outputs: [pr_url]
+    depends_on: [gate]
+outputs:
+  - { name: pr_url, from: "{{ steps.open_pr.pr_url }}" }
+  - { name: concerns, from: "{{ steps.gate.concerns }}" }
+verification:
+  - type: github_state
+    check: draft_pr_exists
+    asserts: ["tests ran in sandbox", "PR is a DRAFT for human review, never auto-merged", "PR re-fetched by url"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 0, backoff: none }
+  on_failure: notify_admin
+  idempotency_key: "{{ config.repo }}#{{ trigger.issue_number }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 600, est_peak_ram_mb: 800, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Issue -> coding-agent -> PR"
+  derived_from:
+    - { source: "KIO coding-architecture design (this project) — coding agents as isolated providers, not embedded frameworks", license: "MIT", reuse: adapted }
+  license: MIT
+  portability_notes: "Agent runs sandboxed; always a draft PR; KIO owns orchestration/verification."

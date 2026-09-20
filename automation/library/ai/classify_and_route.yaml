@@ -1,0 +1,54 @@
+id: ai.classify_and_route
+name: Classify → Route
+description: >
+  Classifies an inbound item (email, message, ticket) into one of N categories and
+  routes it to the matching handler/label/queue. The backbone of triage automations.
+category: ai
+version: 1.0.0
+tags: [ai, classify, routing, triage]
+trigger:
+  type: event
+  nl_examples: ["classify and route incoming {items}"]
+inputs:
+  - { name: item, type: object, required: true, description: "Thing to classify" }
+config:
+  - { name: categories, type: array, required: true, description: "Allowed categories" }
+  - { name: routes, type: object, required: true, description: "category -> action mapping" }
+  - { name: min_confidence, type: number, default: 0.6, required: false, description: "Below this -> human review" }
+capabilities_required: [ai_reasoning, workflow]
+providers_required: [llm]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Classification model" }
+steps:
+  - id: classify
+    capability: ai_reasoning
+    action: classify
+    inputs: { item: "{{ inputs.item }}", categories: "{{ config.categories }}" }
+    outputs: [category, confidence]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: route
+    capability: workflow
+    action: route
+    inputs: { category: "{{ steps.classify.category }}", confidence: "{{ steps.classify.confidence }}", routes: "{{ config.routes }}", min_confidence: "{{ config.min_confidence }}" }
+    outputs: [routed_to, needs_review]
+    depends_on: [classify]
+outputs:
+  - { name: category, from: "{{ steps.classify.category }}" }
+  - { name: routed_to, from: "{{ steps.route.routed_to }}" }
+verification:
+  - type: data_shape
+    check: routed
+    asserts: ["category is one of allowed categories", "low-confidence items sent to review not auto-routed"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 8, est_peak_ram_mb: 120, network: true, spawns_process: false }
+provenance:
+  pattern_family: "AI classify -> route"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Gmail Email Labelling with OpenAI', 'Auto Categorise Outlook Emails' (email|ai_reasoning family)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Confidence-gated routing with a human-review fallback."

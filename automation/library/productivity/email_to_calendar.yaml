@@ -1,0 +1,62 @@
+id: productivity.email_to_calendar
+name: Gmail → Calendar Event
+description: >
+  Detects emails that contain a scheduling intent (date/time/place), extracts the
+  event details, and creates a Google Calendar event after user confirmation.
+  Verifies the event exists by re-fetching it.
+category: productivity
+version: 1.0.0
+tags: [gmail, calendar, google, scheduling]
+trigger:
+  type: email_received
+  nl_examples: ["turn scheduling emails into calendar events"]
+config:
+  - { name: label_filter, type: string, default: "INBOX", required: false, description: "Only process this label" }
+  - { name: default_duration_min, type: number, default: 60, required: false, description: "If no end time given" }
+capabilities_required: [email, ai_reasoning, calendar]
+providers_required: [gmail, google_calendar, llm]
+credentials_required:
+  - { name: google_oauth, type: oauth2, scopes: ["gmail.readonly", "calendar.events"], description: "Google account" }
+  - { name: llm_provider, type: llm, description: "Model for extraction" }
+steps:
+  - id: detect
+    capability: ai_reasoning
+    action: detect_event
+    inputs: { subject: "{{ trigger.subject }}", body: "{{ trigger.body }}" }
+    outputs: [has_event, title, start, end, location, confidence]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: create
+    capability: calendar
+    action: create_event
+    when: "{{ steps.detect.has_event }} == true"
+    inputs: { title: "{{ steps.detect.title }}", start: "{{ steps.detect.start }}", end: "{{ steps.detect.end }}", location: "{{ steps.detect.location }}", default_min: "{{ config.default_duration_min }}" }
+    outputs: [event_id]
+    depends_on: [detect]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: calendar
+    action: get_event
+    when: "{{ steps.detect.has_event }} == true"
+    inputs: { event_id: "{{ steps.create.event_id }}" }
+    outputs: [verified]
+    depends_on: [create]
+outputs:
+  - { name: event_id, from: "{{ steps.create.event_id }}" }
+verification:
+  - type: calendar_event
+    check: event_exists
+    asserts: ["event re-fetched by id", "start/end match extracted values"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Email -> calendar event"
+  derived_from:
+    - { source: "enescingoz/awesome-n8n-templates (Gmail/Calendar)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Re-fetches the event to confirm creation; gated as consequential."

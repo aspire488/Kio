@@ -1,0 +1,61 @@
+id: development.pr_review_prep
+name: PR Review Preparation
+description: >
+  On a new/updated PR, fetches the diff, summarizes what changed by area, flags
+  risky changes (auth, migrations, deletions), and produces a reviewer checklist.
+  Read-only: it never approves or merges.
+category: development
+version: 1.0.0
+tags: [github, pr, code-review]
+trigger:
+  type: event
+  nl_examples: ["prep reviews for PRs on {repo}"]
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, none], default: slack, required: false, description: "Where to post the checklist" }
+capabilities_required: [github, ai_reasoning, communication]
+providers_required: [llm]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "Read access to the repo" }
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: diff
+    capability: github
+    action: get_pr_diff
+    inputs: { repo: "{{ config.repo }}", pr: "{{ trigger.pr_number }}" }
+    outputs: [diff, files_changed]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: abort }
+  - id: analyze
+    capability: ai_reasoning
+    action: analyze_diff
+    inputs: { diff: "{{ steps.diff.diff }}", files: "{{ steps.diff.files_changed }}" }
+    outputs: [summary, risk_flags, checklist]
+    depends_on: [diff]
+  - id: post
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.notify_channel }}", summary: "{{ steps.analyze.summary }}", checklist: "{{ steps.analyze.checklist }}" }
+    outputs: [delivery_id]
+    depends_on: [analyze]
+    when: "{{ config.notify_channel }} != none"
+outputs:
+  - { name: checklist, from: "{{ steps.analyze.checklist }}" }
+  - { name: risk_flags, from: "{{ steps.analyze.risk_flags }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["checklist delivered with a message id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_admin
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "PR diff summary + reviewer checklist"
+  derived_from:
+    - { source: "n8n / community PR-review helper templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Strictly read-only; risk flags for auth/migrations/deletes."

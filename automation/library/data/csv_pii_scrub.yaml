@@ -1,0 +1,63 @@
+id: data.csv_pii_scrub
+name: CSV → Remove PII → Clean File
+description: >
+  Reads a CSV, detects and redacts personally identifiable information (names,
+  emails, phones, IDs) using pattern + AI detection, and writes a scrubbed copy
+  plus a redaction report. Never overwrites the original.
+category: data
+version: 1.0.0
+tags: [pii, privacy, csv, redaction]
+trigger:
+  type: natural_language
+  nl_examples:
+    - "remove PII from {file}"
+    - "scrub personal data from this csv"
+inputs:
+  - { name: file, type: file_path, required: true, description: "Source CSV" }
+config:
+  - { name: output_dir, type: file_path, default: "~/KIO/data/scrubbed", required: false, description: "Where clean copy goes" }
+  - { name: pii_types, type: array, default: [email, phone, name, ssn, address], required: false, description: "Categories to redact" }
+capabilities_required: [ai_reasoning, filesystem]
+providers_required: [llm]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "PII detection model" }
+steps:
+  - id: detect
+    capability: ai_reasoning
+    action: detect_pii
+    inputs: { file: "{{ inputs.file }}", types: "{{ config.pii_types }}" }
+    outputs: [spans, columns_affected]
+    on_error: { retry: { max: 1 }, fallback: abort }
+  - id: scrub
+    capability: filesystem
+    action: redact_csv
+    inputs: { file: "{{ inputs.file }}", spans: "{{ steps.detect.spans }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [clean_path, redaction_count]
+    depends_on: [detect]
+  - id: verify
+    capability: ai_reasoning
+    action: verify_no_pii
+    inputs: { file: "{{ steps.scrub.clean_path }}", types: "{{ config.pii_types }}" }
+    outputs: [verified, residual]
+    depends_on: [scrub]
+outputs:
+  - { name: clean_file, from: "{{ steps.scrub.clean_path }}" }
+  - { name: redaction_count, from: "{{ steps.scrub.redaction_count }}" }
+verification:
+  - type: filesystem
+    check: pii_removed
+    asserts: ["clean copy written to new path", "original untouched", "second pass finds no residual PII"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "scrub-{{ inputs.file }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 40, est_peak_ram_mb: 220, network: true, spawns_process: false }
+provenance:
+  pattern_family: "PII detection + redaction"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Remove Personally Identifiable Information (PII) from CSV Files' (event|ai_reasoning+filesystem)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Adds a verification second-pass that the source pattern lacks; never overwrites the original."

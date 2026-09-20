@@ -1,0 +1,71 @@
+id: productivity.ecosystem_briefing
+name: Google Ecosystem Daily Briefing
+description: >
+  Each morning, pulls today's calendar, unread priority email senders, and recently
+  modified Drive files, then composes a single concise briefing delivered to chat.
+category: productivity
+version: 1.0.0
+tags: [google, briefing, morning, calendar, gmail, drive]
+trigger:
+  type: schedule
+  cron: "30 7 * * 1-5"
+config:
+  - { name: delivery_channel, type: enum, enum_values: [telegram, slack, email], default: telegram, required: false, description: "Where to send the brief" }
+  - { name: priority_senders, type: array, default: [], required: false, description: "Highlight email from these" }
+capabilities_required: [calendar, email, filesystem, ai_reasoning, communication]
+providers_required: [google_calendar, gmail, google_drive, llm]
+credentials_required:
+  - { name: google_oauth, type: oauth2, scopes: ["calendar.readonly", "gmail.readonly", "drive.readonly"], description: "Google account" }
+  - { name: llm_provider, type: llm, description: "Model" }
+  - { name: channel_cred, type: bot_token, description: "Delivery token" }
+steps:
+  - id: calendar
+    capability: calendar
+    action: today_events
+    inputs: { window: "today" }
+    outputs: [events]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: mail
+    capability: email
+    action: priority_unread
+    inputs: { senders: "{{ config.priority_senders }}" }
+    outputs: [important_mail]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: drive
+    capability: filesystem
+    action: recent_drive_changes
+    inputs: { window_hours: 24 }
+    outputs: [changed_files]
+    on_error: { retry: { max: 1 }, fallback: skip }
+  - id: compose
+    capability: ai_reasoning
+    action: compose_briefing
+    inputs: { events: "{{ steps.calendar.events }}", mail: "{{ steps.mail.important_mail }}", files: "{{ steps.drive.changed_files }}" }
+    outputs: [briefing]
+    depends_on: [calendar, mail, drive]
+  - id: deliver
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.delivery_channel }}", text: "{{ steps.compose.briefing }}" }
+    outputs: [delivery_id]
+    depends_on: [compose]
+outputs:
+  - { name: briefing, from: "{{ steps.compose.briefing }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["briefing delivered with message id", "brief non-empty even if a source failed"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "briefing-{{ today }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 40, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Multi-source morning briefing"
+  derived_from:
+    - { source: "n8n daily-digest / briefing templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Degrades gracefully if one Google source fails; verifies delivery."

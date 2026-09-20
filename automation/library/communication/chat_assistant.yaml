@@ -1,0 +1,75 @@
+id: communication.chat_assistant
+name: Chat Assistant (Telegram/Slack) with Memory
+description: >
+  A conversational assistant on a chat channel: receives a message, loads
+  conversation memory, reasons with tools, replies, and persists context. Buffers
+  rapid consecutive messages into one turn.
+category: communication
+version: 1.0.0
+tags: [chatbot, telegram, slack, assistant, memory]
+trigger:
+  type: message_received
+  nl_examples: ["be my telegram assistant", "set up a chatbot on slack"]
+inputs:
+  - { name: message, type: string, required: true, description: "Inbound message text" }
+config:
+  - { name: channel, type: enum, enum_values: [telegram, slack, discord], default: telegram, required: true, description: "Chat channel" }
+  - { name: persona, type: string, default: "helpful concise assistant", required: false, description: "System persona" }
+  - { name: tools_enabled, type: boolean, default: true, required: false, description: "Allow tool use" }
+capabilities_required: [communication, ai_reasoning, memory]
+providers_required: [llm]
+credentials_required:
+  - { name: channel_cred, type: bot_token, description: "Chat bot token" }
+  - { name: llm_provider, type: llm, description: "Reasoning model" }
+steps:
+  - id: buffer
+    capability: communication
+    action: debounce_messages
+    inputs: { message: "{{ inputs.message }}", user: "{{ trigger.user }}" }
+    outputs: [combined]
+    on_error: { fallback: skip }
+  - id: context
+    capability: memory
+    action: load_conversation
+    inputs: { user: "{{ trigger.user }}" }
+    outputs: [history]
+    depends_on: [buffer]
+  - id: reason
+    capability: ai_reasoning
+    action: chat
+    inputs: { message: "{{ steps.buffer.combined }}", history: "{{ steps.context.history }}", persona: "{{ config.persona }}", tools: "{{ config.tools_enabled }}" }
+    outputs: [reply]
+    depends_on: [context]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: send
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.channel }}", to: "{{ trigger.user }}", text: "{{ steps.reason.reply }}" }
+    outputs: [delivery_id]
+    depends_on: [reason]
+  - id: persist
+    capability: memory
+    action: save_turn
+    inputs: { user: "{{ trigger.user }}", message: "{{ steps.buffer.combined }}", reply: "{{ steps.reason.reply }}" }
+    outputs: [saved]
+    depends_on: [send]
+outputs:
+  - { name: reply, from: "{{ steps.reason.reply }}" }
+verification:
+  - type: communication_delivery
+    check: reply_delivered
+    asserts: ["reply delivered with message id", "turn persisted to memory"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.message_id }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 10, est_peak_ram_mb: 180, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Chat trigger -> LLM -> reply (+memory)"
+  derived_from:
+    - { source: "Zie619/n8n-workflows + awesome-n8n-templates: message|communication and message|ai_reasoning+communication families ('Telegram Chat with Buffering', 'Angie Personal AI Assistant') (~60 workflows)", url: "https://github.com/Zie619/n8n-workflows", license: "MIT (aggregation)", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Message debouncing + KIO memory; the single most common ecosystem family, collapsed to one template."

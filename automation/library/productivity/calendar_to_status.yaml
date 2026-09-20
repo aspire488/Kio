@@ -1,0 +1,55 @@
+id: productivity.calendar_to_status
+name: Calendar Event → Status / Presence
+description: >
+  When a calendar event starts/ends, updates chat presence/status (e.g. Slack
+  status "In a meeting") and optionally silences notifications, reverting when the
+  event ends.
+category: productivity
+version: 1.0.0
+tags: [calendar, status, presence, focus]
+trigger:
+  type: event
+  nl_examples: ["set my slack status from my calendar", "show when I'm in meetings"]
+config:
+  - { name: status_target, type: enum, enum_values: [slack, teams], default: slack, required: true, description: "Where to set status" }
+  - { name: busy_text, type: string, default: "In a meeting", required: false, description: "Status text" }
+  - { name: dnd, type: boolean, default: true, required: false, description: "Enable do-not-disturb during events" }
+capabilities_required: [calendar, communication]
+providers_required: [google_calendar]
+credentials_required:
+  - { name: calendar_cred, type: oauth2, scopes: ["calendar.readonly"], description: "Calendar" }
+  - { name: status_cred, type: oauth2, scopes: ["status.write"], description: "Status write" }
+steps:
+  - id: set_busy
+    capability: communication
+    action: set_status
+    when: "{{ trigger.event_phase }} == start"
+    inputs: { target: "{{ config.status_target }}", text: "{{ config.busy_text }}", dnd: "{{ config.dnd }}", until: "{{ trigger.event_end }}" }
+    outputs: [applied]
+    on_error: { retry: { max: 2, backoff: fixed }, fallback: notify }
+  - id: clear
+    capability: communication
+    action: clear_status
+    when: "{{ trigger.event_phase }} == end"
+    inputs: { target: "{{ config.status_target }}" }
+    outputs: [cleared]
+outputs:
+  - { name: applied, from: "{{ steps.set_busy.applied }}" }
+verification:
+  - type: communication_delivery
+    check: status_reflects_calendar
+    asserts: ["status set at event start", "status cleared at event end", "no lingering DND after events"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: fixed }
+  on_failure: silent_log
+  idempotency_key: "{{ trigger.event_id }}-{{ trigger.event_phase }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 5, est_peak_ram_mb: 60, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Calendar event -> presence/status"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Google Calendar to Slack Status & Philips Hue' (manual|calendar+communication+http)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Reverts on event end; idempotent per event phase."

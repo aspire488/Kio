@@ -1,0 +1,54 @@
+id: ai.extract_to_structured
+name: Unstructured → Structured Fields
+description: >
+  Turns freeform text/documents into a validated typed object against a caller-
+  supplied schema, with per-field confidence. Powers invoice, resume, lead and
+  form extraction without a bespoke workflow each.
+category: ai
+version: 1.0.0
+tags: [ai, extraction, structured-output, schema]
+trigger:
+  type: event
+  nl_examples: ["extract structured data from {input}"]
+inputs:
+  - { name: input, type: string, required: true, description: "Text or file reference" }
+  - { name: schema, type: object, required: true, description: "Target field schema" }
+config:
+  - { name: strict, type: boolean, default: true, required: false, description: "Reject on missing required fields" }
+capabilities_required: [ai_reasoning]
+providers_required: [llm]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Extraction model" }
+steps:
+  - id: extract
+    capability: ai_reasoning
+    action: extract_structured
+    inputs: { input: "{{ inputs.input }}", schema: "{{ inputs.schema }}", strict: "{{ config.strict }}" }
+    outputs: [record, confidence, missing]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: validate
+    capability: ai_reasoning
+    action: validate_against_schema
+    inputs: { record: "{{ steps.extract.record }}", schema: "{{ inputs.schema }}" }
+    outputs: [valid, errors]
+    depends_on: [extract]
+outputs:
+  - { name: record, from: "{{ steps.extract.record }}" }
+  - { name: confidence, from: "{{ steps.extract.confidence }}" }
+verification:
+  - type: data_shape
+    check: schema_conformant
+    asserts: ["output validates against supplied schema", "required-field gaps reported not fabricated"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 15, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "LLM structured extraction"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'AI Data Extraction with Dynamic Prompts and Airtable', 'Invoice data extraction with LlamaParse' (ai_reasoning+* families)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Enforces schema validation + confidence; a reusable primitive other templates call."

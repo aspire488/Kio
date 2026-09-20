@@ -1,0 +1,67 @@
+id: development.repo_backup
+name: Scheduled Repo/Config Backup to Drive
+description: >
+  On a schedule, exports a repo (or a set of config/workflow files) as an archive
+  and uploads it to cloud storage with a dated name, verifying the upload and
+  pruning old backups beyond a retention window.
+category: development
+version: 1.0.0
+tags: [backup, github, drive, archival]
+trigger:
+  type: schedule
+  cron: "0 3 * * *"
+config:
+  - { name: source, type: string, required: true, description: "Repo owner/name or path" }
+  - { name: dest, type: enum, enum_values: [google_drive, s3, local], default: google_drive, required: true, description: "Backup destination" }
+  - { name: retention_days, type: number, default: 30, required: false, description: "Prune older than this" }
+capabilities_required: [github, filesystem]
+providers_required: []
+credentials_required:
+  - { name: source_cred, type: api_key, description: "Repo access" }
+  - { name: dest_cred, type: oauth2, scopes: ["write"], description: "Destination storage" }
+steps:
+  - id: export
+    capability: github
+    action: export_archive
+    inputs: { source: "{{ config.source }}" }
+    outputs: [archive_path]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: upload
+    capability: filesystem
+    action: upload_backup
+    inputs: { archive: "{{ steps.export.archive_path }}", dest: "{{ config.dest }}", name: "{{ config.source }}-{{ today }}" }
+    outputs: [remote_id]
+    depends_on: [export]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: filesystem
+    action: verify_upload
+    inputs: { dest: "{{ config.dest }}", remote_id: "{{ steps.upload.remote_id }}" }
+    outputs: [verified, size]
+    depends_on: [upload]
+  - id: prune
+    capability: filesystem
+    action: prune_old_backups
+    inputs: { dest: "{{ config.dest }}", retention_days: "{{ config.retention_days }}" }
+    outputs: [pruned_count]
+    depends_on: [verify]
+outputs:
+  - { name: remote_id, from: "{{ steps.upload.remote_id }}" }
+verification:
+  - type: filesystem
+    check: backup_uploaded
+    asserts: ["remote object exists with non-zero size", "backup within retention kept", "old ones pruned"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "backup-{{ config.source }}-{{ today }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 90, est_peak_ram_mb: 200, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Scheduled export -> cloud backup -> prune"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Automated Workflow Backups to Google Drive', 'Clockify Backup Template' (schedule|github+http ~8)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Verifies non-zero remote object and enforces retention; pruning is consequential."

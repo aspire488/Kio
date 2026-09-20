@@ -1,0 +1,54 @@
+id: communication.notify
+name: Multi-Channel Notification (canonical)
+description: >
+  One canonical notification pattern that dedupes the separate Telegram/Slack/
+  Discord/email templates: channel is configuration, not a new template. Formats
+  the message per channel and verifies actual delivery (message id), not HTTP 200.
+category: communication
+version: 1.0.0
+tags: [notification, telegram, slack, discord, email]
+trigger:
+  type: event
+  nl_examples: ["notify me on {channel} when {condition}"]
+inputs:
+  - { name: message, type: string, required: true, description: "Body to send" }
+  - { name: title, type: string, required: false, description: "Optional title/subject" }
+config:
+  - { name: channel, type: enum, enum_values: [telegram, slack, discord, email], default: telegram, required: true, description: "Delivery channel" }
+  - { name: priority, type: enum, enum_values: [low, normal, high], default: normal, required: false, description: "Formatting/urgency" }
+capabilities_required: [communication]
+providers_required: []
+credentials_required:
+  - { name: channel_credential, type: bot_token, description: "Token/OAuth for the chosen channel" }
+steps:
+  - id: format
+    capability: communication
+    action: format_for_channel
+    inputs: { channel: "{{ config.channel }}", title: "{{ inputs.title }}", body: "{{ inputs.message }}", priority: "{{ config.priority }}" }
+    outputs: [payload]
+  - id: send
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.channel }}", payload: "{{ steps.format.payload }}" }
+    outputs: [delivery_id, status]
+    depends_on: [format]
+    on_error: { retry: { max: 3, backoff: exponential }, fallback: notify }
+outputs:
+  - { name: delivery_id, from: "{{ steps.send.delivery_id }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["provider returned a message/delivery id", "status is a delivered/sent state, not just 200"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 3, backoff: exponential }
+  on_failure: silent_log
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 5, est_peak_ram_mb: 60, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Notification (channel-parameterized)"
+  derived_from:
+    - { source: "n8n Telegram/Slack/Discord/email send nodes (collapsed)", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Collapses 4+ near-identical n8n templates into one; verifies delivery id. At-least-once by design; pass a caller-supplied idempotency key upstream if dedupe is required."

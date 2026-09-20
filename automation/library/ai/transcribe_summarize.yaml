@@ -1,0 +1,66 @@
+id: ai.transcribe_summarize
+name: Audio/Video → Transcript → Summary
+description: >
+  Transcribes an audio/video file (Whisper-class), then produces a structured
+  summary with action items, and stores both transcript and summary. Used for
+  meetings, voice notes and calls.
+category: ai
+version: 1.0.0
+tags: [ai, transcription, summary, whisper, meetings]
+trigger:
+  type: file_watch
+  watch_path: "~/Recordings"
+config:
+  - { name: store, type: enum, enum_values: [google_sheets, notion, filesystem], default: filesystem, required: false, description: "Where to save" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, none], default: none, required: false, description: "Optional notify" }
+capabilities_required: [ai_reasoning, filesystem, communication]
+providers_required: [llm, whisper]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Transcription + summary model" }
+steps:
+  - id: transcribe
+    capability: ai_reasoning
+    action: transcribe
+    inputs: { file: "{{ trigger.file_path }}" }
+    outputs: [transcript]
+    on_error: { retry: { max: 2, backoff: exponential }, timeout_seconds: 300, fallback: notify }
+  - id: summarize
+    capability: ai_reasoning
+    action: summarize
+    inputs: { transcript: "{{ steps.transcribe.transcript }}" }
+    outputs: [summary, action_items]
+    depends_on: [transcribe]
+  - id: store
+    capability: filesystem
+    action: store_transcript
+    inputs: { store: "{{ config.store }}", transcript: "{{ steps.transcribe.transcript }}", summary: "{{ steps.summarize.summary }}", actions: "{{ steps.summarize.action_items }}" }
+    outputs: [stored_path]
+    depends_on: [summarize]
+  - id: notify
+    capability: communication
+    action: send_message
+    when: "{{ config.notify_channel }} != none"
+    inputs: { channel: "{{ config.notify_channel }}", summary: "{{ steps.summarize.summary }}" }
+    outputs: [delivery_id]
+    depends_on: [store]
+outputs:
+  - { name: summary, from: "{{ steps.summarize.summary }}" }
+  - { name: transcript_path, from: "{{ steps.store.stored_path }}" }
+verification:
+  - type: filesystem
+    check: transcript_stored
+    asserts: ["transcript non-empty", "summary + action items present", "file saved at stored_path"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.file_path }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 120, est_peak_ram_mb: 400, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Transcribe -> summarize -> store"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Zoom AI Meeting Assistant', 'Transcribe Audio + Summarize + Save to Google Sheets', 'Whisper Transkription'", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Bundles transcript + structured summary + storage with verification."

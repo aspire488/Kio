@@ -1,0 +1,59 @@
+id: data.file_extract_to_csv
+name: PDF/Image → Extracted Data → CSV
+description: >
+  Extracts structured data from PDFs or images (OCR + vision model), maps to typed
+  columns, and writes a verified CSV. Flags low-confidence rows rather than guessing.
+category: data
+version: 1.0.0
+tags: [ocr, extraction, csv, vision]
+trigger:
+  type: file_watch
+  watch_path: "~/Documents/ToExtract"
+config:
+  - { name: fields, type: array, required: true, description: "Columns to extract" }
+  - { name: output_path, type: file_path, default: "~/KIO/data/extracted.csv", required: false, description: "CSV output" }
+  - { name: confidence_threshold, type: number, default: 0.75, required: false, description: "Flag below this" }
+capabilities_required: [ai_reasoning, filesystem]
+providers_required: [llm, pdf_reader]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Vision/extraction model" }
+steps:
+  - id: extract
+    capability: ai_reasoning
+    action: extract_structured
+    inputs: { file_path: "{{ trigger.file_path }}", fields: "{{ config.fields }}" }
+    outputs: [rows, confidence]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: write
+    capability: filesystem
+    action: append_csv
+    inputs: { rows: "{{ steps.extract.rows }}", columns: "{{ config.fields }}", path: "{{ config.output_path }}", min_confidence: "{{ config.confidence_threshold }}" }
+    outputs: [file_path, written, flagged]
+    depends_on: [extract]
+  - id: verify
+    capability: filesystem
+    action: verify_csv
+    inputs: { path: "{{ steps.write.file_path }}", expected_columns: "{{ config.fields }}" }
+    outputs: [verified]
+    depends_on: [write]
+outputs:
+  - { name: csv, from: "{{ steps.write.file_path }}" }
+  - { name: flagged, from: "{{ steps.write.flagged }}" }
+verification:
+  - type: data_shape
+    check: csv_valid
+    asserts: ["columns match fields", "low-confidence rows flagged not silently written", "csv parses"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ trigger.file_path }}"
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 250, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Document extraction -> structured CSV"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Extract text from PDF and image using Vertex AI (Gemini) into CSV' (event|filesystem+http ~14)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Confidence gating + CSV verification; refuses to emit guessed values."

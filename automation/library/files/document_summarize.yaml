@@ -1,0 +1,59 @@
+id: files.document_summarize
+name: New Document → Summary + Notify
+description: >
+  On a new PDF/DOCX in a watched folder, extracts text, produces a structured
+  summary (key points, entities, action items) and notifies the user with a link.
+category: files
+version: 1.0.0
+tags: [pdf, docx, summarize, ingest]
+trigger:
+  type: file_watch
+  watch_path: "~/Documents/Inbox"
+config:
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email, none], default: telegram, required: false, description: "Where to send the summary" }
+  - { name: max_chars, type: number, default: 20000, required: false, description: "Truncate long docs" }
+capabilities_required: [filesystem, ai_reasoning, communication]
+providers_required: [llm, pdf_reader]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Model for summarization" }
+  - { name: notify_channel_cred, type: bot_token, description: "Token for the chosen channel" }
+steps:
+  - id: extract
+    capability: filesystem
+    action: extract_text
+    inputs: { file_path: "{{ trigger.file_path }}", max_chars: "{{ config.max_chars }}" }
+    outputs: [text]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: summarize
+    capability: ai_reasoning
+    action: summarize
+    inputs: { text: "{{ steps.extract.text }}" }
+    outputs: [summary, key_points, action_items]
+    depends_on: [extract]
+  - id: notify
+    capability: communication
+    action: send_message
+    inputs: { channel: "{{ config.notify_channel }}", summary: "{{ steps.summarize.summary }}", link: "{{ trigger.file_path }}" }
+    outputs: [delivery_id]
+    depends_on: [summarize]
+    when: "{{ config.notify_channel }} != none"
+outputs:
+  - { name: summary, from: "{{ steps.summarize.summary }}" }
+  - { name: action_items, from: "{{ steps.summarize.action_items }}" }
+verification:
+  - type: communication_delivery
+    check: message_delivered
+    asserts: ["provider returned a delivery/message id", "not just a 200 with no id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: fixed }
+  on_failure: notify_user
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Ingest document, summarize, notify"
+  derived_from:
+    - { source: "enescingoz/awesome-n8n-templates (PDF Q&A / study notes)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Verifies actual delivery id, not HTTP 200."

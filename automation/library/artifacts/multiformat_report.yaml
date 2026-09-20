@@ -1,0 +1,82 @@
+id: artifacts.multiformat_report
+name: One Content Plan → DOCX + PDF + PPTX
+description: >
+  Builds a single content IR once, then fans it out to DOCX, PDF and a slide deck
+  so the three deliverables stay consistent. Each output is verified independently.
+category: artifacts
+version: 1.0.0
+tags: [multiformat, docx, pdf, pptx, report]
+trigger:
+  type: natural_language
+  nl_examples:
+    - "give me {topic} as a doc, pdf and slides"
+    - "make a report and a deck about {topic}"
+inputs:
+  - { name: topic, type: string, required: true, description: "Subject" }
+config:
+  - { name: output_dir, type: file_path, default: "~/KIO/reports", required: false, description: "Save location" }
+  - { name: formats, type: array, default: [docx, pdf, pptx], required: false, description: "Which outputs" }
+capabilities_required: [ai_reasoning, artifact, filesystem]
+providers_required: [llm, python_docx, weasyprint, python_pptx, libreoffice]
+credentials_required:
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: research
+    capability: ai_reasoning
+    action: research
+    inputs: { query: "{{ inputs.topic }}" }
+    outputs: [findings]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: content
+    capability: ai_reasoning
+    action: write_content
+    description: "One shared content IR, format-agnostic."
+    inputs: { findings: "{{ steps.research.findings }}" }
+    outputs: [document_ir, slide_specs]
+    depends_on: [research]
+  - id: render_docx
+    capability: artifact
+    action: render_docx
+    inputs: { ir: "{{ steps.content.document_ir }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_path]
+    depends_on: [content]
+  - id: render_pdf
+    capability: artifact
+    action: render_pdf_from_html
+    inputs: { ir: "{{ steps.content.document_ir }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_path]
+    depends_on: [content]
+  - id: render_pptx
+    capability: artifact
+    action: render_pptx
+    inputs: { specs: "{{ steps.content.slide_specs }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_path]
+    depends_on: [content]
+  - id: verify
+    capability: artifact
+    action: verify_bundle
+    description: "Verify each produced file with its format validator."
+    inputs: { docx: "{{ steps.render_docx.file_path }}", pdf: "{{ steps.render_pdf.file_path }}", pptx: "{{ steps.render_pptx.file_path }}" }
+    outputs: [verified, report]
+    depends_on: [render_docx, render_pdf, render_pptx]
+outputs:
+  - { name: docx, from: "{{ steps.render_docx.file_path }}" }
+  - { name: pdf, from: "{{ steps.render_pdf.file_path }}" }
+  - { name: pptx, from: "{{ steps.render_pptx.file_path }}" }
+verification:
+  - type: artifact
+    check: bundle_valid
+    asserts: ["each requested format produced", "each passes its own format validator", "content consistent across formats"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 150, est_peak_ram_mb: 350, network: true, spawns_process: true }
+provenance:
+  pattern_family: "Single content, multiple renderers"
+  derived_from:
+    - { source: "KIO artifact-engine design (this project)", license: "MIT", reuse: adapted }
+  license: MIT
+  portability_notes: "Fan-out from one IR is a KIO-native upgrade; n8n would duplicate content per format."

@@ -1,0 +1,54 @@
+id: ai.image_generate
+name: Prompt → Generated Image → Deliver
+description: >
+  Generates an image from a prompt (optionally reformatting to a target aspect
+  ratio), saves it, and optionally posts/attaches it. Verifies a real image file
+  was produced with the requested dimensions.
+category: ai
+version: 1.0.0
+tags: [ai, image-generation, media]
+trigger:
+  type: natural_language
+  nl_examples: ["generate an image of {prompt}", "make a {ratio} image for {prompt}"]
+inputs:
+  - { name: prompt, type: string, required: true, description: "Image description" }
+  - { name: aspect_ratio, type: string, required: false, default: "1:1", description: "e.g. 16:9, 9:16" }
+config:
+  - { name: output_dir, type: file_path, default: "~/KIO/images", required: false, description: "Save location" }
+  - { name: count, type: number, default: 1, required: false, description: "How many variants" }
+capabilities_required: [media, filesystem]
+providers_required: [image_model]
+credentials_required:
+  - { name: image_provider, type: api_key, description: "Image generation model" }
+steps:
+  - id: generate
+    capability: media
+    action: generate_image
+    inputs: { prompt: "{{ inputs.prompt }}", ratio: "{{ inputs.aspect_ratio }}", count: "{{ config.count }}", out_dir: "{{ config.output_dir }}" }
+    outputs: [file_paths]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: filesystem
+    action: verify_image
+    inputs: { file_paths: "{{ steps.generate.file_paths }}", ratio: "{{ inputs.aspect_ratio }}" }
+    outputs: [verified]
+    depends_on: [generate]
+outputs:
+  - { name: images, from: "{{ steps.generate.file_paths }}" }
+verification:
+  - type: filesystem
+    check: image_produced
+    asserts: ["file exists and is a valid image", "dimensions match requested aspect ratio", "count matches request"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+security_classification: low
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 200, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Text -> image generation"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'AI product Images', 'Content to 9:16 Aspect Image Generator' (manual|http+mcp_tool ~22)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Verifies an actual image with correct dimensions was written."

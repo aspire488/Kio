@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kio.local/schema/kio_template.schema.json",
+  "title": "KIO Automation Template",
+  "description": "Normalized, backend-agnostic KIO workflow template. n8n and other systems are pattern sources, not the runtime.",
+  "type": "object",
+  "required": [
+    "id", "name", "description", "category", "version",
+    "trigger", "steps", "capabilities_required", "credentials_required",
+    "outputs", "verification", "failure_recovery",
+    "security_classification", "user_confirmation_required",
+    "config", "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(\\.[a-z0-9_]+)+$",
+      "description": "Dotted id: <category>.<pattern_name>, lower_snake."
+    },
+    "name": { "type": "string", "minLength": 3 },
+    "description": { "type": "string", "minLength": 20 },
+    "category": {
+      "type": "string",
+      "enum": [
+        "productivity", "communication", "research", "files",
+        "artifacts", "development", "browser", "business",
+        "data", "monitoring", "ai", "media", "system"
+      ]
+    },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "tags": { "type": "array", "items": { "type": "string" } },
+
+    "trigger": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["manual", "natural_language", "schedule", "webhook", "event", "file_watch", "poll", "email_received", "message_received"]
+        },
+        "nl_examples": { "type": "array", "items": { "type": "string" }, "description": "Utterances KIO's router should map to this template." },
+        "cron": { "type": "string", "description": "Required when type=schedule. Standard 5-field cron." },
+        "poll_interval_seconds": { "type": "integer", "minimum": 30 },
+        "watch_path": { "type": "string" },
+        "webhook_auth": { "type": "string", "enum": ["none", "hmac", "bearer", "basic"] }
+      }
+    },
+
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "type": { "type": "string", "enum": ["string", "number", "boolean", "array", "object", "file_path", "url", "datetime", "enum"] },
+          "required": { "type": "boolean", "default": false },
+          "default": {},
+          "enum_values": { "type": "array" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "config": {
+      "type": "array",
+      "description": "User-facing configuration surface. Separate from internal step wiring.",
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "type": { "type": "string", "enum": ["string", "number", "boolean", "array", "object", "file_path", "url", "datetime", "enum", "secret_ref"] },
+          "default": {},
+          "enum_values": { "type": "array" },
+          "required": { "type": "boolean", "default": false },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "capabilities_required": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http"]
+      }
+    },
+    "providers_required": { "type": "array", "items": { "type": "string" } },
+    "mcp_servers_required": { "type": "array", "items": { "type": "string" } },
+    "external_services": { "type": "array", "items": { "type": "string" } },
+
+    "credentials_required": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["llm", "oauth2", "api_key", "bot_token", "service_account", "basic_auth", "none"] },
+          "scopes": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "expr"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "expr": { "type": "string", "description": "Boolean expression over {{ }} refs." }
+        }
+      }
+    },
+
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "capability", "action"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "capability": {
+            "type": "string",
+            "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http"]
+          },
+          "action": { "type": "string" },
+          "description": { "type": "string" },
+          "inputs": { "type": "object" },
+          "outputs": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9_]+$" } },
+          "depends_on": { "type": "array", "items": { "type": "string" } },
+          "when": { "type": "string", "description": "Optional gate expression; step runs only if truthy." },
+          "on_error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "retry": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "max": { "type": "integer", "minimum": 0, "maximum": 10 },
+                  "backoff": { "type": "string", "enum": ["none", "fixed", "linear", "exponential"] }
+                }
+              },
+              "timeout_seconds": { "type": "integer", "minimum": 1 },
+              "fallback": { "type": "string", "enum": ["skip", "abort", "notify", "goto"] },
+              "goto": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "from"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "from": { "type": "string", "description": "{{ steps.X.output }} reference." },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "verification": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Observable side-effect verification. NOT 'API returned 200'.",
+      "items": {
+        "type": "object",
+        "required": ["type", "check"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["artifact", "filesystem", "communication_delivery", "browser_state", "calendar_event", "github_state", "http_response", "data_shape", "none"] },
+          "check": { "type": "string" },
+          "asserts": { "type": "array", "items": { "type": "string" } },
+          "on_fail": { "type": "string", "enum": ["repair", "notify", "abort", "flag"] }
+        }
+      }
+    },
+
+    "failure_recovery": {
+      "type": "object",
+      "required": ["default_retry", "on_failure"],
+      "additionalProperties": false,
+      "properties": {
+        "default_retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max": { "type": "integer", "minimum": 0, "maximum": 10 },
+            "backoff": { "type": "string", "enum": ["none", "fixed", "linear", "exponential"] }
+          }
+        },
+        "on_failure": { "type": "string", "enum": ["notify_user", "notify_admin", "silent_log", "abort", "rollback"] },
+        "idempotency_key": { "type": "string", "description": "Expression producing a stable key to prevent duplicate side effects." }
+      }
+    },
+
+    "security_classification": {
+      "type": "string",
+      "enum": ["read_only", "low", "consequential", "destructive"],
+      "description": "Drives KIO policy gating. destructive/consequential must set user_confirmation_required=true."
+    },
+    "user_confirmation_required": { "type": "boolean" },
+    "resource_expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "est_runtime_seconds": { "type": "integer" },
+        "est_peak_ram_mb": { "type": "integer" },
+        "network": { "type": "boolean" },
+        "spawns_process": { "type": "boolean" }
+      }
+    },
+
+    "provenance": {
+      "type": "object",
+      "required": ["pattern_family", "derived_from"],
+      "additionalProperties": false,
+      "properties": {
+        "pattern_family": { "type": "string", "description": "Canonical pattern this template represents." },
+        "derived_from": {
+          "type": "array",
+          "description": "Source workflows/collections the pattern was distilled from. Patterns, not verbatim JSON.",
+          "items": {
+            "type": "object",
+            "required": ["source"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string" },
+              "url": { "type": "string" },
+              "license": { "type": "string", "description": "SPDX id or 'unlicensed'/'SUL'/'unknown'." },
+              "reuse": { "type": "string", "enum": ["pattern_only", "adapted", "reference"] }
+            }
+          }
+        },
+        "license": { "type": "string", "description": "License of THIS KIO template (recommend MIT for original KIO templates)." },
+        "portability_notes": { "type": "string" }
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "trigger": { "properties": { "type": { "const": "schedule" } } } } },
+      "then": { "properties": { "trigger": { "required": ["cron"] } } }
+    },
+    {
+      "if": { "properties": { "security_classification": { "enum": ["consequential", "destructive"] } } },
+      "then": { "properties": { "user_confirmation_required": { "const": true } } }
+    }
+  ]
+}

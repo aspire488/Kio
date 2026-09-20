@@ -1,0 +1,62 @@
+id: monitoring.security_scan_alert
+name: URL/Email Security Scan & Alert
+description: >
+  Submits a suspicious URL or email to reputation/scan services (e.g. URLScan,
+  VirusTotal-class), aggregates verdicts, and alerts with a risk rating. Used for
+  phishing checks and link vetting.
+category: monitoring
+version: 1.0.0
+tags: [security, phishing, scan, alert]
+trigger:
+  type: event
+  nl_examples: ["scan this link for phishing", "check if this url is malicious"]
+inputs:
+  - { name: target, type: string, required: true, description: "URL or email to scan" }
+config:
+  - { name: scanners, type: array, default: [urlscan, virustotal], required: false, description: "Scan providers" }
+  - { name: notify_channel, type: enum, enum_values: [telegram, slack, email], default: slack, required: false, description: "Alert channel" }
+capabilities_required: [http, ai_reasoning, communication]
+providers_required: [llm]
+credentials_required:
+  - { name: scanner_creds, type: api_key, description: "Scan service keys" }
+  - { name: notify_cred, type: bot_token, description: "Alert token" }
+steps:
+  - id: scan
+    capability: http
+    action: multi_scan
+    inputs: { target: "{{ inputs.target }}", scanners: "{{ config.scanners }}" }
+    outputs: [verdicts]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: assess
+    capability: ai_reasoning
+    action: aggregate_risk
+    inputs: { verdicts: "{{ steps.scan.verdicts }}" }
+    outputs: [risk_rating, rationale]
+    depends_on: [scan]
+  - id: alert
+    capability: communication
+    action: send_message
+    when: "{{ steps.assess.risk_rating }} != low"
+    inputs: { channel: "{{ config.notify_channel }}", target: "{{ inputs.target }}", risk: "{{ steps.assess.risk_rating }}", why: "{{ steps.assess.rationale }}" }
+    outputs: [delivery_id]
+    depends_on: [assess]
+outputs:
+  - { name: risk_rating, from: "{{ steps.assess.risk_rating }}" }
+verification:
+  - type: http_response
+    check: scan_completed
+    asserts: ["at least one scanner returned a verdict", "alert sent when risk is elevated"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ inputs.target }}"
+security_classification: read_only
+user_confirmation_required: false
+resource_expectations: { est_runtime_seconds: 30, est_peak_ram_mb: 120, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Multi-source security scan -> risk alert"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'Phishing analysis URLScan.io and Virustotal', 'Analyze Suspicious Email Contents with ChatGPT Vision'", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Aggregates multiple scanners into one rating; read-only."

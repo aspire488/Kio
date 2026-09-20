@@ -1,0 +1,71 @@
+id: data.webhook_to_store
+name: Webhook → Validate → Store
+description: >
+  Receives an authenticated webhook, validates the payload against an expected
+  schema, normalizes fields, and writes a typed record to the configured store
+  (sheet/db/table). Rejects malformed payloads instead of storing garbage.
+category: data
+version: 1.0.0
+tags: [webhook, ingest, validation, etl]
+trigger:
+  type: webhook
+  webhook_auth: hmac
+inputs:
+  - { name: payload, type: object, required: true, description: "Incoming webhook body" }
+config:
+  - { name: store, type: enum, enum_values: [google_sheets, airtable, notion, database], default: google_sheets, required: true, description: "Destination store" }
+  - { name: schema, type: object, required: false, description: "Expected field types for validation" }
+capabilities_required: [http, workflow, filesystem]
+providers_required: []
+credentials_required:
+  - { name: store_cred, type: oauth2, scopes: ["write"], description: "Destination store credential" }
+  - { name: webhook_secret, type: api_key, description: "HMAC secret for signature verification" }
+steps:
+  - id: verify_sig
+    capability: http
+    action: verify_hmac
+    inputs: { payload: "{{ inputs.payload }}", secret: "{{ credentials.webhook_secret }}" }
+    outputs: [valid]
+    on_error: { fallback: abort }
+  - id: validate
+    capability: workflow
+    action: validate_schema
+    when: "{{ steps.verify_sig.valid }} == true"
+    inputs: { payload: "{{ inputs.payload }}", schema: "{{ config.schema }}" }
+    outputs: [record, ok, errors]
+    depends_on: [verify_sig]
+  - id: store
+    capability: filesystem
+    action: store_record
+    when: "{{ steps.validate.ok }} == true"
+    inputs: { store: "{{ config.store }}", record: "{{ steps.validate.record }}" }
+    outputs: [record_id]
+    depends_on: [validate]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: filesystem
+    action: verify_record
+    when: "{{ steps.validate.ok }} == true"
+    inputs: { store: "{{ config.store }}", record_id: "{{ steps.store.record_id }}" }
+    outputs: [verified]
+    depends_on: [store]
+outputs:
+  - { name: record_id, from: "{{ steps.store.record_id }}" }
+verification:
+  - type: data_shape
+    check: record_stored
+    asserts: ["signature verified before processing", "invalid payloads rejected not stored", "record re-read by id"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ inputs.payload }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 8, est_peak_ram_mb: 90, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Webhook intake -> validated store"
+  derived_from:
+    - { source: "Zie619/n8n-workflows: webhook|http + webhook|filesystem+http families (~222 workflows)", url: "https://github.com/Zie619/n8n-workflows", license: "MIT (aggregation; underlying provenance mixed)", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Adds HMAC verification, schema validation and read-back that most n8n webhook stubs skip."

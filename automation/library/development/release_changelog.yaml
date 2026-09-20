@@ -1,0 +1,62 @@
+id: development.release_changelog
+name: Release Changelog Generator
+description: >
+  On a new tag, collects merged PRs and commits since the previous tag, groups
+  them (features/fixes/breaking) and drafts a human-readable changelog, then
+  opens a release draft for confirmation before publishing.
+category: development
+version: 1.0.0
+tags: [github, changelog, release]
+trigger:
+  type: event
+  nl_examples: ["generate a changelog for {repo} release"]
+config:
+  - { name: repo, type: string, required: true, description: "owner/name" }
+  - { name: publish, type: boolean, default: false, required: false, description: "Publish (true) or draft only (false)" }
+capabilities_required: [github, ai_reasoning]
+providers_required: [llm]
+mcp_servers_required: [github]
+credentials_required:
+  - { name: github_token, type: api_key, scopes: [repo], description: "Repo access" }
+  - { name: llm_provider, type: llm, description: "Model" }
+steps:
+  - id: collect
+    capability: github
+    action: prs_since_last_tag
+    inputs: { repo: "{{ config.repo }}", tag: "{{ trigger.tag }}" }
+    outputs: [prs, commits, prev_tag]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: abort }
+  - id: draft
+    capability: ai_reasoning
+    action: write_changelog
+    inputs: { prs: "{{ steps.collect.prs }}", range: "{{ steps.collect.prev_tag }}" }
+    outputs: [changelog_md, breaking]
+    depends_on: [collect]
+  - id: create_release
+    capability: github
+    action: create_release
+    inputs: { repo: "{{ config.repo }}", tag: "{{ trigger.tag }}", body: "{{ steps.draft.changelog_md }}", draft: "{{ config.publish }}" }
+    outputs: [release_url]
+    depends_on: [draft]
+    on_error: { retry: { max: 1 }, fallback: notify }
+outputs:
+  - { name: changelog, from: "{{ steps.draft.changelog_md }}" }
+  - { name: release_url, from: "{{ steps.create_release.release_url }}" }
+verification:
+  - type: github_state
+    check: release_exists
+    asserts: ["release/draft exists at tag via re-fetch", "changelog body non-empty"]
+    on_fail: flag
+failure_recovery:
+  default_retry: { max: 1, backoff: exponential }
+  on_failure: notify_admin
+  idempotency_key: "{{ config.repo }}-{{ trigger.tag }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 40, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Tag -> changelog -> release"
+  derived_from:
+    - { source: "n8n release-notes automation templates", url: "https://n8n.io/workflows", license: "SUL", reuse: pattern_only }
+  license: MIT
+  portability_notes: "Defaults to draft; publishing is confirmed."

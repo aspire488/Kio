@@ -1,0 +1,64 @@
+id: data.knowledge_base_sync
+name: Content → Knowledge Base (Notion/Airtable)
+description: >
+  Takes inbound content (email, doc, message), classifies and structures it, then
+  files it into a knowledge base (Notion/Airtable) with tags and links, verifying
+  the entry was created.
+category: data
+version: 1.0.0
+tags: [knowledge-base, notion, airtable, capture, mcp]
+trigger:
+  type: event
+  nl_examples: ["save this to my knowledge base", "file this into notion"]
+inputs:
+  - { name: content, type: string, required: true, description: "Content to capture" }
+  - { name: source_url, type: url, required: false, description: "Origin link" }
+config:
+  - { name: kb, type: enum, enum_values: [notion, airtable], default: notion, required: true, description: "Knowledge base" }
+  - { name: database_id, type: string, required: true, description: "Target DB/base id" }
+capabilities_required: [ai_reasoning, mcp_tool]
+providers_required: [llm]
+mcp_servers_required: [notion, airtable]
+credentials_required:
+  - { name: kb_cred, type: api_key, description: "KB access" }
+  - { name: llm_provider, type: llm, description: "Model for structuring" }
+steps:
+  - id: structure
+    capability: ai_reasoning
+    action: structure_entry
+    inputs: { content: "{{ inputs.content }}", source: "{{ inputs.source_url }}" }
+    outputs: [title, summary, tags, properties]
+    on_error: { retry: { max: 1 }, fallback: notify }
+  - id: create
+    capability: mcp_tool
+    action: create_page
+    inputs: { kb: "{{ config.kb }}", database_id: "{{ config.database_id }}", title: "{{ steps.structure.title }}", body: "{{ steps.structure.summary }}", tags: "{{ steps.structure.tags }}", properties: "{{ steps.structure.properties }}" }
+    outputs: [page_id]
+    depends_on: [structure]
+    on_error: { retry: { max: 2, backoff: exponential }, fallback: notify }
+  - id: verify
+    capability: mcp_tool
+    action: get_page
+    inputs: { kb: "{{ config.kb }}", page_id: "{{ steps.create.page_id }}" }
+    outputs: [verified]
+    depends_on: [create]
+outputs:
+  - { name: page_id, from: "{{ steps.create.page_id }}" }
+verification:
+  - type: data_shape
+    check: kb_entry_created
+    asserts: ["page re-fetched by id", "title and tags present"]
+    on_fail: notify
+failure_recovery:
+  default_retry: { max: 2, backoff: exponential }
+  on_failure: notify_user
+  idempotency_key: "{{ inputs.source_url }}-{{ inputs.content }}"
+security_classification: consequential
+user_confirmation_required: true
+resource_expectations: { est_runtime_seconds: 20, est_peak_ram_mb: 150, network: true, spawns_process: false }
+provenance:
+  pattern_family: "Capture -> structured KB entry"
+  derived_from:
+    - { source: "awesome-n8n-templates: 'mails2notion', 'Notion AI Assistant Generator' (webhook|http+mcp_tool ~24)", url: "https://github.com/enescingoz/awesome-n8n-templates", license: "CC-BY-4.0 (Enes Cingoz)", reuse: adapted }
+  license: MIT
+  portability_notes: "Re-fetches the created page; routes Notion/Airtable through the single MCP gateway."
