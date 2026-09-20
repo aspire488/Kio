@@ -84,6 +84,8 @@ def _is_process_running_tasklist(app_name: str) -> bool:
         return False
     
     import subprocess
+
+    from mini_kio.core.win_spawn import no_window
     exe_names = _PROCESS_NAMES.get(app_name.lower(), [f"{app_name}.exe"])
     try:
         result = subprocess.run(
@@ -91,6 +93,7 @@ def _is_process_running_tasklist(app_name: str) -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            **no_window(),
         )
         output_lower = result.stdout.lower()
         return any(exe.lower() in output_lower for exe in exe_names)

@@ -33,9 +33,12 @@ SEPARATE: this module never calls an LLM.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import re
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Optional
@@ -113,18 +116,116 @@ _SPREADSHEET_KINDS = frozenset({
 # extensions (NOT OOXML) so they open in the user's editor.
 _CODE_KINDS = frozenset({"code", "program", "script"})
 _CODE_EXTENSIONS = {
-    "python": ".py", "py": ".py", "javascript": ".js", "js": ".js",
-    "typescript": ".ts", "ts": ".ts", "java": ".java",
-    "c++": ".cpp", "c#": ".cs", "cs": ".cs", "go": ".go",
-    "rust": ".rs", "ruby": ".rb", "php": ".php", "bash": ".sh",
-    "powershell": ".ps1", "html": ".html", "css": ".css", "sql": ".sql",
+    # Systems & compiled
+    "python": ".py", "py": ".py",
+    "javascript": ".js", "js": ".js", "node": ".js", "nodejs": ".js",
+    "typescript": ".ts", "ts": ".tsx",
+    "tsx": ".tsx", "jsx": ".jsx",
+    "java": ".java", "kotlin": ".kt", "kt": ".kt", "kotlin/java": ".kt",
+    "swift": ".swift",
+    "c": ".c", "c++": ".cpp", "cpp": ".cpp", "c#": ".cs", "cs": ".cs",
+    "go": ".go", "golang": ".go",
+    "rust": ".rs", "rs": ".rs",
+    "dart": ".dart",
+    "scala": ".scala", "r": ".r", "rb": ".rb",
+    # Scripting
+    "ruby": ".rb", "php": ".php",
+    "perl": ".pl", "lua": ".lua",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh", "zsh": ".sh",
+    "powershell": ".ps1", "ps1": ".ps1",
+    "batch": ".bat", "bat": ".bat", "cmd": ".bat",
+    # Data / config
+    "json": ".json", "yaml": ".yml", "yml": ".yml", "toml": ".toml",
+    "xml": ".xml", "csv": ".csv",
+    # Web
+    "html": ".html", "css": ".css", "scss": ".scss", "sass": ".sass",
+    "sql": ".sql", "graphql": ".graphql", "gql": ".graphql",
+    # Functional
+    "haskell": ".hs", "hs": ".hs",
+    "elixir": ".ex", "ex": ".ex", "erlang": ".erl",
+    "clojure": ".clj", "clj": ".clj",
+    # Other
+    "matlab": ".m", "racket": ".rkt", "fortran": ".f90",
+    "assembly": ".asm", "asm": ".asm", "nasm": ".asm",
+    "groovy": ".groovy", "gradle": ".gradle",
+    "makefile": ".mk", "cmake": ".cmake",
+    "dockerfile": ".dockerfile", "docker": ".dockerfile",
+    "terraform": ".tf", "tf": ".tf",
+    "ansible": ".yml",
+    "vue": ".vue", "svelte": ".svelte",
 }
 _PRESENTATION_KINDS = frozenset({
     "presentation", "slides", "slide", "deck", "ppt", "pptx", "powerpoint",
     "slideshow", "talk", "slide deck",
 })
 
+# Portable Document Format: a real .pdf is built by exporting the Word
+# document through the installed Word application (COM). There is no
+# stdlib/office-free PDF writer in this stack, so without Word the request
+# fails honestly — it must never silently fall back to a .docx, which would
+# be a fake success.
+_PDF_KINDS = frozenset({"pdf", "pdf document", "pdf file", "portable document"})
+
+# Plain-text artifact kinds: written as UTF-8 text files with appropriate
+# extensions.  These bypass OOXML entirely — a simple `path.write_text()`.
+_PLAINTEXT_KINDS = frozenset({
+    "csv", "tsv", "text", "txt", "plain text", "notepad",
+    "markdown", "md", "html", "web page", "webpage",
+})
+_PLAINTEXT_EXTENSIONS = {
+    "csv": ".csv", "tsv": ".tsv",
+    "text": ".txt", "txt": ".txt", "plain text": ".txt", "notepad": ".txt",
+    "markdown": ".md", "md": ".md",
+    "html": ".html", "web page": ".html", "webpage": ".html",
+}
+
+# Project scaffolding helpers
+#: Language -> dependency manifest filename. Must cover EVERY language whose
+#: branch below builds `dep_content`: a missing entry discarded the prepared
+#: manifest silently, so a JavaScript project was created with no package.json
+#: at all (the content existed but nothing named the file).
+_DEP_FILE_NAMES = {
+    "python": "requirements.txt", "py": "requirements.txt",
+    "javascript": "package.json", "js": "package.json",
+    "node": "package.json", "nodejs": "package.json",
+    "typescript": "package.json", "ts": "package.json",
+    "tsx": "package.json", "jsx": "package.json",
+    "vue": "package.json", "svelte": "package.json",
+    "ruby": "Gemfile", "rb": "Gemfile",
+    "php": "composer.json",
+    "rust": "Cargo.toml", "rs": "Cargo.toml",
+    "go": "go.mod", "golang": "go.mod",
+}
+
+def _run_command(lang: str, main_name: str) -> str:
+    """Return the shell command to run a project's entry point."""
+    lang = lang.lower().strip()
+    if lang in ("python", "py"):
+        return f"python src/{main_name}"
+    if lang in ("javascript", "js", "node", "nodejs"):
+        return f"node src/{main_name}"
+    if lang in ("typescript", "ts", "tsx", "jsx"):
+        return f"npx ts-node src/{main_name}"
+    if lang in ("rust", "rs"):
+        return "cargo run"
+    if lang in ("go", "golang"):
+        return f"go run src/{main_name}"
+    if lang in ("java",):
+        return f"javac src/{main_name} && java -cp src {main_name.replace('.java', '')}"
+    if lang in ("kotlin", "kt"):
+        return f"kotlin src/{main_name}"
+    if lang in ("ruby", "rb"):
+        return f"ruby src/{main_name}"
+    if lang in ("php",):
+        return f"php src/{main_name}"
+    if lang in ("bash", "sh", "shell", "zsh"):
+        return f"bash src/{main_name}"
+    if lang in ("powershell", "ps1"):
+        return f"pwsh src/{main_name}"
+    return f"run src/{main_name}"
+
 _ARTIFACT_SUFFIX_EXTRA = {
+    "pdf": "PDF",
     "spreadsheet": "Spreadsheet",
     "budget": "Budget",
     "table": "Table",
@@ -171,6 +272,10 @@ def artifact_extension(artifact: str, language: str = "") -> str:
         return ".xlsx"
     if kind in _PRESENTATION_KINDS:
         return ".pptx"
+    if kind in _PDF_KINDS:
+        return ".pdf"
+    if kind in _PLAINTEXT_KINDS:
+        return _PLAINTEXT_EXTENSIONS.get(kind, ".txt")
     return ".docx"
 
 
@@ -213,8 +318,12 @@ def _parse_spreadsheet_rows(raw_content: str) -> list[list[str]]:
         line = line.strip()
         if not line:
             continue
-        if line.startswith("|"):
-            cells = [c.strip().lstrip("|").rstrip("|") for c in line.split("|")]
+        # Pipe-delimited row. Must cover the unpadded form the model usually
+        # returns ("Capability | Provider | Verified"), not only a padded
+        # markdown table ("| A | B |") — otherwise real tabular content was
+        # discarded as prose and replaced by generic filler.
+        if line.count("|") >= 2:
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
             cells = [c for c in cells if c != ""]
             if cells and all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
                 continue
@@ -559,6 +668,132 @@ def verify_xlsx(path: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("verify_xlsx failed: %s", exc)
     return facts
+
+
+# ── append_xlsx_row ────────────────────────────────────────────────────────
+
+_MAX_XLSX_ROWS = 50000  # hard cap to prevent runaway growth
+
+
+def append_xlsx_row(workbook: str, record: dict, worksheet: str = "") -> dict[str, Any]:
+    """Append a record as a new row to an existing .xlsx workbook.
+
+    Semantics:
+      - Opens an existing workbook or creates one with record keys as headers.
+      - Writes record values in header order.
+      - Returns row_index (1-based, header=row 1).
+      - worksheet defaults to the active sheet; pass a name to target a specific one.
+
+    Security:
+      - Path validated (no traversal).
+      - Row count capped at _MAX_XLSX_ROWS.
+
+    Verification:
+      - File is a valid ZIP after write.
+      - Appended row_count increased by 1.
+    """
+    try:
+        from openpyxl import Workbook, load_workbook
+    except ImportError:
+        return {"success": False, "message": "openpyxl not installed"}
+
+    try:
+        from pathlib import Path
+        p = Path(workbook).expanduser().resolve()
+        # Block path traversal
+        if ".." in str(workbook).split("/") or ".." in str(workbook).split("\\"):
+            return {"success": False, "message": f"Path traversal blocked: {workbook}"}
+
+        if not record:
+            return {"success": False, "message": "Record is empty"}
+
+        keys = list(record.keys())
+        values = [record[k] for k in keys]
+
+        if p.exists():
+            # Verify size before opening
+            size_mb = p.stat().st_size / (1024 * 1024)
+            if size_mb > 20:
+                return {"success": False, "message": f"Workbook too large: {size_mb:.1f}MB (limit 20MB)"}
+
+            wb = load_workbook(str(p))
+            ws = wb[worksheet] if worksheet and worksheet in wb.sheetnames else wb.active
+
+            # Read existing headers from row 1
+            existing_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+            existing_headers = [h for h in existing_headers if h is not None]
+
+            # Check row cap
+            if ws.max_row >= _MAX_XLSX_ROWS:
+                wb.close()
+                return {"success": False, "message": f"Row cap reached: {_MAX_XLSX_ROWS}"}
+
+            # Map values to existing header order
+            row_data = []
+            for header in existing_headers:
+                if header in keys:
+                    row_data.append(record[header])
+                else:
+                    row_data.append(None)
+
+            # Append any new keys not in existing headers
+            new_keys = [k for k in keys if k not in existing_headers]
+            if new_keys:
+                # Extend header row
+                for i, nk in enumerate(new_keys):
+                    ws.cell(row=1, column=len(existing_headers) + i + 1, value=nk)
+                # Extend row_data
+                for nk in new_keys:
+                    row_data.append(record[nk])
+
+            next_row = ws.max_row + 1
+            for c_idx, val in enumerate(row_data, start=1):
+                ws.cell(row=next_row, column=c_idx, value=val)
+
+            wb.save(str(p))
+            wb.close()
+
+            # Verify row count increased
+            import zipfile
+            if zipfile.is_zipfile(str(p)):
+                with zipfile.ZipFile(str(p)) as zf:
+                    sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="replace")
+                    actual_rows = sheet_xml.count("<row ")
+                if actual_rows < 2:
+                    return {"success": False, "message": "Verification failed: no data rows"}
+
+            return {
+                "success": True,
+                "message": f"Row appended at index {next_row}",
+                "row_index": next_row,
+                "workbook": str(p),
+                "headers": existing_headers + new_keys,
+            }
+        else:
+            # Create new workbook with headers
+            wb = Workbook()
+            ws = wb.active
+            ws.title = worksheet or "Data"
+            for c_idx, key in enumerate(keys, start=1):
+                ws.cell(row=1, column=c_idx, value=key)
+            for c_idx, val in enumerate(values, start=1):
+                ws.cell(row=2, column=c_idx, value=val)
+
+            p.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(str(p))
+            wb.close()
+
+            return {
+                "success": True,
+                "message": f"Created workbook with row at index 2",
+                "row_index": 2,
+                "workbook": str(p),
+                "headers": keys,
+            }
+
+    except Exception as exc:
+        logger.exception("append_xlsx_row failed: %s", exc)
+        return {"success": False, "message": f"append_xlsx_row failed: {str(exc)[:80]}"}
 
 
 # ── .pptx (real presentation) ────────────────────────────────────────────────
@@ -1298,6 +1533,105 @@ def verify_pptx(path: Path) -> dict[str, Any]:
 
 
 # ── COM enhancement: real PowerPoint applies per-slide transitions ──────────
+def verify_pdf(path: Path) -> dict[str, Any]:
+    """Verify a real .pdf artifact: exists, PDF header, page objects, EOF marker."""
+    facts: dict[str, Any] = {"exists": False, "valid_pdf": False, "page_count": 0}
+    try:
+        if not path.exists():
+            return facts
+        facts["exists"] = True
+        facts["size_bytes"] = path.stat().st_size
+        data = path.read_bytes()
+        if not data.startswith(b"%PDF-"):
+            return facts
+        if b"%%EOF" not in data[-2048:]:
+            return facts
+        facts["valid_pdf"] = True
+        # Page count: prefer the /Count entry of the page tree; fall back to
+        # counting /Type /Page objects. Both are absent only for encrypted or
+        # object-stream-compressed files, in which case the count stays 0.
+        counts = [int(m) for m in re.findall(rb"/Count\s+(\d+)", data)]
+        if counts:
+            facts["page_count"] = max(counts)
+        else:
+            facts["page_count"] = len(re.findall(rb"/Type\s*/Page[^s]", data))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("verify_pdf failed: %s", exc)
+    return facts
+
+
+def _docx_to_pdf(docx_path: Path, pdf_path: Path, timeout: float = 45.0) -> dict[str, Any]:
+    """Export a .docx to .pdf through the installed Microsoft Word (COM).
+
+    Runs bounded (worker thread + join) so a hung Office process can never
+    block the pipeline. Returns {"ok", "pages", "error"} — never raises.
+    """
+    out: dict[str, Any] = {"ok": False, "pages": 0, "error": None}
+    if os.environ.get("KIO_TEST_MODE") == "1":
+        out["error"] = "Word export disabled in test mode"
+        return out
+    if not _HAVE_PYWIN32:
+        out["error"] = "Word automation unavailable (pywin32 not installed)"
+        return out
+
+    import threading
+
+    def _run() -> None:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        word = None
+        doc = None
+        try:
+            # DispatchEx forces a dedicated Word instance so an open, user-
+            # visible Word window is never hijacked or closed.
+            word = win32com.client.DispatchEx("Word.Application")
+            try:
+                word.Visible = False
+            except Exception:
+                pass
+            try:
+                word.DisplayAlerts = 0
+            except Exception:
+                pass
+            doc = word.Documents.Open(
+                str(docx_path), ReadOnly=True, AddToRecentFiles=False,
+                Visible=False,
+            )
+            # 17 = wdExportFormatPDF, 2 = wdStatisticPages
+            doc.ExportAsFixedFormat(str(pdf_path), 17)
+            try:
+                out["pages"] = int(doc.ComputeStatistics(2))
+            except Exception:
+                out["pages"] = 0
+            out["ok"] = pdf_path.exists() and pdf_path.stat().st_size > 0
+            if not out["ok"]:
+                out["error"] = "Word produced no output file"
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(False)
+                except Exception:
+                    pass
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
+            pythoncom.CoUninitialize()
+
+    worker = threading.Thread(target=_run, name="kio-docx-to-pdf", daemon=True)
+    worker.start()
+    worker.join(timeout=timeout)
+    if worker.is_alive():
+        out["ok"] = False
+        out["error"] = f"Word export timed out after {timeout:.0f}s"
+    return out
+
+
 def enhance_pptx_transitions(path: Path, timeout: float = 30.0) -> bool:
     """Apply a fade transition to every slide through the REAL PowerPoint app.
 
@@ -1441,8 +1775,12 @@ def _build_docx_rich(
             if not lines:
                 continue
             for line in lines:
-                if line.startswith("|"):
-                    cells = [c.strip().lstrip("|").rstrip("|") for c in line.split("|")]
+                # Pipe-delimited table row. Accept the padded markdown form
+                # ("| A | B |") AND the unpadded form the model commonly emits
+                # ("A | B | C") — otherwise a requested comparison table was
+                # silently flattened into prose paragraphs.
+                if line.count("|") >= 2:
+                    cells = [c.strip() for c in line.strip().strip("|").split("|")]
                     cells = [c for c in cells if c != ""]
                     if len(cells) >= 2 and not all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
                         table_rows.append(cells)
@@ -1526,12 +1864,15 @@ def create_code_project(
     language: str = "python",
     out_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Create a real project directory: source file + README.md.
+    """Create a real project directory with proper structure.
 
-    "create a Python project with a README" must produce a directory, not a
-    lone file. The directory is named from the subject; the source file uses
-    the language extension; README.md is always written. Returns truthful
-    facts (files, lines, paths) — never a fake success.
+    Produces a professional project layout:
+    - src/ with the main source file
+    - README.md (LLM-generated or provided)
+    - .gitignore (language-appropriate)
+    - requirements.txt (Python) / package.json (JS/TS) / Cargo.toml (Rust) etc.
+    - tests/ directory with a placeholder test file
+    Returns truthful facts (files, lines, paths) — never a fake success.
     """
     subject = (subject or "").strip().rstrip(".,!?;:")
     if not subject:
@@ -1543,28 +1884,21 @@ def create_code_project(
         return {"success": False, "message": f"Couldn't use the Documents folder: {exc}"}
 
     words = re.findall(r"[A-Za-z0-9]+", subject)
-    # Drop leading action verbs so the project keeps a clean, noun-led name:
-    # "calculates fibonacci numbers" -> "Fibonacci_Numbers_Project" (never
-    # "Calculates_Fibonacci_Numbers_Project").
     while words and words[0].lower() in (
         "calculates", "computes", "calculating", "computing", "finds", "find",
         "displays", "shows", "prints", "generates", "creates", "makes",
-        "returns", "fetches", "loads", "parses", "counts", "counts", "tracks",
+        "returns", "fetches", "loads", "parses", "counts", "tracks",
         "manages", "converts", "builds", "runs", "sorts", "searches", "simulates",
     ):
         words.pop(0)
     folder_name = "_".join(w.capitalize() for w in words)[:60] or "Project"
-    if folder_name.lower().endswith("project"):
-        folder_name = folder_name
-    else:
+    if not folder_name.lower().endswith("project"):
         folder_name = f"{folder_name}_Project"
     proj_dir = directory / folder_name
-    if proj_dir.exists():
-        stem, ext = folder_name, ""
-        i = 2
-        while proj_dir.exists():
-            proj_dir = directory / f"{folder_name} ({i})"
-            i += 1
+    i = 2
+    while proj_dir.exists():
+        proj_dir = directory / f"{folder_name} ({i})"
+        i += 1
     try:
         proj_dir.mkdir(parents=True, exist_ok=True)
     except Exception as exc:  # noqa: BLE001
@@ -1573,22 +1907,103 @@ def create_code_project(
     lang = (language or "python").lower().strip()
     ext = _CODE_EXTENSIONS.get(lang, ".py")
     main_name = f"main{ext}" if ext != ".py" else "main.py"
-    source_path = proj_dir / main_name
+
+    # ── src/ directory ──
+    src_dir = proj_dir / "src"
+    src_dir.mkdir(exist_ok=True)
+    source_path = src_dir / main_name
+
+    # ── tests/ directory ──
+    tests_dir = proj_dir / "tests"
+    tests_dir.mkdir(exist_ok=True)
+
+    # ── language-specific scaffolding ──
+    gitignore_content = ""
+    dep_content = ""
+    if lang in ("python", "py"):
+        dep_content = "# Add dependencies here\n"
+        gitignore_content = (
+            "__pycache__/\n*.py[cod]\n*$py.class\n*.so\n.env\n.venv/\n"
+            "venv/\ndist/\nbuild/\n*.egg-info/\n.pytest_cache/\n"
+        )
+        # Placeholder test
+        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+        (tests_dir / f"test_{main_name.replace('.py', '')}.py").write_text(
+            f'import pytest\n\n\ndef test_example():\n    assert True  # TODO: Add real tests\n',
+            encoding="utf-8",
+        )
+    elif lang in ("javascript", "js", "node", "nodejs", "typescript", "ts", "tsx", "jsx", "vue", "svelte"):
+        _test_name = f"main.test{'.ts' if lang in ('typescript', 'ts', 'tsx') else '.js'}"
+        dep_content = '{\n  "name": "' + folder_name.lower().replace("_", "-") + '",\n  "version": "1.0.0",\n  "scripts": {\n    "start": "node src/' + main_name + '",\n    "test": "node tests/' + _test_name + '"\n  }\n}\n'
+        gitignore_content = "node_modules/\ndist/\n.env\n*.log\n"
+        # A placeholder test is part of the promised layout — an empty tests/
+        # directory with only a .gitkeep is not a project "with tests".
+        (tests_dir / _test_name).write_text(
+            "const assert = require('node:assert');\n\n"
+            "// TODO: replace with real tests for src/" + main_name + "\n"
+            "assert.ok(true);\n",
+            encoding="utf-8",
+        )
+    elif lang in ("rust", "rs"):
+        dep_content = "# Cargo.toml would be auto-generated by cargo init\n"
+        gitignore_content = "/target\nCargo.lock\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    elif lang in ("go", "golang"):
+        dep_content = "# go.mod would be auto-initialized by go mod init\n"
+        gitignore_content = "*.exe\ntarget/\nvendor/\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    elif lang in ("java",):
+        gitignore_content = "*.class\n*.jar\nbuild/\n.gradle/\n.idea/\n*.iml\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    elif lang in ("kotlin", "kt"):
+        gitignore_content = "*.class\n*.jar\nbuild/\n.gradle/\n.idea/\n*.iml\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    elif lang in ("ruby", "rb"):
+        dep_content = "# Add gems here\n"
+        gitignore_content = "*.gem\n.bundle/\nvendor/bundle/\nlog/\ntmp/\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    elif lang in ("php",):
+        dep_content = '{\n  "require-dev": {}\n}\n'
+        gitignore_content = "vendor/\ncomposer.lock\n.env\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+    else:
+        gitignore_content = "# Build artifacts\n*.o\n*.out\n*.exe\n"
+        (tests_dir / ".gitkeep").write_text("", encoding="utf-8")
+
     readme_path = proj_dir / "README.md"
+    gitignore_path = proj_dir / ".gitignore"
 
     try:
         source_path.write_text(_strip_code_fences(source) or f"# {folder_name}\n", encoding="utf-8")
         readme_text = readme or (
             f"# {folder_name}\n\n{subject}\n\n"
-            "## Running\n\n```bash\npython main.py\n```\n"
+            "## Structure\n\n```\n"
+            f"{folder_name}/\n"
+            f"  src/\n    {main_name}\n"
+            f"  tests/\n"
+            f"  README.md\n"
+            f"  .gitignore\n"
+            "```\n\n"
+            "## Running\n\n```bash\n"
+            + (_run_command(lang, main_name))
+            + "\n```\n"
         )
         readme_path.write_text(readme_text, encoding="utf-8")
+        if gitignore_content:
+            gitignore_path.write_text(gitignore_content, encoding="utf-8")
+        if dep_content:
+            dep_name = _DEP_FILE_NAMES.get(lang, "")
+            if dep_name:
+                (proj_dir / dep_name).write_text(dep_content, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001
         logger.exception("create_code_project failed: %s", exc)
         return {"success": False, "message": f"The project files couldn't be written: {exc}"}
 
     src_lines = len([l for l in (source or "").splitlines() if l.strip()])
     readme_lines = len([l for l in readme_text.splitlines() if l.strip()])
+    files_created = [main_name, "README.md", ".gitignore"]
+    if dep_content and _DEP_FILE_NAMES.get(lang):
+        files_created.append(_DEP_FILE_NAMES[lang])
     return {
         "success": True,
         "project_dir": str(proj_dir),
@@ -1599,9 +2014,10 @@ def create_code_project(
         "filename": folder_name,
         "language": lang,
         "subject": subject,
+        "files": files_created,
         "message": (
-            f"Created {folder_name} project — {main_name} ({src_lines} lines) "
-            f"and README.md ({readme_lines} lines)."
+            f"Created {folder_name} project — src/{main_name} ({src_lines} lines), "
+            f"README.md, .gitignore, tests/."
         ),
     }
 
@@ -1665,23 +2081,32 @@ def open_artifact(path: Path) -> bool:
 
 def open_in_editor(path: Path, editor: str = "") -> bool:
     import subprocess as _sp
+    import shutil as _shutil
     editor = (editor or "").strip().lower()
-    candidates: list[str] = []
-    if editor in ("vs code", "vscode", "code", "visual studio code"):
-        candidates = [
+    exe = None
+    if editor in ("vs code", "vscode", "code", "visual studio code", ""):
+        # Same detection as app_operator._resolve_vscode_path + shutil.which
+        for cand in [
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"),
+            os.path.expandvars(r"%APPDATA%\Local\Programs\Microsoft VS Code\Code.exe"),
             r"C:\Program Files\Microsoft VS Code\Code.exe",
-        ]
+            r"C:\Program Files (x86)\Microsoft VS Code\Code.exe",
+        ]:
+            if os.path.exists(cand):
+                exe = cand
+                break
+        if not exe:
+            exe = _shutil.which("code")
     elif editor in ("notepad", "notepad++", "npp"):
-        candidates = [r"C:\Windows\System32\notepad.exe"]
-    for cand in candidates:
-        if os.path.exists(cand):
-            try:
-                _sp.Popen([cand, str(path)])
-                return True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("open_in_editor failed for %s: %s", cand, exc)
-                return False
+        exe = r"C:\Windows\System32\notepad.exe"
+    elif editor:
+        exe = _shutil.which(editor)
+    if exe:
+        try:
+            _sp.Popen([exe, str(path)])
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("open_in_editor failed for %s: %s", exe, exc)
     return open_artifact(path)
 
 
@@ -1784,8 +2209,14 @@ def create_artifact(
         # the classic deterministic builder below so a deck is ALWAYS produced.
         try:
             from mini_kio.core.presentation.engine import create_presentation
+            from mini_kio.core.presentation.planner import requested_slide_count
+            # Honour an explicit count stated in the subject (
+            # "five-slide"). The pipeline also passes slide_count through
+            # kwargs when it saw the count in the raw request.
+            _deck_slides = int(kwargs.get("slide_count") or 0) or requested_slide_count(subject)
             engine_result = create_presentation(
                 subject, style=style, seed_content=raw_content, out_dir=directory,
+                opts={"slide_count": _deck_slides} if _deck_slides else None,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("presentation engine unavailable, using fallback: %s", exc)
@@ -1811,6 +2242,101 @@ def create_artifact(
             "filename": path.name,
             "slide_count": facts["slide_count"],
             "artifact": kind,
+            "subject": subject,
+        }
+
+    # ── Plain-text family: CSV / TXT / Markdown / HTML ──────────────────────
+    if kind in _PLAINTEXT_KINDS:
+        content = raw_content.strip()
+        # CSV/TSV must be real delimited data. Content arrives from the model
+        # as a pipe or markdown table often enough that writing it verbatim
+        # produced a one-column file holding "A|B|C" — not a usable CSV.
+        if kind in ("csv", "tsv"):
+            csv_rows = _parse_spreadsheet_rows(content)
+            if len(csv_rows) >= 2:
+                buf = io.StringIO()
+                csv.writer(
+                    buf, delimiter="\t" if kind == "tsv" else ",",
+                    lineterminator="\n",
+                ).writerows(csv_rows)
+                content = buf.getvalue().strip("\n")
+        elif kind in ("html", "web page", "webpage") and not content.startswith("<"):
+            # Wrap plain content in a minimal HTML document
+            content = (
+                "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+                "  <meta charset=\"UTF-8\">\n"
+                f"  <title>{title}</title>\n"
+                "  <style>body{font-family:sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem;}</style>\n"
+                "</head>\n<body>\n"
+                + "\n".join(f"<p>{line}</p>" if line.strip() else "" for line in content.split("\n"))
+                + "\n</body>\n</html>"
+            )
+        try:
+            path.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            return {"success": False, "message": f"Couldn't write the file: {exc}"}
+        line_count = content.count("\n") + 1
+        word_count = len(content.split())
+        return {
+            "success": True,
+            "message": f"Created {path.name} — {word_count} words, {line_count} lines.",
+            "path": str(path),
+            "filename": path.name,
+            "artifact": kind,
+            "subject": subject,
+            "word_count": word_count,
+        }
+
+    # ── PDF family ──────────────────────────────────────────────────────────
+    # A PDF is a real export of the Word document (Word COM), not a renamed
+    # .docx. Content is validated/normalised exactly like the DOCX path so the
+    # PDF carries the same structured report.
+    if kind in _PDF_KINDS:
+        valid, err = validate_content_for_artifact(raw_content, ArtifactType.DOCUMENT)
+        if not valid:
+            logger.info("[ARTIFACT] pdf validation failed: %s — using fallback", err)
+            raw_content = deterministic_document_content(subject)
+        needs_toc = bool(
+            kwargs.get("needs_toc")
+            or re.search(r"table\s+of\s+contents|\btoc\b", (subject or "").lower())
+        )
+        needs_title_page = bool(
+            kwargs.get("needs_title_page")
+            or re.search(r"title\s+page|cover\s+page", (subject or "").lower())
+        )
+        with tempfile.TemporaryDirectory(prefix="kio_pdf_") as tmpdir:
+            intermediate = Path(tmpdir) / (path.stem + ".docx")
+            if not build_docx(
+                intermediate, title, raw_content,
+                needs_toc=needs_toc, needs_title_page=needs_title_page,
+            ):
+                return {"success": False, "message": "The document couldn't be written."}
+            conversion = _docx_to_pdf(intermediate, path)
+        if not conversion.get("ok"):
+            # No fake success: report exactly why the PDF could not be made.
+            return {
+                "success": False,
+                "message": (
+                    "I couldn't create the PDF — converting to PDF needs the "
+                    f"installed Word application ({conversion.get('error') or 'export failed'})."
+                ),
+            }
+        facts = verify_pdf(path)
+        if not facts.get("valid_pdf"):
+            return {
+                "success": False,
+                "message": f"The PDF was written but verification failed ({path.name}).",
+            }
+        word_count = len(re.sub(r"<[^>]+>", " ", raw_content).split())
+        page_count = facts.get("page_count") or conversion.get("pages") or 0
+        return {
+            "success": True,
+            "message": f"Created {path.name} — {page_count} page(s), {word_count} words.",
+            "path": str(path),
+            "filename": path.name,
+            "page_count": page_count,
+            "word_count": word_count,
+            "artifact": "pdf",
             "subject": subject,
         }
 

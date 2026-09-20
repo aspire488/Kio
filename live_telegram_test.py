@@ -283,6 +283,12 @@ def start_kio() -> subprocess.Popen:
     log.info("Starting KIO runtime...")
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    # CREATE_NO_WINDOW: this harness can be started from a console-less parent
+    # (hidden launcher / agent runner), in which case an unflagged console child
+    # pops a visible console window — the exact regression this repo fixed for
+    # the runtime's own helper processes. Matches launch_bot.py.
+    from mini_kio.core.win_spawn import no_window
+
     _kio_process = subprocess.Popen(
         [sys.executable, "-u", str(PROJECT_ROOT / "kio_bot.py")],
         cwd=str(PROJECT_ROOT),
@@ -291,6 +297,7 @@ def start_kio() -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        **no_window(),
     )
     # Wait for the bot to be ready
     log.info("Waiting for KIO bot to be ready...")

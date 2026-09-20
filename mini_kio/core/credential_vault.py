@@ -121,6 +121,26 @@ def _now_ts() -> int:
     return int(time.time())
 
 
+def _has_refresh_material(secret: Optional[str]) -> bool:
+    """True when a stored payload carries durable refresh material.
+
+    For an OAuth credential, `expires_at` is the SHORT-LIVED access-token expiry
+    (typically ~1 hour). An expired access token alongside a refresh_token is a
+    normal, self-healing state — the owning client exchanges the refresh_token
+    for a new access token — so it must not be reported the same way as an
+    expired credential with nothing left to refresh with.
+
+    Tests for the presence of the material only; never returns or logs it.
+    """
+    if not secret:
+        return False
+    try:
+        payload = json.loads(secret)
+    except Exception:
+        return False
+    return isinstance(payload, dict) and bool(payload.get("refresh_token"))
+
+
 def _sanitize_metadata(metadata: Optional[dict]) -> dict:
     """Return a metadata copy with secret-shaped keys removed.
 
@@ -291,6 +311,42 @@ class CredentialVault:
                 created_at=row.created_at,
             )
 
+    def retrieve_for_refresh(self, credential_id: str) -> Optional[Credential]:
+        """Return the stored credential for a token-refresh flow.
+
+        Identical to `retrieve()` except that an access token past its expiry does
+        not disqualify the credential — provided the payload still carries durable
+        refresh material.
+
+        `retrieve()` stays fail-closed for execution gating. This accessor exists
+        because OAuth's durable material is the refresh_token: refusing to hand it
+        over is what made an authorized Google credential unusable after its
+        one-hour access token lapsed. A genuinely dead credential (no refresh
+        material, revoked, or secret gone) is never resurrected — it returns None.
+        """
+        from mini_kio.backend.models import CredentialRecordModel
+
+        with self._session_scope() as session:
+            row = (
+                session.query(CredentialRecordModel)
+                .filter(CredentialRecordModel.credential_id == credential_id)
+                .first()
+            )
+            if row is None or row.revoked:
+                return None
+            secret = self._keyring.get(credential_id)
+            if secret is None or not _has_refresh_material(secret):
+                return None
+            return Credential(
+                credential_id=row.credential_id,
+                provider=row.provider,
+                credential_type=row.credential_type,
+                secret=secret,
+                expires_at=row.expires_at,
+                metadata=dict(row.metadata_json or {}),
+                created_at=row.created_at,
+            )
+
     def revoke(self, credential_id: str) -> None:
         """Revoke a credential: drop the secret and mark revoked. Next access
         will re-prompt. (Lifecycle surface used by Slice 9; core revocation is
@@ -372,7 +428,9 @@ class CredentialVault:
                 if secret is None:
                     continue  # metadata row without keyring secret
                 if row.expires_at is not None and now > row.expires_at:
-                    return STATE_EXPIRED
+                    # Expired access token is not the same as a dead credential:
+                    # with refresh material the client can obtain a new one.
+                    return STATE_REFRESHABLE if _has_refresh_material(secret) else STATE_EXPIRED
                 return STATE_VALID
             # No usable row: either all revoked or all keyring entries gone.
             if all(row.revoked for row in rows):

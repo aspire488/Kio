@@ -126,15 +126,17 @@ def validate_spreadsheet_content(content: str) -> tuple[bool, str]:
 
     # Count tab-separated rows
     tab_rows = sum(1 for l in lines if "\t" in l and len(l.split("\t")) >= 2)
-    # Count pipe-separated rows (markdown tables)
-    pipe_rows = sum(1 for l in lines if l.startswith("|") and l.count("|") >= 3)
+    # Count pipe-separated rows. Unpadded pipe rows ("A | B | C") are as
+    # tabular as padded markdown ones ("| A | B |"); requiring the leading
+    # bar rejected genuine tables and replaced them with generic filler.
+    pipe_rows = sum(1 for l in lines if l.count("|") >= 2)
 
     data_rows = tab_rows + pipe_rows
     if data_rows < 2:
         return False, f"Need at least 2 data rows, got {data_rows}"
 
     # Check for prose/instructions (more than 50% non-tabular lines)
-    prose_lines = sum(1 for l in lines if "\t" not in l and not l.startswith("|"))
+    prose_lines = sum(1 for l in lines if "\t" not in l and l.count("|") < 2)
     if prose_lines > len(lines) * 0.5:
         return False, f"Too much prose: {prose_lines}/{len(lines)} lines are not tabular"
 

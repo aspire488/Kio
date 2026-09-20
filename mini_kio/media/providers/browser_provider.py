@@ -101,7 +101,7 @@ class BrowserProvider(MediaProvider):
             return MediaResult(success=False, error="No active browser media", player="browser")
         action = "seek_forward" if seconds >= 0 else "seek_backward"
         try:
-            result = safe_run_async(conn.execute_script(tab_id, action))
+            result = safe_run_async(conn.execute_script(tab_id, action, args=[abs(seconds)]))
             if result.success:
                 if self._session:
                     self._session.touch()
@@ -137,8 +137,25 @@ class BrowserProvider(MediaProvider):
             result = safe_run_async(conn.execute_script(tab_id, action))
             if result.success:
                 status = result.message
+                actual_vol = None
                 if isinstance(result.message, dict):
                     status = result.message.get("status", "volume_changed")
+                    actual_vol = result.message.get("volume")
+                # Verify volume actually changed by reading current state
+                if actual_vol is None:
+                    try:
+                        vol_check = safe_run_async(conn.execute_script(tab_id, "get_volume"))
+                        if vol_check.success and isinstance(vol_check.message, dict):
+                            actual_vol = vol_check.message.get("volume")
+                    except Exception:
+                        pass
+                if actual_vol is not None:
+                    _dir_label = "up" if direction != "down" else "down"
+                    return MediaResult(
+                        success=True,
+                        message=f"Volume {_dir_label} to {int(actual_vol*100)}% [VOLUME_VERIFY]",
+                        player="browser",
+                    )
                 return MediaResult(success=True, message=status or "Volume adjusted", player="browser")
             return MediaResult(success=False, error=result.error, player="browser")
         except Exception as exc:

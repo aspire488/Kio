@@ -1,0 +1,13 @@
+steps:
+  - action: open_app
+    target: notepad
+  - action: type
+    target: Hello from KIO
+  - action: save
+    target: C:\\Users\\Public\\hello.txt
+  - action: close_app
+    target: notepad
+  - action: open_app
+    target: notepad
+  - action: verify_file
+    target: C:\\Users\\Public\\hello.txt

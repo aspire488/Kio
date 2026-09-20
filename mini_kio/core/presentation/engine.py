@@ -359,6 +359,32 @@ def create_presentation(
         user_progress.end()
         return {"success": False, "message": "The presentation couldn't be written."}
 
+    # An explicit slide count ("five-slide deck") is a hard requirement, not a
+    # hint. The deck always contains furniture the plan does not (title and
+    # section slides), so measure that difference on the built file and fit the
+    # plan so the finished deck lands on exactly the requested count. Bodies
+    # are counted per rebuild, so this converges in one or two passes; if the
+    # furniture floor is already above the request the loop stops and the real
+    # count is reported honestly instead of being faked.
+    requested_slides = int(opts.get("slide_count") or 0)
+    if requested_slides:
+        for _attempt in range(3):
+            probe = quality.score_deck(path)
+            actual = int(probe.get("slide_count") or 0)
+            if actual == requested_slides:
+                break
+            furniture = max(0, actual - len(plan.slides))
+            want = requested_slides - furniture
+            if want < 1 or want == len(plan.slides):
+                break
+            fitted = planner.fit_plan_slides(plan.slides, want)
+            if len(fitted) == len(plan.slides):
+                break
+            plan.slides = fitted
+            built = build_deck(path, plan, subject, style, hermetic=hermetic)
+            if built is None:
+                break
+
     q = quality.score_deck(path)
     for _attempt in range(2):
         if q.get("score", 0) >= 70 and not _overflow_issues(q):

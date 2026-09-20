@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from mini_kio.core.mcp.servers.base import BaseMCPServer
+from mini_kio.core.win_spawn import no_window
 
 
 class GitMCPServer(BaseMCPServer):
@@ -21,7 +22,10 @@ class GitMCPServer(BaseMCPServer):
         self.register_tool("show", self._show, {"path": {"type": "string"}, "rev": {"type": "string"}})
 
     def _git(self, cwd: str, *args: str) -> tuple[int, str, str]:
-        result = subprocess.run(["git"] + list(args), capture_output=True, text=True, cwd=cwd, timeout=30)
+        result = subprocess.run(
+            ["git"] + list(args), capture_output=True, text=True, cwd=cwd, timeout=30,
+            **no_window(),
+        )
         return result.returncode, result.stdout, result.stderr
 
     def _status(self, path: str) -> dict:

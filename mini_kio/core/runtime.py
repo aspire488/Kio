@@ -1347,7 +1347,7 @@ def get_runtime_snapshot() -> dict[str, object]:
         "integrity_score": runtime.integrity_score,
         "integrity_warning_count": len(runtime.integrity_warnings),
         "health_score": get_runtime_health_score(),
-        "browser_runtime_ready": getattr(runtime.browser_runtime, '_started', False) if runtime.browser_runtime is not None else False,
+        "browser_runtime_ready": _check_browser_runtime_ready(runtime),
         "mcp_runtime_ready": runtime.mcp_runtime is not None,
     }
     # Cache the snapshot for 5s to avoid repeated psutil calls
@@ -1355,6 +1355,20 @@ def get_runtime_snapshot() -> dict[str, object]:
     runtime._last_snapshot_at = time.monotonic()
     return snap
 
+
+def _check_browser_runtime_ready(runtime: KioRuntime) -> bool:
+    """Check if browser runtime is ready via either BrowserRuntime or the WebSocket connector."""
+    # Check BrowserRuntime (Playwright-based)
+    if runtime.browser_runtime is not None and getattr(runtime.browser_runtime, '_started', False):
+        return True
+    # Check the WebSocket connector (Chrome extension) — the actual runtime used
+    try:
+        from mini_kio.core.command_router import _CONNECTOR_STARTED, _CONNECTOR_INSTANCE
+        if _CONNECTOR_STARTED and _CONNECTOR_INSTANCE is not None:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 _RUNTIME_READY_FLAG = Path("runtime_ready.flag")

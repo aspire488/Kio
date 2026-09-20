@@ -248,9 +248,12 @@ def _system_metrics() -> dict[str, Any]:
     # GPU — lightweight nvidia-smi probe only (on-demand, no monitoring stack).
     try:
         import subprocess
+
+        from mini_kio.core.win_spawn import no_window
         res = subprocess.run(
             ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=2,
+            **no_window(),
         )
         if res.returncode == 0 and res.stdout.strip():
             out["gpu"] = int(round(float(res.stdout.strip().splitlines()[0].strip())))

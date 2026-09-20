@@ -18,6 +18,7 @@ is a designed deck, never a text dump.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -95,6 +96,74 @@ class DeckPlan:
     slides: list[SlideSpec] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
     credits_rows: list[list[str]] = field(default_factory=list)
+
+
+# ── explicit slide-count requests ─────────────────────────────────────────────
+
+_NUM_WORDS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "fifteen": 15, "twenty": 20, "thirty": 30,
+}
+
+_SLIDE_COUNT_RE = re.compile(
+    r"\b(\d{1,3}|"
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"fifteen|twenty|thirty)"
+    r"\s*[-\u2013]?\s*slides?\b",
+    re.IGNORECASE,
+)
+
+
+def requested_slide_count(*texts: Optional[str]) -> int:
+    """Count the user explicitly asked for, or 0 when they did not.
+
+    Recognises "5 slides", "5-slide", "five-slide", "ten slides". Returning 0
+    means "no explicit request" — the designed deck length applies, which is
+    the behaviour that must not change for ordinary requests.
+    """
+    for text in texts:
+        if not text:
+            continue
+        for match in _SLIDE_COUNT_RE.finditer(text):
+            raw = match.group(1).lower()
+            n = _NUM_WORDS.get(raw)
+            if n is None and raw.isdigit():
+                n = int(raw)
+            if n and 1 <= n <= 60:
+                return n
+    return 0
+
+
+def fit_plan_slides(slides: list[SlideSpec], want: int) -> list[SlideSpec]:
+    """Fit the planned slides to exactly *want* entries.
+
+    Trimming drops the planner's trailing additions first (the deck's own
+    narrative order is preserved). Expansion SPLITS the richest slide body in
+    half — the "(cont.)" title keeps the halves readable — so a padded deck
+    stays content-derived instead of gaining generic filler slides.
+    """
+    slides = list(slides or [])
+    if want <= 0 or not slides:
+        return slides
+    if len(slides) > want:
+        return slides[:want]
+    guard = 0
+    while len(slides) < want and guard < 200:
+        guard += 1
+        idx = max(range(len(slides)), key=lambda i: len(slides[i].body or []))
+        body = list(slides[idx].body or [])
+        if len(body) < 2:
+            break
+        mid = (len(body) + 1) // 2
+        head = copy.copy(slides[idx])
+        head.body = body[:mid]
+        tail = copy.copy(slides[idx])
+        tail.body = body[mid:]
+        tail.title = f"{head.title} (cont.)" if head.title else "Continued"
+        slides[idx] = head
+        slides.insert(idx + 1, tail)
+    return slides
 
 
 # ── research ─────────────────────────────────────────────────────────────────

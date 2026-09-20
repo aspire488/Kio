@@ -88,7 +88,7 @@
       "minItems": 1,
       "items": {
         "type": "string",
-        "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http"]
+        "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http", "knowledge", "terminal", "drive", "contacts", "photos", "places"]
       }
     },
     "providers_required": { "type": "array", "items": { "type": "string" } },
@@ -134,7 +134,7 @@
           "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
           "capability": {
             "type": "string",
-            "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http"]
+            "enum": ["ai_reasoning", "browser", "filesystem", "artifact", "code_project", "communication", "workflow", "monitoring", "github", "calendar", "email", "mcp_tool", "media", "memory", "http", "knowledge", "terminal", "drive", "contacts", "photos", "places"]
           },
           "action": { "type": "string" },
           "description": { "type": "string" },

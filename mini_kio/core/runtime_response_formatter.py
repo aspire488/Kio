@@ -371,9 +371,13 @@ def format_result(
     # time-like strings ("remind me ... at 2026-08-16T11:36" in a reminder
     # list) that must NEVER be re-rendered as a provider widget. Without this
     # boundary, a reminder LIST was mangled into "It's 12:27 PM.".
-    if details.get("type") not in _KIO_OWNED_TYPES and (
-        _PROVIDER_UI_RE.search(message)
-        or (_TIME_WIDGET_RE.search(message) and len(message) > 120)
+    if (
+        action not in ("run_command",)
+        and details.get("type") not in _KIO_OWNED_TYPES
+        and (
+            _PROVIDER_UI_RE.search(message)
+            or (_TIME_WIDGET_RE.search(message) and len(message) > 120)
+        )
     ):
         cleaned = _sanitize_provider_artifact(message)
         if cleaned and cleaned != message:

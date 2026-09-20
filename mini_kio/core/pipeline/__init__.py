@@ -1971,6 +1971,10 @@ class _IntentClassifier:
         if utility is not None:
             return utility
 
+        automation = self._detect_automation(lower, text, raw_text)
+        if automation is not None:
+            return automation
+
         lower = re.sub(r"[\s\.,!?;:]+$", "", lower)
 
         if self._is_forbidden(lower, first_word):
@@ -2481,19 +2485,6 @@ class _IntentClassifier:
                 return RoutingDecision(IntentType.UTILITY, "project", candidate, text, lower, confidence=1.0)
         except Exception:
             pass
-        # General workflow/automation: "create a workflow to open chrome and
-        # search for python" / "run the workflow" / "workflow status" —
-        # composes ANY existing action into an engine-executed multi-step
-        # workflow with approval gates on consequential steps. Checked BEFORE
-        # watch/remind because a workflow body can itself contain "watch X"/
-        # "remind me" as a step ("create a workflow to search X and watch Y")
-        # — the leading workflow head is more specific than the anywhere verb.
-        try:
-            from mini_kio.execution.workflows import looks_like_workflow
-            if looks_like_workflow(candidate):
-                return RoutingDecision(IntentType.UTILITY, "workflow", candidate, text, lower, confidence=1.0)
-        except Exception:
-            pass
         # General outbound communication (draft/send/cancel/list) — provider-
         # neutral seam; telegram is the first provider, others plug in behind
         # the same contract. Checked before watch for the same reason: a
@@ -2566,6 +2557,66 @@ class _IntentClassifier:
                     pass
         return None
 
+    # ── Automation intent detection ─────────────────────────────────
+    # Recognizes requests to run automation workflows from the 63
+    # canonical YAML templates. Must NOT steal normal intents.
+    _AUTOMATION_TRIGGER_RES = [
+        re.compile(r"^run\s+(?:the\s+)?(.+)$", re.I),
+        re.compile(r"^execute\s+(?:the\s+)?(.+)$", re.I),
+        re.compile(r"^start\s+(?:the\s+)?(.+)$", re.I),
+        re.compile(r"^launch\s+(?:the\s+)?(.+)$", re.I),
+        re.compile(r"^automat(?:e|ion)\s+(.+)$", re.I),
+        re.compile(r"^workflow\s+(.+)$", re.I),
+    ]
+    _AUTOMATION_PHRASE_RES = [
+        re.compile(r"\brun\s+(?:the\s+)?(?:morning|daily|weekly|nightly)\s+(?:routine|briefing|review|report)\b", re.I),
+        re.compile(r"\bexecute\s+(?:the\s+)?(?:automation|workflow|routine|pipeline)\b", re.I),
+        re.compile(r"\b(?:run|execute|start|launch)\s+(?:the\s+)?\w[\w\s]*\s+(?:workflow|automation|routine|pipeline)\b", re.I),
+    ]
+
+    def _detect_automation(self, lower, text, raw_text):
+        """Detect automation workflow requests.
+
+        Matches:
+        - "run the morning routine" → template_id candidate = "morning_routine"
+        - "execute data json transform" → template_id candidate = "data.json_transform"
+        - "run the daily briefing" → template_id candidate = "daily_brief"
+
+        Returns RoutingDecision with AUTOMATION intent if matched, None otherwise.
+        The target field carries the template_id candidate for later resolution.
+        """
+        # Check explicit automation trigger phrases
+        for pat in self._AUTOMATION_TRIGGER_RES:
+            m = pat.match(lower)
+            if m:
+                candidate = m.group(1).strip()
+                # Don't match very short or very generic phrases
+                if len(candidate) < 3:
+                    return None
+                return RoutingDecision(
+                    IntentType.AUTOMATION, "run_workflow", candidate,
+                    raw_text or text, lower, confidence=0.85,
+                    metadata={"template_candidate": candidate},
+                )
+
+        # Check compound automation phrases
+        for pat in self._AUTOMATION_PHRASE_RES:
+            if pat.search(lower):
+                # Extract the template candidate from the full text
+                m = re.search(
+                    r"(?:run|execute|start|launch)\s+(?:the\s+)?(.+?)\s+"
+                    r"(?:workflow|automation|routine|pipeline|report|briefing|review)",
+                    lower, re.I,
+                )
+                candidate = m.group(1).strip() if m else lower
+                return RoutingDecision(
+                    IntentType.AUTOMATION, "run_workflow", candidate,
+                    raw_text or text, lower, confidence=0.8,
+                    metadata={"template_candidate": candidate},
+                )
+
+        return None
+
     def _check_identity(self, lower, raw_text="", normalized_text=""):
         from mini_kio.llm.identity_dataset import get_identity_answer
         # KIO-as-assistant vs KIO-as-external-entity boundary: identity answers
@@ -2591,6 +2642,52 @@ class _IntentClassifier:
         if get_identity_answer(lower):
             return RoutingDecision(IntentType.IDENTITY, "", "", raw_text or normalized_text, normalized_text or lower, confidence=1.0)
         return None
+
+    # Terminal command detection: "run the command dir", "execute whoami",
+    # "run dir in terminal", "terminal ls -la". Must run BEFORE _detect_open
+    # because "run" is in _OPEN_VERBS and would misroute.
+    #
+    # The bare verbs are the SHELL-RUNNING verbs only. "type"/"enter" are GUI
+    # input verbs — the desktop TYPE capability — and must never appear in the
+    # bare form: "type hi" is a keystroke command, not `hi` typed into a shell.
+    # Before this split, "type hi" matched here first and was answered with
+    # "Command not in safe list: hi", which silently destroyed the TYPE
+    # capability. Those verbs reach the terminal only via the explicit-shell
+    # form below, which keeps the two capabilities permanently distinct.
+    _TERMINAL_CMD_RE = re.compile(
+        r"^(?:run|execute|run\s+the\s+command|execute\s+the\s+command)\s+"
+        r"(?:the\s+command\s+)?"
+        r"(.+?)"
+        r"(?:\s+(?:in|on|via|through|using)\s+(?:the\s+)?(?:terminal|console|cmd|powershell|shell))?"
+        r"\s*$",
+        re.IGNORECASE,
+    )
+
+    # Explicit-shell typed form: the user names the shell, so the GUI typing
+    # verbs are unambiguous terminal requests ("type dir in terminal").
+    _TERMINAL_TYPED_CMD_RE = re.compile(
+        r"^(?:type|enter)\s+"
+        r"(?:the\s+command\s+)?"
+        r"(.+?)"
+        r"\s+(?:in|on|via|through|using)\s+(?:the\s+)?(?:terminal|console|cmd|powershell|shell)"
+        r"\s*$",
+        re.IGNORECASE,
+    )
+
+    def _detect_terminal_command(self, lower, text):
+        m = self._TERMINAL_CMD_RE.match(lower) or self._TERMINAL_TYPED_CMD_RE.match(lower)
+        if not m:
+            return None
+        command = m.group(1).strip()
+        if not command:
+            return None
+        # Security: reject forbidden targets that might slip through
+        first_cmd_word = command.split()[0].lower().rstrip(".exe") if command.split() else ""
+        if first_cmd_word in self.FORBIDDEN_TARGETS:
+            return None
+        return RoutingDecision(
+            IntentType.FILE, "run_command", command, text, lower, confidence=1.0,
+        )
 
     def _is_forbidden(self, lower, first_word):
         # Phrasal-verb-first ordering, mirroring _open_verb_target, so
@@ -2622,6 +2719,16 @@ class _IntentClassifier:
         verbs = {"open", "close", "shut", "quit", "kill", "end", "search", "play", "launch", "folder", "start", "run", "fire up"}
         if first_word in verbs or any(lower.startswith(p) for p in self._OPEN_PHRASES[0]):
             return bool(re.search(r"\b(?:and|then|anf|andd|thenn|theen)\s*$", lower))
+        # Interrogative compounds: "what time is it and what's the weather"
+        # — both halves are questions joined by "and"/"then".
+        _INTERROGATIVES = {"what", "who", "where", "when", "why", "how", "which", "is", "are", "do", "does", "can", "could", "would", "should"}
+        if first_word in _INTERROGATIVES:
+            _m = re.search(r"\b(?:and|then)\s+", lower)
+            if _m:
+                right_part = lower[_m.end():].strip()
+                right_words = right_part.split()
+                if right_words and right_words[0] in _INTERROGATIVES:
+                    return True
         return False
 
     def _classify_deterministic(self, lower, text, first_word, second_word):
@@ -2664,6 +2771,10 @@ class _IntentClassifier:
         create_new = self._detect_create_new_instance(lower, text)
         if create_new:
             return create_new
+
+        terminal_routing = self._detect_terminal_command(lower, text)
+        if terminal_routing:
+            return terminal_routing
 
         open_routing = self._detect_open(lower, text, first_word)
         if open_routing:
@@ -3492,7 +3603,7 @@ class _IntentClassifier:
             return _edit_decision("save", "ctrl+s", _with_app(m))
         m = re.fullmatch(
             r"copy(?:\s+(?:this|that|it|the\s+(?:selected\s+)?(?:text|selection|content)|selection|text|all|everything))?"
-            r"(?:\s+(?:in|into|from|on|inside)\s+(?:the\s+)?(.+))?",
+            r"(?:\s+(?:in|into|from|on|inside|to)\s+(?:the\s+)?(.+))?",
             lower,
         )
         if m:
@@ -3720,12 +3831,23 @@ class _IntentClassifier:
         "tracker": "spreadsheet", "dataset": "dataset", "ledger": "ledger",
         "inventory": "inventory", "schedule": "schedule", "roster": "roster",
         "code": "code", "program": "code", "script": "code",
+        # New: explicit document and plain-text types
+        "document": "document", "doc": "document", "docx": "document",
+        "word": "document", "word document": "document",
+        "csv": "csv", "tsv": "csv",
+        "txt": "text", "text": "text", "plain text": "text", "notepad": "text",
+        "md": "markdown", "markdown": "markdown",
+        "html": "html", "web page": "html", "webpage": "html",
+        # PDF is its own kind: it is a real Word→PDF export, not a .docx.
+        "pdf": "pdf", "pdf document": "pdf", "pdf file": "pdf",
     }
     _ARTIFACT_NOUNS = re.compile(
         r"\b(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
         r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
         r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|"
-        r"outline|workbook|worksheet|tracker|dataset|ledger|inventory|schedule|roster|timetable)\b"
+        r"outline|workbook|worksheet|tracker|dataset|ledger|inventory|schedule|roster|timetable|"
+        r"document|doc|docx|word|word\s+document|csv|tsv|txt|text|plain\s+text|notepad|"
+        r"md|markdown|html|web\s*page)\b"
     )
     # Generic bare-artifact fallback: "create/make + <any descriptor words> +
     # <artifact noun>" with NO "about X" ("travel budget spreadsheet",
@@ -3739,7 +3861,9 @@ class _IntentClassifier:
         r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
         r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
         r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|outline|"
-        r"workbook|worksheet|tracker|dataset|ledger)\s*$",
+        r"workbook|worksheet|tracker|dataset|ledger|"
+        r"document|doc|docx|word|word\s+document|csv|tsv|txt|text|plain\s+text|notepad|"
+        r"md|markdown|html|web\s*page)\s*$",
         re.IGNORECASE,
     )
     # Bare artifact form: "create a study guide" / "make a spreadsheet" /
@@ -3753,7 +3877,9 @@ class _IntentClassifier:
         r"(spreadsheet|excel|sheet|xlsx|budget|table|presentation|slides|deck|"
         r"ppt|pptx|powerpoint|study\s+guide|notes?|checklist|report|write-up|paper|"
         r"essay|file|article|email|letter|poem|summary|overview|guide|comparison|plan|outline|"
-        r"workbook|worksheet|tracker|dataset|ledger)\s*$",
+        r"workbook|worksheet|tracker|dataset|ledger|"
+        r"document|doc|docx|word|word\s+document|csv|tsv|txt|text|plain\s+text|notepad|"
+        r"md|markdown|html|web\s*page)\s*$",
         re.IGNORECASE,
     )
 
@@ -3954,6 +4080,23 @@ class _IntentClassifier:
             )
         m = self._CODE_WORKFLOW_RE.match(lower)
         if not m:
+            # Bare code statement: "print hello world", "console.log('hi')",
+            # "def foo():", "import os", "class Foo:", etc. — the user is
+            # giving a code snippet they want generated as a file.
+            _CODE_STMT_RE = re.compile(
+                r"^(?:print\s*\(|console\.log\s*\(|def\s+\w+|class\s+\w+|"
+                r"import\s+\w+|from\s+\w+\s+import|function\s+\w+|"
+                r"var\s+\w+|let\s+\w+|const\s+\w+|if\s*\(|for\s*\(|"
+                r"while\s*\(|return\s+|#include|public\s+class|"
+                r"private\s+class|void\s+\w+|int\s+\w+|string\s+\w+)"
+            )
+            if _CODE_STMT_RE.match(lower):
+                return RoutingDecision(
+                    IntentType.DESKTOP_ACTION, "create_document", text.strip(), text, lower,
+                    confidence=0.8,
+                    metadata={"artifact": "code", "style": "", "subject": text.strip(),
+                               "language": "python"},
+                )
             return None
         lang = (m.group(1) or "").strip().lower()
         noun = (m.group(2) or "").strip().lower()
@@ -4348,7 +4491,7 @@ class _IntentClassifier:
         re.compile(r"^tell\s+me\s+what(?:'s|s| is)?\s+(?:open|running|using|active)\b"),
         re.compile(r"^tell\s+me\s+what\s+(?:apps|windows|tabs)\s+are\s+(?:open|running)\b"),
         re.compile(r"^show\s+(?:me\s+)?(?:what(?:'s|s| is)\s+open|(?:my\s+)?(?:open\s+)?(?:apps|windows|tabs|desktop))\b"),
-        re.compile(r"^list\s+(?:open\s+)?(?:apps|windows|tabs)\b"),
+        re.compile(r"^list\s+(?:open\s+)?(?:my\s+)?(?:apps|windows|tabs)\b"),
     )
 
     def _detect_list_tabs(self, lower):
@@ -4828,6 +4971,22 @@ class _IntentClassifier:
     def _detect_file(self, lower, text, first_word):
         if lower.startswith("open folder ") or first_word == "folder":
             return RoutingDecision(IntentType.FILE, "open_folder", text, text, lower, confidence=1.0)
+        # "list files in Desktop", "show files in Downloads", "what files are in ..."
+        _LIST_FILES_RE = re.compile(
+            r"^(?:list|show|what|which|find|get|display|see)\s+(?:the\s+)?(?:files?|folders?|items?|contents?)\s*"
+            r"(?:(?:in|on|at|inside|under)\s+(?:the\s+)?(.+?))?\s*$"
+        )
+        m = _LIST_FILES_RE.match(lower)
+        if m:
+            target = (m.group(1) or "Desktop").strip()
+            return RoutingDecision(IntentType.FILE, "list_files", target, text, lower, confidence=0.9)
+        # "open Desktop", "open Downloads" — folder-open without "folder" keyword
+        _OPEN_FOLDER_RE = re.compile(
+            r"^open\s+(desktop|downloads|documents|pictures|videos|music|appdata|home)\s*$"
+        )
+        m2 = _OPEN_FOLDER_RE.match(lower)
+        if m2:
+            return RoutingDecision(IntentType.FILE, "open_folder", m2.group(1), text, lower, confidence=0.9)
         return None
 
     def _detect_now_playing(self, lower, text):
@@ -5030,7 +5189,12 @@ class _IntentClassifier:
             )
 
         if lower.startswith("seek "):
-            return RoutingDecision(IntentType.MEDIA_TRANSPORT, "seek", "", text, lower, confidence=1.0)
+            # Extract amount: "seek forward 30 seconds" -> "30", "seek back 10" -> "10"
+            seek_amount = ""
+            _seek_m = re.search(r"(?:forward|back|ahead|backward)?\s*(\d+)", lower)
+            if _seek_m:
+                seek_amount = _seek_m.group(1)
+            return RoutingDecision(IntentType.MEDIA_TRANSPORT, "seek", seek_amount, text, lower, confidence=1.0)
 
         _context_play = ("play something similar", "play another", "play more",
                          "another one", "more like this", "more like that")
@@ -5997,6 +6161,7 @@ class _CapabilityResolver:
             IntentType.CREDENTIAL: ("credential", {"action": decision.action, "target": decision.target}),
             IntentType.UTILITY: ("utility", {"action": decision.action, "query": decision.target}),
             IntentType.SIMULATE: ("simulate", {"action": "simulate", "target": decision.target, "metadata": decision.metadata}),
+            IntentType.AUTOMATION: ("automation", {"action": decision.action, "target": decision.target, "metadata": decision.metadata}),
             IntentType.UNKNOWN: ("conversation", {"template": "unknown"}),
         }
         result = mapping.get(decision.intent_type, ("conversation", {"template": "unknown"}))
@@ -6050,6 +6215,7 @@ class _ExecutionCoordinator:
             "credential": self._exec_credential,
             "utility": self._exec_utility,
             "simulate": self._exec_simulate,
+            "automation": self._exec_automation,
         }
         handler = dispatch.get(capability, self._exec_conversation)
         return handler(params, decision)
@@ -6078,6 +6244,25 @@ class _ExecutionCoordinator:
 
     def _exec_desktop(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.execution_boundary import execute_action
+        action = params["action"]
+        target = params["target"]
+        # Terminal commands go directly to TerminalProvider (not through
+        # execute_action which requires _ACTION_MAP or ProviderRegistry lookup).
+        if action == "run_command":
+            try:
+                from mini_kio.core.providers.terminal_provider import TerminalProvider
+                tp = TerminalProvider()
+                result = tp.execute("run_command", target)
+                if result.get("success"):
+                    output = (result.get("message") or "").strip()
+                    msg = f"Ran `{target}` in terminal."
+                    if output:
+                        msg += f"\n\n```\n{output}\n```"
+                    return {"success": True, "message": msg, "action": "run_command"}
+                else:
+                    return {"success": False, "message": f"Failed: {result.get('message', 'unknown error')}", "action": "run_command"}
+            except Exception as exc:
+                return {"success": False, "message": f"Terminal command failed: {exc}", "action": "run_command"}
         action = params["action"]
         target = params["target"]
         meta = params.get("metadata") or {}
@@ -6641,7 +6826,15 @@ class _ExecutionCoordinator:
             # opens the finished deck itself.
             if artifact in _PRESENTATION_KINDS:
                 from mini_kio.core.presentation.engine import create_presentation
-                result = create_presentation(subject, style=style)
+                from mini_kio.core.presentation.planner import requested_slide_count
+                # "Create a five-slide PowerPoint about KIO" is a hard count:
+                # read it from the raw request (the subject stripper drops it)
+                # and hand it to the deck engine. No count -> designed default.
+                _deck_slides = requested_slide_count(decision.raw_text, subject)
+                result = create_presentation(
+                    subject, style=style,
+                    opts={"slide_count": _deck_slides} if _deck_slides else None,
+                )
                 if result.get("success"):
                     n = result.get("slide_count", 0)
                     return {
@@ -6745,7 +6938,7 @@ class _ExecutionCoordinator:
                 kind = result.get("artifact") or artifact
                 filename = result.get("filename", "")
                 if kind in ("code", "program", "script"):
-                    app = editor or "your editor"
+                    app = editor or "VS Code"
                     action_note = f"I wrote the {kind} and opened it in {app}."
                 elif kind in ("spreadsheet", "budget", "table", "sheet", "data", "ledger", "inventory", "tracker", "timetable", "roster", "schedule", "dataset"):
                     action_note = "I made you a fresh spreadsheet and opened it."
@@ -7573,7 +7766,15 @@ class _ExecutionCoordinator:
         if action in transport_actions:
             return transport_actions[action]()
         if decision.normalized_text.startswith("seek "):
-            return mm.seek_forward()
+            # Extract seconds from target (set by classifier)
+            _seek_secs = 10
+            try:
+                _t = decision.target or ""
+                if _t.isdigit():
+                    _seek_secs = int(_t)
+            except Exception:
+                pass
+            return mm.seek_forward(seconds=_seek_secs)
         if decision.normalized_text == "play":
             return mm.play()
 
@@ -8065,11 +8266,34 @@ class _ExecutionCoordinator:
         """
         from mini_kio.llm.llm_ops import ask_llm_sync
 
+        # ── Page-count extraction ──────────────────────────────────────────
+        # "3-page document", "5 page report", "ten page essay" → scale tokens
+        _NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                       "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                       "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20}
+        _page_m = re.search(
+            r"(\d+|[a-z]+)\s*-?\s*page", (prompt or "").lower()
+        )
+        page_count = 0
+        if _page_m:
+            _raw = _page_m.group(1)
+            page_count = _NUM_WORDS.get(_raw, 0) or (int(_raw) if _raw.isdigit() else 0)
+        # ~800 tokens per page of prose; minimum 2400 (≈3 pages)
+        _max_tokens = max(2400, page_count * 800) if page_count else 2400
+
         extra = ""
         if artifact:
             extra += f" It should be structured as a {artifact or 'document'} document."
         if style:
             extra += f" Keep it {style}."
+        if page_count:
+            extra += (
+                f" The document should be approximately {page_count} page"
+                f"{'s' if page_count != 1 else ''} long when rendered in a "
+                "standard word processor (roughly 500-600 words per page). "
+                "Write enough substantive content to fill that length — do NOT "
+                "stop early or pad with repetition."
+            )
         # Structured artifacts (spreadsheet/presentation) need their structure
         # preserved; editor typing needs plain prose. Make the instruction
         # artifact-aware instead of forcing plain prose onto everything.
@@ -8191,7 +8415,7 @@ class _ExecutionCoordinator:
                     prompt,
                     system_prompt=system_prompt,
                     timeout=_timeout,
-                    max_tokens=2400,
+                    max_tokens=_max_tokens,
                     task=_task,
                 )
                 if reply:
@@ -8770,6 +8994,16 @@ class _ExecutionCoordinator:
                     "message": f"Already forgotten about {best.name} — nothing to do.",
                 }
             graph.forget(best.key)
+            # Also delete from legacy fact store to prevent recall from
+            # returning forgotten facts (legacy has no status column).
+            try:
+                _fact_repo = store._fact_repo
+                if _fact_repo is not None:
+                    for _fk in list((store.get_all_facts() or {}).keys()):
+                        if best.name and best.name.lower() in _fk.lower():
+                            store.delete_fact(_fk)
+            except Exception:
+                pass
             # Cross-node forget: the PROJECT lifecycle node representing the
             # same thing must also be forgotten ("forget the lunar regolith
             # greenhouse" matched the topic node first; the project node —
@@ -9123,6 +9357,172 @@ class _ExecutionCoordinator:
             "success": True,
             "message": f"Simulation — would execute: {decision.target or decision.raw_text}\nNo side effects executed.",
         }
+
+    def _exec_automation(self, params: dict, decision: RoutingDecision) -> dict:
+        """Execute an automation workflow through the AutomationEngine.
+
+        Resolves template_id from metadata['template_candidate'] via
+        TemplateStore fuzzy match, then runs through AutomationEngine.
+        Uses existing ExecutionBoundary for provider execution where possible.
+        """
+        try:
+            import asyncio
+            from mini_kio.automation import create_automation_engine
+            from mini_kio.automation.template_store import TemplateStore
+
+            template_candidate = decision.metadata.get("template_candidate", "")
+            if not template_candidate:
+                return {
+                    "success": False,
+                    "message": "No workflow name detected. Please specify which workflow to run (e.g., 'run the morning routine').",
+                }
+
+            # Resolve template ID from candidate name
+            store = TemplateStore()
+            store.load()
+            template_id = self._resolve_template_id(store, template_candidate)
+
+            if template_id is None:
+                # Try fuzzy match
+                candidates = self._fuzzy_match_templates(store, template_candidate)
+                if candidates:
+                    names = ", ".join(candidates[:5])
+                    return {
+                        "success": False,
+                        "message": (
+                            f"Could not find an exact match for '{template_candidate}'. "
+                            f"Did you mean: {names}?"
+                        ),
+                    }
+                return {
+                    "success": False,
+                    "message": f"Could not find a workflow named '{template_candidate}'. Run 'list workflows' to see available automations.",
+                }
+
+            engine = create_automation_engine()
+            # execute() is async; run it with asyncio.run()
+            result = asyncio.run(engine.execute(template_id))
+
+            if result is None:
+                return {"success": False, "message": f"Workflow '{template_id}' did not produce a result."}
+
+            # Format result for user
+            success = result.get("success", False)
+            error = result.get("error")
+            steps = result.get("steps", [])
+            duration_ms = result.get("duration_ms", 0)
+
+            total = len(steps)
+            succeeded = sum(1 for s in steps if s.get("success"))
+            failed = sum(1 for s in steps if not s.get("success") and not s.get("blocked"))
+            blocked = sum(1 for s in steps if s.get("blocked"))
+
+            status_str = "completed" if success else ("blocked" if blocked > 0 else "failed")
+
+            lines = [f"Workflow: **{template_id}** — {status_str}"]
+            lines.append(f"Steps: {succeeded} done, {failed} failed, {blocked} blocked / {total} total ({duration_ms:.0f}ms)")
+
+            # Show blocked steps with reasons
+            if blocked > 0:
+                lines.append("\nBlocked steps:")
+                for s in steps:
+                    if s.get("blocked"):
+                        lines.append(f"  - {s.get('step_id', '?')}: {s.get('error', s.get('blocking_reason', 'unknown'))}")
+
+            # Show failed steps
+            if failed > 0:
+                lines.append("\nFailed steps:")
+                for s in steps:
+                    if not s.get("success") and not s.get("blocked"):
+                        lines.append(f"  - {s.get('step_id', '?')}: {s.get('error', 'unknown')}")
+
+            if error:
+                lines.append(f"\nError: {error}")
+
+            return {
+                "success": success,
+                "message": "\n".join(lines),
+                "template_id": template_id,
+                "steps_total": total,
+                "steps_succeeded": succeeded,
+                "steps_failed": failed,
+                "steps_blocked": blocked,
+            }
+
+        except Exception as exc:
+            logger.exception("[AUTOMATION] Execution failed: %s", exc)
+            return {"success": False, "message": f"Automation failed: {exc}"}
+
+    @staticmethod
+    def _resolve_template_id(store, candidate: str) -> str | None:
+        """Resolve a template candidate name to an exact template ID.
+
+        Tries exact match, normalized match, and partial prefix match.
+        """
+        candidate_lower = candidate.lower().strip().replace(" ", "_").replace("-", "_")
+        all_ids = store.list_ids()
+
+        # Exact match
+        if candidate_lower in all_ids:
+            return candidate_lower
+
+        # Try without dots (user might say "data json transform" for "data.json_transform")
+        no_dots = candidate_lower.replace("_", "")
+        for tid in all_ids:
+            if tid.replace(".", "").replace("_", "") == no_dots:
+                return tid
+
+        # Partial prefix match (shortest match wins)
+        matches = [tid for tid in all_ids if tid.startswith(candidate_lower)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return min(matches, key=len)  # shortest match
+
+        # Reverse: check if candidate is a substring of any ID
+        for tid in all_ids:
+            if candidate_lower in tid:
+                return tid
+
+        return None
+
+    @staticmethod
+    def _fuzzy_match_templates(store, candidate: str, max_results: int = 5) -> list[str]:
+        """Fuzzy match a candidate name against template IDs and names.
+
+        Returns list of human-readable template names for suggestions.
+        """
+        candidate_lower = candidate.lower().strip()
+        all_ids = store.list_ids()
+        matches = []
+
+        for tid in all_ids:
+            record = store.get(tid)
+            if record is None:
+                continue
+            # Check ID contains candidate
+            if candidate_lower in tid.lower():
+                matches.append(record.template.get("name", tid))
+                continue
+            # Check name contains candidate
+            name = record.template.get("name", "").lower()
+            if candidate_lower in name:
+                matches.append(record.template.get("name", tid))
+                continue
+            # Check words overlap
+            cand_words = set(candidate_lower.split())
+            name_words = set(name.split())
+            if cand_words & name_words:
+                matches.append(record.template.get("name", tid))
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for m in matches:
+            if m not in seen:
+                seen.add(m)
+                unique.append(m)
+        return unique[:max_results]
 
     def _exec_coordinator(self, params: dict, decision: RoutingDecision) -> dict:
         from mini_kio.core.command_parser import parse_command

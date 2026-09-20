@@ -17,6 +17,7 @@ import subprocess
 from typing import Optional
 
 from mini_kio.core.operator_protocol import OperatorDescriptor
+from mini_kio.core.win_spawn import no_window
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,7 @@ def shutdown_system(delay: int = 0) -> dict:
             capture_output=True,
             text=True,
             timeout=10,
+            **no_window(),
         )
         if result.returncode == 0:
             logger.info("[SYSTEM] shutdown initiated")
@@ -214,6 +216,7 @@ def restart_system(delay: int = 0) -> dict:
             capture_output=True,
             text=True,
             timeout=10,
+            **no_window(),
         )
         if result.returncode == 0:
             logger.info("[SYSTEM] restart initiated")
@@ -250,6 +253,7 @@ def lock_system() -> dict:
             ["rundll32.exe", "user32.dll,LockWorkStation"],
             timeout=5,
             capture_output=True,
+            **no_window(),
         )
     except subprocess.TimeoutExpired:
         logger.warning("[SYSTEM] lock command timed out (normal for rundll32)")

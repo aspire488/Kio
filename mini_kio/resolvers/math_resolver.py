@@ -1,5 +1,7 @@
 import re
+import ast
 import math
+import operator
 import logging
 from typing import Optional
 from mini_kio.resolvers.base import BaseResolver
@@ -7,6 +9,32 @@ from mini_kio.llm.session_state import SessionState
 from mini_kio.llm.trace_context import TraceContext
 
 logger = logging.getLogger(__name__)
+
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(node: ast.AST) -> float:
+    """Evaluate an AST node containing only arithmetic — no function calls, names, or imports."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_OPS:
+        left = _safe_eval(node.left)
+        right = _safe_eval(node.right)
+        return _SAFE_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_OPS:
+        return _SAFE_OPS[type(node.op)](_safe_eval(node.operand))
+    raise ValueError(f"Unsupported AST node: {type(node).__name__}")
 
 class MathResolver(BaseResolver):
     """Handles deterministic local arithmetic and math expressions."""
@@ -51,8 +79,8 @@ class MathResolver(BaseResolver):
             if re.match(r"^[\d\(\)\+\-\*\/\%\.\^]+$", expr):
                 expr_eval = expr.replace("^", "**")
                 trace.add_step(f"MathResolver: evaluated expression '{expr_eval}'")
-                # Use a safer eval or a library? For KIO we'll use a constrained eval.
-                result = eval(expr_eval, {"__builtins__": None}, {})
+                tree = ast.parse(expr_eval, mode='eval')
+                result = _safe_eval(tree)
                 return f"{text.strip()} = {result}"
 
         except Exception as e:

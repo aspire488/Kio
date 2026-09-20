@@ -26,6 +26,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mini_kio.core.win_spawn import no_window
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,7 @@ def _run_docker(args: list[str], timeout_s: int = 60) -> dict[str, Any]:
     try:
         result = subprocess.run(
             ["docker"] + args, capture_output=True, text=True, timeout=timeout_s,
+            **no_window(),
         )
         if result.returncode == 0:
             return {"success": True, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}

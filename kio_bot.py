@@ -89,6 +89,28 @@ def _is_fast_path(text: str) -> bool:
             return True
     return False
 
+
+def _is_failure_response(reply: str) -> bool:
+    """Classify whether a reply is a user-critical failure that must NEVER be
+    discarded as stale.
+
+    Invariant: when a newer request exists for the same session, an older
+    reply is discarded UNLESS it is a failure the user needs to see. Failure
+    markers are strong signals ("I couldn't", "failed", "error") that
+    indicate the user should know about the problem even if newer commands
+    arrived. Informational content ("Nothing is playing right now.") is NOT
+    a failure — it is eligible for stale-discard.
+    """
+    if not reply:
+        return False
+    rl = reply.lower()
+    return (
+        reply.startswith("I couldn't")
+        or reply.startswith("I don't")
+        or "failed" in rl
+        or "error" in rl
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,12 +185,7 @@ async def cmd_operational(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             cur = _session_counter.get(user_id, 0)
             done = _session_completed.get(user_id, 0)
-            _is_failure = reply and (
-                reply.startswith("I couldn't") or reply.startswith("I don't")
-                or "failed" in reply.lower() or "error" in reply.lower()
-                or "nothing" in reply.lower()
-            )
-            if my_seq < cur and done < cur and not _is_failure:
+            if my_seq < cur and done < cur and not _is_failure_response(reply):
                 logger.info(f"[TELEGRAM_STALE] uid={user_id} seq={my_seq}<{cur} discarded")
                 return
             _session_completed[user_id] = max(done, my_seq)
@@ -270,12 +287,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             cur = _session_counter.get(user_id, 0)
             done = _session_completed.get(user_id, 0)
-            _is_failure = reply and (
-                reply.startswith("I couldn't") or reply.startswith("I don't")
-                or "failed" in reply.lower() or "error" in reply.lower()
-                or "nothing" in reply.lower()
-            )
-            if my_seq < cur and done < cur and not _is_failure:
+            if my_seq < cur and done < cur and not _is_failure_response(reply):
                 logger.info(f"[TELEGRAM_STALE] uid={user_id} seq={my_seq}<{cur} discarded")
                 return
             _session_completed[user_id] = max(done, my_seq)

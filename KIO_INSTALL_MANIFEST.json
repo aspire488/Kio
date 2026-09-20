@@ -1,0 +1,104 @@
+{
+  "version": "1.0.0",
+  "generated_from": "source-code import tracing",
+  "scope": "current final validation only",
+  "rule": "every entry proven by actual import statement in KIO source",
+
+  "required_groups": {
+    "A_core_runtime": {
+      "packages": {
+        "psutil": {"installed": true, "version_check": "runtime.py, execution_boundary.py"},
+        "python-dotenv": {"installed": true, "version_check": "config.py, kio_bot.py"},
+        "python-telegram-bot": {"installed": true, "version_check": "kio_bot.py"}
+      },
+      "install_needed": false
+    },
+    "B_browser": {
+      "packages": {
+        "playwright": {"installed": true, "note": "chromium binary confirmed working"},
+        "websockets": {"installed": true, "note": "connector WebSocket server"}
+      },
+      "install_needed": false
+    },
+    "B_files_desktop": {
+      "packages": {
+        "pyperclip": {"installed": true, "note": "clipboard in terminal_provider"}
+      },
+      "install_needed": false
+    },
+    "B_artifacts": {
+      "packages": {
+        "openpyxl": {"installed": true, "note": "XLSX generation"},
+        "python-docx": {"installed": true, "note": "DOCX generation"},
+        "python-pptx": {"installed": true, "note": "PPTX generation"},
+        "pywin32": {"installed": true, "note": "win32com.client + pythoncom: Office automation (pptx transitions AND the docx->pdf export)"},
+        "csv": {"installed": true, "stdlib": true, "note": "CSV/TSV normalization in artifact_operator"},
+        "tempfile": {"installed": true, "stdlib": true, "note": "intermediate .docx for the PDF export"}
+      },
+      "install_needed": false,
+      "system_requirements": {
+        "microsoft_word": {
+          "required_for": "PDF artifact creation (Word.Application COM export)",
+          "installed": true,
+          "detected_via": "HKLM\\SOFTWARE\\Classes\\Word.Application",
+          "purpose": "CAPABILITY: create a PDF -> PROVIDER: artifact_operator._docx_to_pdf -> DEPENDENCY: Word COM -> VERIFICATION: %PDF- header + %%EOF + page count"
+        }
+      }
+    },
+    "B_communication": {
+      "packages": {
+        "python-telegram-bot": {"installed": true, "note": "already in core_runtime"}
+      },
+      "install_needed": false
+    },
+    "B_media": {
+      "packages": {},
+      "note": "all media providers use browser connector + stdlib urllib, zero third-party deps",
+      "install_needed": false
+    },
+    "B_memory": {
+      "packages": {
+        "SQLAlchemy": {"installed": true, "note": "backend DB layer"}
+      },
+      "install_needed": false
+    },
+    "B_knowledge": {
+      "packages": {
+        "duckduckgo-search": {"installed": true, "note": "web search in retrieval system"}
+      },
+      "install_needed": false
+    },
+    "B_llm": {
+      "packages": {
+        "httpx": {"installed": true, "note": "LLM provider HTTP calls"}
+      },
+      "install_needed": false
+    },
+    "C_mcp": {
+      "packages": {},
+      "note": "all MCP servers use stdlib only (subprocess, json, sqlite3)",
+      "install_needed": false
+    }
+  },
+
+  "not_required": {
+    "yt-dlp": {"reason": "NOT IMPORTED by any KIO file"},
+    "tiktoken": {"reason": "NOT IMPORTED by any KIO file"},
+    "torch": {"reason": "only in deferred voice module"},
+    "sentence-transformers": {"reason": "only in deferred companion module"},
+    "transformers": {"reason": "NOT IMPORTED by any KIO file"},
+    "opencv-python": {"reason": "camera deferred, not in current scope"},
+    "pyautogui": {"reason": "NOT IMPORTED by any KIO file"},
+    "keyboard": {"reason": "NOT IMPORTED by any KIO file"},
+    "pygetwindow": {"reason": "NOT IMPORTED by any KIO file"},
+    "RapidFuzz": {"reason": "NOT IMPORTED by any KIO file"},
+    "regex": {"reason": "NOT IMPORTED by any KIO file"},
+    "rich": {"reason": "NOT IMPORTED by any KIO file"},
+    "typer": {"reason": "NOT IMPORTED by any KIO file"},
+    "scikit-learn": {"reason": "NOT IMPORTED by any KIO file"},
+    "scipy": {"reason": "NOT IMPORTED by any KIO file"}
+  },
+
+  "overall_install_needed": false,
+  "summary": "All 12 required packages for current validation scope are already installed. Zero pip install commands needed. PDF generation adds no pip package: it exports through the installed Microsoft Word (Word.Application) via the already-installed pywin32."
+}

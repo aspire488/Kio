@@ -53,12 +53,36 @@ function setToken(token) {
 
 // ── Tab Command Handlers ────────────────────────────────────────────
 
+// Focusing a MINIMIZED window does not restore it: chrome.windows.update with
+// {focused:true} leaves the window minimized, so a requested visible action
+// ("play this video", "open github") would load and even play audio inside a
+// window the user cannot see — a hidden user-facing action. Restore only when
+// minimized; a maximized/fullscreen window is a deliberate user choice and is
+// never resized here.
+async function ensureWindowVisible(windowId) {
+  if (windowId === undefined || windowId === null) return;
+  try {
+    const win = await chrome.windows.get(windowId);
+    if (win && win.state === "minimized") {
+      log("FOCUS", "Restoring minimized window", { windowId });
+      await chrome.windows.update(windowId, { state: "normal" });
+    }
+  } catch (err) {
+    log("WARN", "Window state check failed", { windowId, error: err.message });
+  }
+  try {
+    await chrome.windows.update(windowId, { focused: true });
+  } catch (err) {
+    log("WARN", "Window focus failed", { windowId, error: err.message });
+  }
+}
+
 async function handleOpenTab(msg) {
   log("INFO", "Opening tab", { url: msg.url });
   try {
     const tab = await chrome.tabs.create({ url: msg.url });
     log("FOCUS", "Window focus requested", { windowId: tab.windowId });
-    await chrome.windows.update(tab.windowId, { focused: true });
+    await ensureWindowVisible(tab.windowId);
     log("FOCUS", "Window focus success", { windowId: tab.windowId });
     log("SUCCESS", "Tab created", { tabId: tab.id, url: tab.pendingUrl || tab.url });
     return {
@@ -93,7 +117,7 @@ async function handleFocusTab(msg) {
   try {
     const tab = await chrome.tabs.get(msg.tab_id);
     log("FOCUS", "Tab focus window update", { windowId: tab.windowId });
-    await chrome.windows.update(tab.windowId, { focused: true });
+    await ensureWindowVisible(tab.windowId);
     await chrome.tabs.update(msg.tab_id, { active: true });
     log("FOCUS", "Tab focus success", { tabId: msg.tab_id });
     log("SUCCESS", "Tab focused", { tabId: msg.tab_id });
@@ -109,7 +133,7 @@ async function handleNavigateTab(msg) {
   try {
     const tab = await chrome.tabs.get(msg.tab_id);
     log("FOCUS", "Navigate tab window focus", { windowId: tab.windowId });
-    await chrome.windows.update(tab.windowId, { focused: true });
+    await ensureWindowVisible(tab.windowId);
     await chrome.tabs.update(msg.tab_id, { url: msg.url, active: true });
     log("SUCCESS", "Tab navigated", { tabId: msg.tab_id, url: msg.url });
     return {
@@ -631,7 +655,7 @@ const SCRIPTS = {
     }
     return JSON.stringify({ success: false, error: 'no player found' });
   },
-  seek_forward: () => {
+  seek_forward: (amount = 10) => {
     const v = (() => {
       const player = document.getElementById('movie_player');
       if (player) {
@@ -643,7 +667,8 @@ const SCRIPTS = {
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
-    v.currentTime = Math.min(v.duration || 0, v.currentTime + 10);
+    const _amt = typeof amount === 'number' ? amount : 10;
+    v.currentTime = Math.min(v.duration || 0, v.currentTime + _amt);
     if (v.muted !== _before_muted) v.muted = _before_muted;
     if (v.volume !== _before_volume) v.volume = _before_volume;
     return JSON.stringify({
@@ -657,7 +682,7 @@ const SCRIPTS = {
       _audio_restored: v.muted === _before_muted && v.volume === _before_volume,
     });
   },
-  seek_backward: () => {
+  seek_backward: (amount = 10) => {
     const v = (() => {
       const player = document.getElementById('movie_player');
       if (player) {
@@ -669,7 +694,8 @@ const SCRIPTS = {
     if (!v) return JSON.stringify({ status: 'no media' });
     const _before_muted = v.muted;
     const _before_volume = v.volume;
-    v.currentTime = Math.max(0, v.currentTime - 10);
+    const _amt = typeof amount === 'number' ? amount : 10;
+    v.currentTime = Math.max(0, v.currentTime - _amt);
     if (v.muted !== _before_muted) v.muted = _before_muted;
     if (v.volume !== _before_volume) v.volume = _before_volume;
     return JSON.stringify({
@@ -903,6 +929,12 @@ const SCRIPTS = {
       ...identity,
     });
   },
+
+  run_js: (code) => {
+    const _fn = new Function('return ' + code);
+    const _val = _fn();
+    return typeof _val === 'string' ? _val : JSON.stringify(_val);
+  },
 };
 
 async function handleExecuteScript(msg) {
@@ -913,9 +945,11 @@ async function handleExecuteScript(msg) {
   }
   log("INFO", "Executing script", { scriptName: msg.script, tabId: msg.tab_id });
   try {
+    const injectArgs = msg.args || [];
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: msg.tab_id },
       func: fn,
+      args: injectArgs,
       // NOTE: chrome.scripting.ScriptInjection has NO userGesture property
       // (verified against the live Chrome 151 schema — it rejects the key).
       // Strict-autoplay handling therefore lives INSIDE the play script:
@@ -1096,7 +1130,7 @@ function scheduleReconnect() {
 const KEEPALIVE_ALARM = "kio-keepalive";
 
 function ensureKeepaliveAlarm() {
-  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 1 }, () => {
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.417 }, () => {
     if (chrome.runtime.lastError) {
       log("WARN", "alarm create failed", { error: chrome.runtime.lastError.message });
     }

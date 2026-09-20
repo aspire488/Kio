@@ -23,6 +23,8 @@ import os
 import webbrowser
 from typing import Any, Dict
 
+import re as _re
+
 from mini_kio.core.operator_protocol import OperatorDescriptor
 
 logger = logging.getLogger(__name__)
@@ -143,12 +145,15 @@ def _register_browser_session(action: str, url: str) -> None:
 
 BROWSER_OPERATOR_DESCRIPTOR: OperatorDescriptor = {
     "tool_name": "browser_operator",
-    "tool_version": "1.0.0",
+    "tool_version": "2.0.0",
     "ram_budget_mb": 8.0,
     "timeout_seconds": 10,
     "side_effect": True,
     "lifecycle_type": "browser",
-    "supported_actions": ["play_youtube", "search_youtube", "open_url", "search_google"]
+    "supported_actions": ["play_youtube", "search_youtube", "open_url", "search_google",
+                          "browser_fetch_region", "browser_extract_records",
+                          "browser_crawl_extract", "browser_snapshot_sources",
+                          "browser_extract_price"]
 }
 
 
@@ -482,6 +487,262 @@ def browser_goto(url: str) -> dict:
     webbrowser.open(url)
     return {"success": True, "message": f"Opened {url} via system browser.", "action": "browser_goto", "target": url}
 
+
+# ---------------------------------------------------------------------------
+# Browser Composite Actions (Phase 3 — composition primitives)
+# ---------------------------------------------------------------------------
+# These compose existing browser primitives (goto + extract) via the
+# same Connector → Runtime → system fallback chain.  Each receives the
+# URL as *target* and optional params as **kwargs, returns a normalized dict.
+
+def _validate_url(url: str) -> str:
+    """Ensure URL has a scheme; returns normalized URL."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+def _browser_goto_and_extract(url: str, *, selector: str = None,
+                              extract: str = "text", timeout: float = 15.0) -> dict:
+    """Navigate to *url*, then extract content via the best available backend.
+
+    extract: "text" | "html"
+    Returns dict with 'content' key on success.
+    """
+    url = _validate_url(url)
+    if not url:
+        return {"success": False, "message": "No URL provided."}
+
+    from mini_kio.core.command_router import _get_connector
+    conn = _get_connector()
+    if conn and conn.is_connected():
+        try:
+            from mini_kio.core.async_utils import safe_run_async
+            # Open / navigate
+            tab_result = safe_run_async(conn.open_tab(url))
+            if not tab_result.success:
+                return {"success": False, "message": "Navigation failed: " + str(tab_result.error)}
+            tab_id = tab_result.tab.tab_id if tab_result.tab else None
+            if tab_id is None:
+                return {"success": False, "message": "No tab returned from navigation."}
+            # Extract via JS Bridge (separate extension for arbitrary JS)
+            from mini_kio.browser_connector.js_bridge import get_js_bridge
+            bridge = get_js_bridge()
+            sel = selector or "body"
+            if extract == "html":
+                js = ("(function(){ var el = document.querySelector('" + sel +
+                      "'); return el ? el.innerHTML : document.body.innerHTML; })()")
+            else:
+                js = ("(function(){ var el = document.querySelector('" + sel +
+                      "'); return el ? el.innerText : document.body.innerText; })()")
+            bridge_result = bridge.execute_js(tab_id, js)
+            result = type("R", (), {
+                "success": bridge_result.get("success", False),
+                "message": bridge_result.get("message", ""),
+                "error": bridge_result.get("error", ""),
+            })()
+            if result.success:
+                content = str(result.message or "")
+                return {"success": True, "message": "Extracted " + str(len(content)) + " chars",
+                        "content": content, "url": url}
+            return {"success": False, "message": "Extraction failed: " + str(result.error)}
+        except Exception as exc:
+            logger.debug("[COMPOSITE] connector path failed: %s", exc)
+
+    # Fallback: BrowserRuntime
+    br = _get_browser_runtime()
+    if br is not None:
+        try:
+            tab_id_obj = br.tabs.active_tab_id
+            if tab_id_obj is None:
+                _ws = "default"
+                info = _br_run_async(br.new_tab(_ws, url=url))
+                tab_id_obj = info.tab_id if info else None
+            else:
+                _br_run_async(br.goto(tab_id_obj, url))
+            if tab_id_obj:
+                page = br.tabs.get_page(tab_id_obj)
+                if extract == "html":
+                    content = _br_run_async(br.scripting.extract_html(page, selector))
+                else:
+                    content = _br_run_async(br.scripting.extract_text(page, selector))
+                return {"success": True, "message": "Extracted " + str(len(str(content))) + " chars",
+                        "content": str(content), "url": url}
+        except Exception as exc:
+            logger.debug("[COMPOSITE] BrowserRuntime path failed: %s", exc)
+
+    return {"success": False, "message": "No browser backend available for extraction."}
+
+
+def _browser_extract_json(url: str, *, expression: str = "document.body.innerText",
+                          max_chars: int = 500_000) -> dict:
+    """Navigate to *url*, evaluate JS expression, attempt JSON parse of result."""
+    url = _validate_url(url)
+    if not url:
+        return {"success": False, "message": "No URL provided."}
+
+    raw = _browser_goto_and_extract(url, extract="text")
+    if not raw.get("success"):
+        return raw
+    text = (raw.get("content") or "")[:max_chars]
+    import json as _json
+    # Try JSON parse
+    try:
+        data = _json.loads(text)
+        return {"success": True, "message": f"Parsed JSON from {url}", "data": data, "url": url}
+    except (ValueError, TypeError):
+        pass
+    # Try to find JSON arrays/objects in the text
+    for pattern in (r'\[[\s\S]{10,}\]', r'\{[\s\S]{10,}\}'):
+        m = _re.search(pattern, text)
+        if m:
+            try:
+                data = _json.loads(m.group(0))
+                return {"success": True, "message": f"Extracted JSON from {url}",
+                        "data": data, "url": url}
+            except (ValueError, TypeError):
+                continue
+    return {"success": True, "message": f"Extracted text (not JSON) from {url}",
+            "content": text, "url": url}
+
+
+def browser_fetch_region(url: str = "", **kwargs) -> dict:
+    """Fetch a page region: navigate, extract text/html by selector."""
+    selector = kwargs.get("selector") or kwargs.get("css_selector") or ""
+    extract = kwargs.get("extract", "text")
+    result = _browser_goto_and_extract(url, selector=selector, extract=extract)
+    result["action"] = "browser_fetch_region"
+    return result
+
+
+def browser_extract_records(url: str = "", **kwargs) -> dict:
+    """Navigate to URL and extract structured records (JSON or table data)."""
+    selector = kwargs.get("selector") or ""
+    expression = kwargs.get("expression", "document.body.innerText")
+    # Try JSON extraction first
+    result = _browser_extract_json(url, expression=expression)
+    if not result.get("success"):
+        result["action"] = "browser_extract_records"
+        return result
+    data = result.get("data")
+    if data is not None:
+        # Ensure data is a list of records
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = [{"value": data}]
+        result["records"] = data
+        result["record_count"] = len(data)
+        result["message"] = f"Extracted {len(data)} records from {url}"
+    result["action"] = "browser_extract_records"
+    return result
+
+
+def browser_crawl_extract(url: str = "", **kwargs) -> dict:
+    """Crawl a page and extract text content + links."""
+    selector = kwargs.get("selector") or ""
+    max_chars = int(kwargs.get("max_chars", 500_000))
+    result = _browser_goto_and_extract(url, selector=selector, extract="text")
+    if not result.get("success"):
+        result["action"] = "browser_crawl_extract"
+        return result
+    content = (result.get("content") or "")[:max_chars]
+    result["content"] = content
+    result["char_count"] = len(content)
+    # Extract links via JS Bridge
+    from mini_kio.browser_connector.js_bridge import get_js_bridge
+    links = []
+    bridge = get_js_bridge()
+    if bridge.is_connected():
+        try:
+            from mini_kio.core.command_router import _get_connector
+            conn = _get_connector()
+            if conn and conn.is_connected():
+                from mini_kio.core.async_utils import safe_run_async
+                js = "(function(){ var links = []; document.querySelectorAll('a[href]').forEach(function(a){ links.push({href: a.href, text: a.innerText.trim().substring(0,200)}); }); return JSON.stringify(links); })()"
+                tab_result = safe_run_async(conn.open_tab(_validate_url(url)))
+                if tab_result.success:
+                    bridge_result = bridge.execute_js(tab_result.tab.tab_id, js)
+                    if bridge_result.get("success"):
+                        import json as _json
+                        links = _json.loads(str(bridge_result.get("message") or "[]"))
+        except Exception:
+            pass
+    result["links"] = links
+    result["link_count"] = len(links)
+    result["message"] = f"Crawled {url}: {len(content)} chars, {len(links)} links"
+    result["action"] = "browser_crawl_extract"
+    return result
+
+
+def browser_snapshot_sources(url: str = "", **kwargs) -> dict:
+    """Open multiple source URLs and extract content from each."""
+    urls_raw = kwargs.get("urls") or kwargs.get("sources") or []
+    if isinstance(urls_raw, str):
+        urls_raw = [u.strip() for u in urls_raw.split(",") if u.strip()]
+    if not urls_raw and url:
+        urls_raw = [url]
+    if not urls_raw:
+        return {"success": False, "message": "No URLs provided.", "action": "browser_snapshot_sources"}
+    max_sources = min(int(kwargs.get("max_sources", 10)), 20)
+    urls_list = list(urls_raw)[:max_sources]
+    selector = kwargs.get("selector") or ""
+    sources = []
+    success_count = 0
+    for u in urls_list:
+        u = _validate_url(u)
+        if not u:
+            continue
+        r = _browser_goto_and_extract(u, selector=selector, extract="text")
+        entry = {"url": u, "success": r.get("success", False),
+                 "content": (r.get("content") or "")[:100_000]}
+        if r.get("success"):
+            success_count += 1
+        sources.append(entry)
+    return {
+        "success": success_count > 0,
+        "message": f"Snapshotted {success_count}/{len(sources)} sources",
+        "action": "browser_snapshot_sources",
+        "sources": sources,
+        "source_count": len(sources),
+        "success_count": success_count,
+    }
+
+
+def browser_extract_price(url: str = "", **kwargs) -> dict:
+    """Navigate to URL and extract a price value."""
+    selector = kwargs.get("selector") or kwargs.get("price_selector") or ""
+    currency = kwargs.get("currency") or kwargs.get("currency_symbol") or "$"
+    result = _browser_goto_and_extract(url, selector=selector, extract="text")
+    if not result.get("success"):
+        result["action"] = "browser_extract_price"
+        return result
+    content = result.get("content") or ""
+    # Try to find price pattern in extracted text
+    esc = _re.escape(currency)
+    price_pattern = r'[' + _re.escape(currency) + r'£€]\s*[\d,]+\.?\d*|[\d,]+\.?\d*\s*' + esc
+    matches = _re.findall(price_pattern, content, _re.IGNORECASE)
+    if matches:
+        price_str = matches[0].strip()
+        # Extract numeric value
+        num = _re.sub(r'[^\d.,]', '', price_str)
+        result["price"] = price_str
+        result["price_value"] = num
+        result["currency"] = currency
+        result["message"] = f"Found price: {price_str}"
+    else:
+        # Return raw content for manual parsing
+        result["price"] = None
+        result["price_value"] = None
+        result["currency"] = currency
+        result["message"] = f"Extracted content but no price pattern found matching '{currency}'"
+    result["action"] = "browser_extract_price"
+    return result
+
+
 BROWSER_HANDLERS: dict[str, object] = {
     "browser_goto": browser_goto,
     "browser_click": browser_click,
@@ -497,9 +758,18 @@ BROWSER_HANDLERS: dict[str, object] = {
     "browser_extract_html": browser_extract_html,
     "browser_screenshot": browser_screenshot,
     "browser_pdf": browser_pdf,
+    # Phase 3 composites
+    "browser_fetch_region": browser_fetch_region,
+    "browser_extract_records": browser_extract_records,
+    "browser_crawl_extract": browser_crawl_extract,
+    "browser_snapshot_sources": browser_snapshot_sources,
+    "browser_extract_price": browser_extract_price,
 }
 
 # Alias kept for backward compatibility
 play_youtube_video = play_youtube
 
-__all__ = ["open_url", "search_google", "search_youtube", "play_youtube", "play_youtube_video"]
+__all__ = ["open_url", "search_google", "search_youtube", "play_youtube", "play_youtube_video",
+           "browser_fetch_region", "browser_extract_records", "browser_crawl_extract",
+           "browser_snapshot_sources", "browser_extract_price",
+           "BROWSER_HANDLERS", "BROWSER_OPERATOR_DESCRIPTOR"]

@@ -1425,8 +1425,10 @@ def book_answer(query: str) -> dict:
 def utility_answer(action: str, query: str, ctx=None, decision=None) -> dict:
     if action == "time":
         hint = ""
-        if ctx is not None and getattr(ctx, "last_location", ""):
-            hint = ctx.last_location
+        # Only use last_location if user says "there" (explicit back-reference).
+        # Don't leak stale location into unrelated queries.
+        if ctx is not None and re.search(r"\bthere\b", query.lower()):
+            hint = getattr(ctx, "last_location", "") or ""
         return time_answer(query, ctx=ctx, location_hint=hint)
     if action == "date":
         return date_answer(query)

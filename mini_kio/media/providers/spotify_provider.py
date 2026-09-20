@@ -17,6 +17,7 @@ from mini_kio.core import config
 from mini_kio.core.async_utils import safe_run_async
 from mini_kio.media.media_session import MediaResult, MediaSession, MediaCandidate
 from mini_kio.media.media_state import MediaState, PlayerType, MediaType
+from mini_kio.core.win_spawn import no_window
 from mini_kio.media.providers import MediaProvider
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def _check_spotify_process() -> bool:
         result = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq Spotify.exe", "/NH"],
             capture_output=True, text=True, timeout=5,
+            **no_window(),
         )
         return "Spotify.exe" in result.stdout
     except Exception:

@@ -160,6 +160,14 @@ SPOTIFY_API_ENABLED = bool(SPOTIFY_CLIENT_ID.strip() and SPOTIFY_CLIENT_SECRET.s
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 YOUTUBE_ENABLED = bool(YOUTUBE_API_KEY)
 
+# ── Calendar backend selection ─────────────────────────────────────
+# KIO owns the calendar capability; the backend is an operator choice.
+# local  = ICS file (default — preserves existing behaviour)
+# google = Google Calendar API
+# auto   = Google when a Google credential carrying the calendar scope is
+#          available, otherwise local
+CALENDAR_BACKEND = os.getenv("KIO_CALENDAR_BACKEND", "local").strip().lower()
+
 # ── Browser Connector V1 ───────────────────────────────────────────
 BROWSER_CONNECTOR_ENABLED = os.getenv("BROWSER_CONNECTOR_ENABLED", "").strip().lower() == "true"
 BROWSER_CONNECTOR_PORT = int(os.getenv("BROWSER_CONNECTOR_PORT", "9877"))

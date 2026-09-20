@@ -1460,10 +1460,9 @@ class YouTubeProvider(MediaProvider):
         tab_id = self._resolve_tab_id()
         if not conn or not tab_id:
             return MediaResult(success=False, error="No active YouTube session", player="youtube")
-        # Seek via script injection using currentTime
         script = "seek_forward" if seconds >= 0 else "seek_backward"
         try:
-            result = safe_run_async(conn.execute_script(tab_id, script))
+            result = safe_run_async(conn.execute_script(tab_id, script, args=[abs(seconds)]))
             if result.success:
                 return MediaResult(success=True, message=f"Seeked {abs(seconds)}s", player="youtube")
             return MediaResult(success=False, error=result.error, player="youtube")

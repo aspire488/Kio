@@ -55,8 +55,18 @@ from mini_kio.core.browser_operator import (
     browser_screenshot, browser_pdf, BROWSER_HANDLERS,
 )
 from mini_kio.core.file_operator import (
-    open_folder, FILE_OPERATOR_DESCRIPTOR
+    open_folder, list_directory, list_files,
+    write_csv, read_file, move_file, fs_exists, hash_file, hash_tree, store_record,
+    FILE_OPERATOR_DESCRIPTOR,
 )
+from mini_kio.core.providers.knowledge_provider import KnowledgeProvider
+
+KNOWLEDGE_OPERATOR_DESCRIPTOR = {
+    "tool_name": "knowledge",
+    "tool_version": "2.0.0",
+    "ram_budget_mb": 10,
+    "category": "read_only",
+}
 from mini_kio.core.system_operator import (
     lock_system, unlock_system, lock_state, shutdown_system, restart_system,
     recovery_runtime, SYSTEM_OPERATOR_DESCRIPTOR
@@ -188,10 +198,49 @@ _BROWSER_BACKEND_ACTIONS = frozenset(
     {"browser_goto", "browser_click", "browser_hover", "browser_scroll",
      "browser_drag", "browser_select", "browser_fill", "browser_type",
      "browser_keypress", "browser_evaluate", "browser_extract_text",
-     "browser_extract_html", "browser_screenshot", "browser_pdf"}
+     "browser_extract_html", "browser_screenshot", "browser_pdf",
+     # Phase 3 composites
+     "browser_fetch_region", "browser_extract_records", "browser_crawl_extract",
+     "browser_snapshot_sources", "browser_extract_price"}
 )
 for _prereq_action in _BROWSER_BACKEND_ACTIONS:
     register_prerequisite_resolver(_prereq_action, _browser_backend_missing)
+
+
+# ── Knowledge prerequisite resolvers ─────────────────────────────
+def _knowledge_search_missing(target: str) -> list[str]:
+    """Web search needs at least one search provider enabled (Exa/Tavily/DDG)."""
+    from mini_kio.core import config
+    # DuckDuckGo works without API key, so this always passes
+    # Exa and Tavily need keys but DDG is the fallback
+    return []
+
+
+def _knowledge_jina_missing(target: str) -> list[str]:
+    """URL fetch needs Jina Reader enabled."""
+    from mini_kio.core import config
+    if not config.JINA_READER_ENABLED:
+        return ["jina_reader"]
+    return []
+
+
+def _knowledge_youtube_missing(target: str) -> list[str]:
+    """YouTube listing needs YouTube Data API key (DDG fallback available)."""
+    return []  # DDG fallback, no硬 requirement
+
+
+_KNOWLEDGE_BACKEND_ACTIONS = {
+    "web_search": _knowledge_search_missing,
+    "fetch_wikipedia": lambda t: [],  # No prerequisites
+    "healthcheck": lambda t: [],  # No prerequisites
+    "read_feeds": lambda t: [],  # feedparser check at runtime
+    "paginated_get": lambda t: [],  # No prerequisites
+    "verify_hmac": lambda t: [],  # No prerequisites
+    "fetch_url": _knowledge_jina_missing,
+    "list_new_videos": _knowledge_youtube_missing,
+}
+for _k_action, _k_resolver in _KNOWLEDGE_BACKEND_ACTIONS.items():
+    register_prerequisite_resolver(_k_action, _k_resolver)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +275,54 @@ STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
     "open_folder": {
         "handler": open_folder,
         "canonical_name": "open_folder",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "list_files": {
+        "handler": list_files,
+        "canonical_name": "list_files",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "write_csv": {
+        "handler": write_csv,
+        "canonical_name": "write_csv",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "read_file": {
+        "handler": read_file,
+        "canonical_name": "read_file",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "move_file": {
+        "handler": move_file,
+        "canonical_name": "move_file",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "fs_exists": {
+        "handler": fs_exists,
+        "canonical_name": "fs_exists",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "hash_file": {
+        "handler": hash_file,
+        "canonical_name": "hash_file",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "hash_tree": {
+        "handler": hash_tree,
+        "canonical_name": "hash_tree",
+        "category": "external_open",
+        "descriptor": FILE_OPERATOR_DESCRIPTOR
+    },
+    "store_record": {
+        "handler": store_record,
+        "canonical_name": "store_record",
         "category": "external_open",
         "descriptor": FILE_OPERATOR_DESCRIPTOR
     },
@@ -283,6 +380,55 @@ STATIC_ACTION_TABLE: dict[str, ActionRegistryEntry] = {
         "category": "external_control",
         "descriptor": APP_OPERATOR_DESCRIPTOR
     },
+    # Knowledge actions — delegated to KnowledgeProvider
+    "web_search": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("web_search", target, **kw),
+        "canonical_name": "web_search",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "fetch_url": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("fetch_url", target, **kw),
+        "canonical_name": "fetch_url",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "fetch_wikipedia": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("fetch_wikipedia", target, **kw),
+        "canonical_name": "fetch_wikipedia",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "healthcheck": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("healthcheck", target, **kw),
+        "canonical_name": "healthcheck",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "list_new_videos": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("list_new_videos", target, **kw),
+        "canonical_name": "list_new_videos",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "read_feeds": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("read_feeds", target, **kw),
+        "canonical_name": "read_feeds",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "paginated_get": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("paginated_get", target, **kw),
+        "canonical_name": "paginated_get",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
+    "verify_hmac": {
+        "handler": lambda target, **kw: KnowledgeProvider().execute("verify_hmac", target, **kw),
+        "canonical_name": "verify_hmac",
+        "category": "read_only",
+        "descriptor": KNOWLEDGE_OPERATOR_DESCRIPTOR,
+    },
 }
 
 # BrowserRuntime actions registered dynamically
@@ -305,6 +451,14 @@ _ACTION_MAP: dict[str, str] = {
     "search_web": "search_web",
     "folder": "open_folder",
     "open_folder": "open_folder",
+    "list_files": "list_files",
+    "write_csv": "write_csv",
+    "read_file": "read_file",
+    "move_file": "move_file",
+    "fs_exists": "fs_exists",
+    "hash_file": "hash_file",
+    "hash_tree": "hash_tree",
+    "store_record": "store_record",
     "play": "play_youtube",
     "play_youtube": "play_youtube",
     "youtube_play": "play_youtube",
@@ -360,6 +514,27 @@ _ACTION_MAP: dict[str, str] = {
     "browser_pdf": "browser_pdf",
     "goto": "browser_goto",
     "browser_goto": "browser_goto",
+    # Phase 3 composite browser actions
+    "fetch_region": "browser_fetch_region",
+    "browser_fetch_region": "browser_fetch_region",
+    "extract_records": "browser_extract_records",
+    "browser_extract_records": "browser_extract_records",
+    "crawl_extract": "browser_crawl_extract",
+    "browser_crawl_extract": "browser_crawl_extract",
+    "snapshot_sources": "browser_snapshot_sources",
+    "browser_snapshot_sources": "browser_snapshot_sources",
+    "extract_price": "browser_extract_price",
+    "browser_extract_price": "browser_extract_price",
+
+    # Knowledge/search actions
+    "web_search": "web_search",
+    "fetch_url": "fetch_url",
+    "fetch_wikipedia": "fetch_wikipedia",
+    "healthcheck": "healthcheck",
+    "list_new_videos": "list_new_videos",
+    "read_feeds": "read_feeds",
+    "paginated_get": "paginated_get",
+    "verify_hmac": "verify_hmac",
 }
 
 _BLOCKED_ACTIONS: frozenset[str] = frozenset(
@@ -751,7 +926,7 @@ def _in_test_mode() -> bool:
     return _TEST_MODE
 
 
-def execute_action(action: str, target: str = "") -> dict[str, Any]:
+def execute_action(action: str, target: str = "", **kwargs: Any) -> dict[str, Any]:
     """
     Execute an action through one runtime-owned handoff.
     
@@ -1055,6 +1230,16 @@ def execute_action(action: str, target: str = "") -> dict[str, Any]:
             result = handler()
         elif canonical_action == "close_app" and pid_for_close is not None:
             result = handler(target, pid=pid_for_close)
+        elif canonical_action in ("write_csv", "read_file", "move_file", "fs_exists",
+                                  "hash_file", "hash_tree", "store_record",
+                                  "web_search", "fetch_url", "fetch_wikipedia",
+                                  "healthcheck", "list_new_videos", "read_feeds",
+                                  "paginated_get", "verify_hmac",
+                                  "browser_fetch_region", "browser_extract_records",
+                                  "browser_crawl_extract", "browser_snapshot_sources",
+                                  "browser_extract_price") and kwargs:
+            # Filesystem actions receive resolved inputs as kwargs
+            result = handler(target, **kwargs)
         else:
             result = handler(target)
         elapsed_ms = int((time.monotonic() - start) * 1000)

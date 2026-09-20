@@ -3169,7 +3169,88 @@ APP_CAPABILITIES = {
     "vscode": ["open_project", "open_file"],
     "telegram": ["send_message"],
     "capcut": ["play"],
+    # ── Google cloud services (OAuth / API-key backed) ──
+    "gmail":     ["list_messages", "get_message", "send_message", "search_messages",
+                   "list_labels", "trash_message", "untrash_message", "modify_labels"],
+    "calendar":  ["list_calendars", "list_events", "today_events", "upcoming_within",
+                   "get_event", "create_event", "update_event", "delete_event", "search_events"],
+    "drive":     ["list_files", "search_files", "get_metadata", "create_folder",
+                   "upload_file", "download_file", "rename_file", "move_file", "delete_file"],
+    "contacts":  ["list_contacts", "search_contacts", "get_contact",
+                   "create_contact", "update_contact", "delete_contact"],
+    "photos":    ["list_albums", "get_album", "create_album", "list_media",
+                   "search_media", "get_media", "upload_media",
+                   "create_picker_session", "list_picked_items"],
+    # ── Workflow-declared capabilities routed through provider registry ──
+    "browser":   ["fetch_region", "extract_price", "extract_records",
+                   "snapshot_sources", "crawl_extract", "open_url", "search"],
+    "mcp_tool":  ["call", "create_page", "create_task", "crm_get", "crm_upsert",
+                   "due_tasks", "find_stale_leads", "get_page", "list_changed",
+                   "upsert", "upsert_ticket"],
+    "media":     ["transcribe", "generate_image", "process_video", "publish",
+                   "text_to_speech", "transcode_variants", "verify_posts"],
+    "http":      ["fetch", "poll", "post"],
+    "github":    ["search_repos", "get_repo", "list_issues", "create_issue",
+                   "list_prs", "get_contents", "list_branches", "list_commits",
+                   "create_gist"],
 }
+
+# Google ops modules — lazily imported to keep startup fast.
+_GOOGLE_OPS_MODULES: dict[str, str] = {
+    "gmail":     "mini_kio.core.google_gmail_ops",
+    "calendar":  "mini_kio.core.google_calendar_ops",
+    "drive":     "mini_kio.core.google_drive_ops",
+    "contacts":  "mini_kio.core.google_people_ops",
+    "photos":    "mini_kio.core.google_photos_ops",
+}
+
+
+def _dispatch_google_capability(app_name: str, action: str, args_str: str) -> dict:
+    """Route a Google service action to the correct ops module.
+
+    Returns the ops module's result dict, or an error if the module/action
+    is not found.
+    """
+    import importlib
+    import json
+
+    module_path = _GOOGLE_OPS_MODULES.get(app_name)
+    if not module_path:
+        return {"success": False, "message": f"Unknown Google service: {app_name}"}
+
+    try:
+        mod = importlib.import_module(module_path)
+    except Exception as exc:
+        return {"success": False, "message": f"Failed to load {module_path}: {exc}"}
+
+    # Build the actions dict from the module's exported ACTIONS dict
+    actions_attr = f"GOOGLE_{app_name.upper()}_ACTIONS"
+    if app_name == "contacts":
+        actions_attr = "GOOGLE_PEOPLE_ACTIONS"
+    actions = getattr(mod, actions_attr, None)
+    if actions is None:
+        # Fallback: try all-caps variant
+        actions = getattr(mod, f"GOOGLE_{app_name.upper()}_ACTIONS", {})
+
+    handler = actions.get(action) if actions else None
+    if handler is None:
+        return {"success": False, "message": f"{app_name} does not support '{action}'."}
+
+    # Parse the JSON args string into keyword arguments
+    kwargs = {}
+    if args_str:
+        try:
+            kwargs = json.loads(args_str)
+        except (json.JSONDecodeError, TypeError):
+            # If not JSON, pass as a positional string argument
+            kwargs = {}
+
+    try:
+        return handler(**kwargs)
+    except TypeError as exc:
+        return {"success": False, "message": f"{app_name}.{action} argument error: {exc}"}
+    except Exception as exc:
+        return {"success": False, "message": f"{app_name}.{action} failed: {exc}"}
 
 def execute_capability(target: str) -> dict:
     start_time = time.time()
@@ -3186,6 +3267,49 @@ def execute_capability(target: str) -> dict:
         return _normalize_public_result("execute_capability", target, {"success": False, "message": f"{app_name} does not support '{cap}'."}, start_time)
         
     logger.info(f"[CAPABILITY] Routing {cap} to {app_name} with args: {args} (friendly: {friendly_name})")
+
+    # ── Google cloud service dispatch ────────────────────────────────────
+    # Gmail, Calendar, Drive, People, Photos, Places all route through their
+    # dedicated ops modules via _dispatch_google_capability.  This is the
+    # single entry point for every Google service action.
+    if app_name in _GOOGLE_OPS_MODULES:
+        result = _dispatch_google_capability(app_name, cap, args)
+        return _normalize_public_result(
+            "execute_capability", f"{app_name}::{cap}", result, start_time)
+
+    # ── Workflow capability dispatch through provider registry ─────────
+    # browser, mcp_tool, media, http, github all route through the
+    # ProviderRegistry.  The step_runner builds a JSON-args target; we
+    # parse it and delegate to the matching registered provider.
+    _WORKFLOW_DISPATCH = {
+        "browser", "mcp_tool", "media", "http", "github",
+        "ai_reasoning", "terminal", "code_project",
+    }
+    if app_name in _WORKFLOW_DISPATCH:
+        import json as _json
+        from mini_kio.core.provider_registry import get_provider_registry
+        registry = get_provider_registry()
+        # For browser: the step_runner puts the action in cap; for others
+        # it may be the actual provider action name.
+        provider = registry.get_provider(cap)
+        if provider is None:
+            provider = registry.get_provider(app_name)
+        if provider is not None:
+            try:
+                kwargs = _json.loads(args) if args else {}
+            except (_json.JSONDecodeError, TypeError):
+                kwargs = {}
+            try:
+                result = provider.execute(cap, target=cap, **kwargs)
+            except Exception as exc:
+                result = {"success": False, "message": f"{app_name}.{cap} failed: {exc}"}
+            return _normalize_public_result(
+                "execute_capability", f"{app_name}::{cap}", result, start_time)
+        else:
+            return _normalize_public_result(
+                "execute_capability", f"{app_name}::{cap}",
+                {"success": False, "message": f"No provider registered for {app_name}/{cap}"},
+                start_time)
 
     from mini_kio.core.runtime import get_runtime
     rt = get_runtime()

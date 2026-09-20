@@ -32,6 +32,7 @@ class IntentType(enum.Enum):
     DESKTOP_ACTION = "desktop_action"
     UTILITY = "utility"
     SIMULATE = "simulate"
+    AUTOMATION = "automation"
 
 
 @dataclass

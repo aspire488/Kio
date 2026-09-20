@@ -184,6 +184,14 @@ _GAMING_ENTITIES: dict[str, list[str]] = {
     "rockstar": ["rockstar", "rockstar games"],
 }
 
+# Explicit entity registry — replaces globals() lookup (semgrep: dangerous-globals-use)
+_TOPIC_ENTITIES: dict[str, dict[str, list[str]]] = {
+    "MOVIES": _MOVIES_ENTITIES,
+    "TV": _TV_ENTITIES,
+    "MUSIC": _MUSIC_ENTITIES,
+    "GAMING": _GAMING_ENTITIES,
+}
+
 # Example events (will need dynamic extraction for real use cases)
 _SPORTS_EVENTS: dict[str, list[str]] = {
     "germany_vs_curacao": ["germany vs curacao", "germany curacao match", "germany curacao game"],
@@ -796,8 +804,7 @@ class MediaManager:
                             logger.info("[MM_INTELLIGENCE] Detected last_completed_match: %s", self._context.last_completed_match)
 
         elif self._context.topic in ("MOVIES", "TV", "MUSIC", "GAMING"):
-            _entity_key = f"_{self._context.topic}_ENTITIES"
-            _entity_dict = globals().get(_entity_key, {})
+            _entity_dict = _TOPIC_ENTITIES.get(self._context.topic, {})
             for entity_key, patterns in _entity_dict.items():
                 for pattern in patterns:
                     if pattern in ql:

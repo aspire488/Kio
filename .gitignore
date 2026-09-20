@@ -1,5 +1,8 @@
 # secrets
 .env
+client_secret*.json
+*.credentials.json
+.kio/
 
 # python
 __pycache__/
@@ -23,7 +26,31 @@ data/runtime_checkpoint.json
 external/
 repos/
 gstack/
-missions/
+missions/__pycache__/
 kio_final/
 kio_xml_chunks/
 runtime_logs/
+
+# Local development/runtime state
+.local/
+.serena/
+*.session
+runtime_ready.flag
+mini_kio/runtime_trace.json
+mini_kio/browser_connector/chrome_profile/
+mini_kio/browser_connector/extension_js/
+
+# Local test media/audio
+*.raw
+*.ogg
+*.opus
+
+# Local logs
+*.log
+*.log.err
+
+# Local/generated test results
+_e2e_results.json
+
+# Local pytest media temp
+.pytest-media-tmp/

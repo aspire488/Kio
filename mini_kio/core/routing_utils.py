@@ -26,6 +26,7 @@ from mini_kio.core.app_operator import (
     _web_url_for_open,
 )  # _find_in_registry is used at module level below
 from mini_kio.core.capability_registry import get_capability_registry
+from mini_kio.core.win_spawn import no_window
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ def close_browser_capability(cap_info: dict) -> bool:
     proc = subprocess.run(
         ["taskkill", "/T", "/F", "/PID", str(browser_pid)],
         capture_output=True, text=True, timeout=10,
+        **no_window(),
     )
     if proc.returncode == 0:
         logger.info("[CAPABILITY] Successfully terminated pid %s for '%s'", browser_pid, target)

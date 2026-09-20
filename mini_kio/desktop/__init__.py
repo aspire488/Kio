@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from mini_kio.core.win_spawn import no_window
+
 logger = logging.getLogger("mini_kio.desktop")
 
 
@@ -30,6 +32,7 @@ class WindowManager:
                     ConvertTo-Json
                 """],
                 capture_output=True, text=True, timeout=10,
+                **no_window(),
             )
             import json
             data = json.loads(result.stdout or "[]")
@@ -61,6 +64,7 @@ class WindowManager:
                     return $false
                 """],
                 capture_output=True, text=True, timeout=5,
+                **no_window(),
             )
             success = "True" in result.stdout
             return {"success": success, "message": f"{'Focused' if success else 'Could not find'} window: {title}"}

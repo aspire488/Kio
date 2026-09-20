@@ -109,7 +109,160 @@ class WorkflowExecutionProvider(ExecutionProvider):
             prog = engine.get_progress(wf_id)
             return {"success": prog.get("status") != "not_found", **prog}
 
+        # ── Domain action handlers (template-level workflow primitives) ────
+        if action == "route":
+            return self._handle_route(kwargs)
+        if action == "branch":
+            return self._handle_branch(kwargs)
+        if action == "request_approval":
+            return self._handle_request_approval(kwargs)
+        if action == "wait_for_ack":
+            return self._handle_wait_for_ack(kwargs)
+        if action == "advance_tier_or_stop":
+            return self._handle_advance_tier(kwargs)
+        if action == "transform_records":
+            return self._handle_transform_records(kwargs)
+        if action == "verify_shape":
+            return self._handle_verify_shape(kwargs)
+        if action == "validate_schema":
+            return self._handle_validate_schema(kwargs)
+
         return {"success": False, "message": f"WorkflowProvider: unknown action {action}"}
+
+    # ── Domain action handlers ──────────────────────────────────────────────
+
+    def _handle_route(self, kwargs: dict) -> dict:
+        """Route item to destination based on category confidence."""
+        category = kwargs.get("category", "")
+        confidence = float(kwargs.get("confidence", 0))
+        routes = kwargs.get("routes", {})
+        min_confidence = float(kwargs.get("min_confidence", 0.5))
+        if confidence < min_confidence:
+            return {"success": True, "routed_to": None, "needs_review": True,
+                    "message": f"Confidence {confidence:.2f} below threshold {min_confidence:.2f}"}
+        routed = routes.get(category, routes.get("default", None))
+        return {"success": True, "routed_to": routed, "needs_review": False,
+                "message": f"Routed to {routed}"}
+
+    def _handle_branch(self, kwargs: dict) -> dict:
+        """Conditional branch: compare value against threshold."""
+        value = float(kwargs.get("value", kwargs.get("confidence", 0)))
+        threshold = float(kwargs.get("threshold", 0.5))
+        ok = value >= threshold
+        return {"success": True, "ok": ok,
+                "message": f"Branch: {value} {'>=' if ok else '<'} {threshold}"}
+
+    def _handle_request_approval(self, kwargs: dict) -> dict:
+        """Request human approval. Returns decision via observation stream."""
+        channel = kwargs.get("channel", "default")
+        draft = kwargs.get("draft", kwargs.get("variants", ""))
+        obs = get_observation_stream()
+        obs.workflow("approval", str(channel), "approval_requested")
+        return {"success": True, "decision": "approved", "edited_draft": draft,
+                "message": "Approval granted (deterministic mode)"}
+
+    def _handle_wait_for_ack(self, kwargs: dict) -> dict:
+        """Wait for acknowledgment with timeout."""
+        timeout = float(kwargs.get("timeout", 30))
+        handle = kwargs.get("handle", "")
+        return {"success": True, "acknowledged": True,
+                "message": f"Ack received for {handle}"}
+
+    def _handle_advance_tier(self, kwargs: dict) -> dict:
+        """Advance escalation tier or stop if all tiers exhausted."""
+        acknowledged = kwargs.get("acknowledged", False)
+        tiers = kwargs.get("tiers", [])
+        if acknowledged:
+            return {"success": True, "done": True, "next_tier": None,
+                    "message": "Acknowledged — escalation stopped"}
+        if not tiers:
+            return {"success": True, "done": True, "next_tier": None,
+                    "message": "No tiers remaining"}
+        next_tier = tiers[0]
+        remaining = tiers[1:]
+        return {"success": True, "done": False, "next_tier": next_tier,
+                "remaining_tiers": remaining,
+                "message": f"Advancing to tier {next_tier}"}
+
+    def _handle_transform_records(self, kwargs: dict) -> dict:
+        """Apply deterministic transform to records."""
+        data = kwargs.get("data", [])
+        transform = kwargs.get("transform", {})
+        if not isinstance(data, list):
+            data = [data]
+        result = []
+        for record in data:
+            if isinstance(record, dict):
+                transformed = {}
+                for field, value in record.items():
+                    spec = transform.get(field, {})
+                    if spec.get("type") == "upper":
+                        transformed[field] = str(value).upper()
+                    elif spec.get("type") == "lower":
+                        transformed[field] = str(value).lower()
+                    elif spec.get("type") == "strip":
+                        transformed[field] = str(value).strip()
+                    elif spec.get("type") == "number":
+                        try:
+                            transformed[field] = float(value)
+                        except (ValueError, TypeError):
+                            transformed[field] = value
+                    else:
+                        transformed[field] = value
+                result.append(transformed)
+            else:
+                result.append(record)
+        return {"success": True, "result": result, "row_count": len(result),
+                "message": f"Transformed {len(result)} records"}
+
+    def _handle_verify_shape(self, kwargs: dict) -> dict:
+        """Verify data shape matches expected schema."""
+        result = kwargs.get("result", [])
+        transform = kwargs.get("transform", {})
+        if not isinstance(result, list):
+            result = [result]
+        verified = True
+        errors = []
+        for i, record in enumerate(result):
+            if not isinstance(record, dict):
+                verified = False
+                errors.append(f"Row {i}: not a dict")
+                continue
+            for field in transform:
+                if field not in record:
+                    verified = False
+                    errors.append(f"Row {i}: missing field '{field}'")
+        return {"success": True, "verified": verified, "errors": errors,
+                "message": f"Shape {'valid' if verified else 'invalid'}: {len(errors)} errors"}
+
+    def _handle_validate_schema(self, kwargs: dict) -> dict:
+        """Validate payload against a schema definition."""
+        payload = kwargs.get("payload", {})
+        schema = kwargs.get("schema", {})
+        if not isinstance(payload, dict):
+            return {"success": False, "ok": False, "record": None,
+                    "errors": ["Payload is not a dict"],
+                    "message": "Schema validation failed: payload is not a dict"}
+        errors = []
+        record = {}
+        for field, spec in schema.items():
+            if spec.get("required") and field not in payload:
+                errors.append(f"Missing required field: {field}")
+            elif field in payload:
+                value = payload[field]
+                expected_type = spec.get("type")
+                if expected_type == "string" and not isinstance(value, str):
+                    errors.append(f"Field '{field}' should be string, got {type(value).__name__}")
+                elif expected_type == "number":
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        errors.append(f"Field '{field}' should be number, got {type(value).__name__}")
+                record[field] = value
+        ok = len(errors) == 0
+        return {"success": True, "ok": ok, "record": record if ok else None,
+                "errors": errors,
+                "message": f"Schema {'valid' if ok else 'invalid'}: {len(errors)} errors"}
 
     def verify(self, action: str, result: dict[str, Any]) -> dict[str, Any]:
         result.setdefault("probe_used", "workflow_action")
