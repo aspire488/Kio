@@ -1,3 +1,17 @@
+<p align="center">
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:1a1b27,100:70a5fd&height=220&section=header&text=KIO&fontSize=42&fontColor=ffffff&animation=fadeIn&fontAlignY=38&desc=Kernel%20for%20Intelligent%20Orchestration&descAlignY=56&descSize=16"/>
+</p>
+
+<p align="center">
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=20&pause=900&color=70A5FD&center=true&vCenter=true&width=720&lines=Observe+%E2%86%92+Reason+%E2%86%92+Plan+%E2%86%92+Execute+%E2%86%92+Verify;Automation+that+actually+executes+and+verifies.;Modular.+Local-first.+Execution-focused."/>
+</p>
+
+<p align="center">
+<img src="https://img.shields.io/badge/Status-Active%20Restoration%20%2F%20Integration-orange?style=for-the-badge"/>
+<img src="https://img.shields.io/badge/Architecture-Modular-blue?style=for-the-badge"/>
+<img src="https://img.shields.io/badge/Automation-63%20Templates-green?style=for-the-badge"/>
+</p>
+
 # KIO — Kernel for Intelligent Orchestration
 
 > A modular execution system for turning user intent into safe, verifiable real-world actions.
@@ -281,3 +295,11 @@ Start with:
 KIO is intended to be the execution kernel behind a capable personal intelligence system:
 
 **intent becomes a plan, the plan becomes real actions, and every important action is verified.**
+
+<p align="center">
+<img src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&size=18&pause=900&color=70A5FD&center=true&vCenter=true&width=700&lines=From+intent+to+execution.;From+execution+to+verification.;KIO+turns+plans+into+real%2C+verified+actions."/>
+</p>
+
+<p align="center">
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:70a5fd,100:0d1117&height=120&section=footer"/>
+</p>
