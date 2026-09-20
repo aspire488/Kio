@@ -22,6 +22,41 @@ KIO is the execution and orchestration layer of the broader KIO/AURA system. It 
 
 KIO is not a chat-only assistant and it is not a second workflow engine. Its job is to resolve intent into executable capability calls, enforce execution boundaries, perform real side effects, verify those side effects, and return results through the active interface.
 
+
+
+## Repository Organization
+
+The repository is intentionally split by responsibility rather than keeping audit dumps at the root:
+
+```text
+mini_kio/                 Runtime and execution kernel
+automation/               Workflow definitions and schema
+adapters/                 External/provider adapters
+browser/                  Browser execution infrastructure
+communication/            Interface/communication integrations
+runtime/                  Runtime/lifecycle support
+tests/                    Automated and live validation
+docs/
+  automation/             Automation design, matrices, audits
+  capabilities/           Capability implementation/contracts/tests
+  browser/                Browser design and validation
+  providers/              Provider readiness and integration reports
+  phases/                 Phase/gate implementation records
+  validation/             Live/stabilization/acceptance evidence
+  recovery/               Recovery and provenance records
+  integrations/           External ecosystem integration documentation
+reports/                  Focused engineering reports
+scripts/
+  audit/                  Audit and inventory utilities
+  validation/             Live/smoke/acceptance utilities
+  diagnostics/            Debug and diagnostic utilities
+missions/                 Reproducible mission definitions
+snapshots/                Versioned/recovery snapshots
+workspace/                Workspace support
+```
+
+Root-level source is kept deliberately small: repository policy/configuration, the primary README, and other files that genuinely belong at the project root. Historical audit material and one-off validation scripts belong in their respective documentation/script folders.
+
 ## Current Repository State
 
 This branch contains the current KIO restoration/current engineering state rather than the older minimal CLI snapshot represented by `main`.
