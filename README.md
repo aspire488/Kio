@@ -14,7 +14,7 @@
 
 # KIO — Kernel for Intelligent Orchestration
 
-> A modular execution system for turning user intent into safe, verifiable real-world actions.
+> **KIO (Kernel for Intelligent Orchestration)** is a modular, local-first execution kernel that turns user intent into real actions through explicit planning, capability resolution, security gates, provider dispatch, execution, and verification. It is designed as the execution layer of the broader KIO/AURA architecture: cognition can reason about ambiguity, while KIO owns deterministic execution, safety, state, and proof that important side effects actually occurred.
 
 KIO is the execution and orchestration layer of the broader KIO/AURA system. It is designed around:
 
