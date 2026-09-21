@@ -90,6 +90,32 @@ Interfaces own transport and rendering. KIO owns dispatch, safety, capability re
 
 ## Architecture
 
+
+### System boundary
+
+```mermaid
+flowchart TB
+    U[User / Interface] --> I[Intent + Context]
+    I --> P[Planner]
+    P --> G[Security + Capability Resolution]
+    G --> X[Execution Boundary]
+    X --> T[Providers / Tools]
+    X --> B[Browser]
+    X --> M[MCP Gateway]
+    X --> F[Filesystem / Terminal]
+    X --> C[Communication]
+    T --> V[Verification]
+    B --> V
+    M --> V
+    F --> V
+    C --> V
+    V --> S[State + EventBus + Response]
+    S --> U
+    A[AURA cognition layer] <--> P
+```
+
+The key boundary is deliberate: **KIO owns side effects and verification; cognition can propose strategy, but execution passes through the kernel.**
+
 ```text
 User
   │
