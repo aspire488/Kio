@@ -14,6 +14,8 @@
 
 # KIO — Kernel for Intelligent Orchestration
 
+> **Current engineering status — September 25, 2026:** **Active restoration / integration + convergence audit.** Gate 5 is not the current completion state. The repository's Constitution still defines an evidence-driven audit and Master Convergence Plan as the current phase mandate.
+
 > **KIO (Kernel for Intelligent Orchestration)** is a modular, local-first execution kernel that turns user intent into real actions through explicit planning, capability resolution, security gates, provider dispatch, execution, and verification. It is designed as the execution layer of the broader KIO/AURA architecture: cognition can reason about ambiguity, while KIO owns deterministic execution, safety, state, and proof that important side effects actually occurred.
 
 KIO is the execution and orchestration layer of the broader KIO/AURA system. It is designed around:
