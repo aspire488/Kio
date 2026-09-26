@@ -14,7 +14,7 @@
 
 # KIO — Kernel for Intelligent Orchestration
 
-> **Current engineering status — September 26, 2026:** **Active restoration / integration + convergence audit.** Gate 5 is not the current completion state. The repository is being reconciled against its Constitution and Master Convergence Plan; historical Gate 5 artifacts are evidence, not a project-wide completion claim. The repository's Constitution still defines an evidence-driven audit and Master Convergence Plan as the current phase mandate.
+> **Current engineering status — September 25, 2026:** **Active restoration / integration + convergence audit.** Gate 5 is not the current completion state. The repository's Constitution still defines an evidence-driven audit and Master Convergence Plan as the current phase mandate.
 
 > **KIO (Kernel for Intelligent Orchestration)** is a modular, local-first execution kernel that turns user intent into real actions through explicit planning, capability resolution, security gates, provider dispatch, execution, and verification. It is designed as the execution layer of the broader KIO/AURA architecture: cognition can reason about ambiguity, while KIO owns deterministic execution, safety, state, and proof that important side effects actually occurred.
 
@@ -321,7 +321,7 @@ The goal is to extend KIO without creating parallel routers, duplicate execution
 
 This branch represents the **current restoration/integration state**, not the early prototype represented by the historical `main` README.
 
-The automation library has been recovered and validated, runtime acceptance infrastructure has been integrated, and the repository contains the current implementation and engineering evidence. The current work is convergence: reconciling implementation, documentation, tests, recovery artifacts, and integration boundaries before declaring a new completion state.
+The automation library has been recovered and validated, runtime acceptance infrastructure has been integrated, and the repository contains the current implementation and engineering evidence.
 
 Runtime acceptance remains evidence-driven: a template is not considered fully proven merely because its YAML/schema is valid. Provider availability, credentials, real execution, and verification of the resulting side effect determine runtime status.
 
