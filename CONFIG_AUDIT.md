@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Present in .env | Yes (line 9) |
-| Format | `8935872380:AAFIlb95Zm4WBub7LAT3ulg_RwEDRXU9Afg` (46 chars, botID:hash) |
+| Format | Not stored in tracked documentation; provide `TELEGRAM_TOKEN` through a local environment variable. |
 | Loaded by `config.py` | Yes (`os.getenv("TELEGRAM_TOKEN", "").strip()`) |
 | Loaded by `kio_bot.py` | Yes (`from mini_kio.core.config import TELEGRAM_TOKEN`) |
 | Malformed | No — correct format |
@@ -44,7 +44,7 @@ The runtime bootstrap (`runtime.py:bootstrap_runtime()`) checks `TELEGRAM_TOKEN`
 
 ## ROOT CAUSE SUMMARY
 
-- Token: VALID
+- Token: Not stored in the repository; verify through local runtime configuration.
 - Proxy: NONE
 - Custom endpoint: NONE
 - **Network: api.telegram.org resolves to unreachable IP `49.44.79.236` (ISP DNS poisoning).**
